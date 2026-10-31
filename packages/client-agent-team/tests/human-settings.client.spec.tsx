@@ -1,0 +1,269 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { AgentTeamHumanProfileResult } from '@grantyuan/dsh-crew/types'
+import { TeamHumanIdentity, type TeamHumanIdentityLoader } from '../src/client/human-identity.ts'
+import { TeamEnvironmentCheck, type TeamEnvironmentLoader } from '../src/client/environment-check.ts'
+import { zh } from '../src/client/locales.ts'
+import { HumanSettingsSection } from '../src/client/HumanSettingsSection.tsx'
+
+const t = ((key: keyof typeof zh, params?: Record<string, string | number>) => {
+  let value: string = zh[key]
+  for (const [name, replacement] of Object.entries(params ?? {})) value = value.replace(`{${name}}`, String(replacement))
+  return value
+}) as Parameters<typeof HumanSettingsSection>[0]['t']
+
+/** A read failure in the shape the carrier produces (code/details belong to it, not to the test). */
+const readFailure = (message: string): RemoteResult<AgentTeamHumanProfileResult> =>
+  ({ ok: false, error: { message } }) as RemoteResult<AgentTeamHumanProfileResult>
+
+const PROFILE = {
+  name: 'Ada',
+  version: '0.1.13',
+  repoUrl: 'https://github.com/grantyuan/dsh-crew',
+  updateAvailable: false,
+}
+
+/** One identity store over a fake Remote pair: the page's real read path. */
+function identityWith(overrides: Record<string, unknown> = {}) {
+  const loadProfile = vi.fn(async () => ({ ok: true as const, value: { ...PROFILE, ...overrides } }))
+  const loadAvatarUrl = vi.fn(async () => null)
+  return { identity: new TeamHumanIdentity({ loadProfile, loadAvatarUrl } as unknown as TeamHumanIdentityLoader), loadProfile, loadAvatarUrl }
+}
+
+/** An environment projection that never settles; the reference must be stable, as React requires of a store. */
+const INERT_ENVIRONMENT = { status: 'loading' as const }
+const INERT_ENVIRONMENT_SOURCE = {
+  getSnapshot: () => INERT_ENVIRONMENT,
+  subscribe: () => () => {},
+}
+
+const GATEWAY_OFF = { enabled: false, port: 43110, token: '', listening: false }
+const GATEWAY_ON = { enabled: true, port: 43110, token: 'boot-secret', listening: true, boundPort: 43110 }
+
+/** Render the page with the faces a test cares about; the rest stay inert. */
+function renderSection(injected: Record<string, unknown> = {}) {
+  const { identity } = identityWith()
+  const props = {
+    close: () => {},
+    t,
+    identity,
+    // The environment block is a separate projection; an inert one keeps these
+    // profile-page tests about the profile page. The block's own behaviour is
+    // covered in environment-check.client.spec.tsx.
+    environment: INERT_ENVIRONMENT_SOURCE,
+    gateway: {
+      read: vi.fn(async () => GATEWAY_OFF),
+      save: vi.fn(async () => GATEWAY_OFF),
+    },
+    saveName: vi.fn(async () => undefined),
+    uploadAvatar: vi.fn(async () => undefined),
+    removeAvatar: vi.fn(async () => undefined),
+    ...injected,
+  } as unknown as Parameters<typeof HumanSettingsSection>[0]
+  return { ...render(<HumanSettingsSection {...props} />), props }
+}
+
+afterEach(cleanup)
+
+describe('Human profile page', () => {
+  it('reads the profile once and shows the name, version, and repository link', async () => {
+    const loadProfile = vi.fn(async () => ({ ok: true as const, value: PROFILE }))
+    const identity = new TeamHumanIdentity({ loadProfile, loadAvatarUrl: async () => null })
+    renderSection({ identity })
+    await waitFor(() => {
+      expect((screen.getByLabelText('名字') as HTMLInputElement).value).toBe('Ada')
+    })
+    expect(loadProfile).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('版本 0.1.13')).not.toBeNull()
+    expect((screen.getByRole('link', { name: 'GitHub' }) as HTMLAnchorElement).href).toBe(PROFILE.repoUrl)
+    // The page names what owns it, so the reader never has to guess whose
+    // profile this is among the Harness's own settings pages.
+    expect(screen.getByText(zh.humanSettingsIntro)).not.toBeNull()
+    // Nothing to update: the footnote stays the two facts it promised.
+    expect(screen.queryByText(/有新版本/)).toBeNull()
+  })
+
+  it('holds the page on a loading line until the first read settles', async () => {
+    let settle: ((value: { ok: true; value: typeof PROFILE }) => void) | undefined
+    const identity = new TeamHumanIdentity({
+      loadProfile: () => new Promise(resolve => { settle = resolve as never }),
+      loadAvatarUrl: async () => null,
+    })
+    renderSection({ identity })
+    expect(screen.getByRole('status').textContent).toBe('正在载入资料…')
+    // Every state answers the same question: this line is not part of the read.
+    expect(screen.getByText(zh.humanSettingsIntro)).not.toBeNull()
+    settle?.({ ok: true, value: PROFILE })
+    await waitFor(() => { expect(screen.getByLabelText('名字')).not.toBeNull() })
+  })
+
+  it('reports an unreadable profile with the Host reason and retries the read', async () => {
+    const loadProfile = vi.fn(async () => readFailure('host offline'))
+    const identity = new TeamHumanIdentity({ loadProfile, loadAvatarUrl: async () => null })
+    renderSection({ identity })
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('资料读不出来：host offline') })
+    // A failed read still says what the page is, next to why it is empty.
+    expect(screen.getByText(zh.humanSettingsIntro)).not.toBeNull()
+    loadProfile.mockImplementation(async (): Promise<RemoteResult<AgentTeamHumanProfileResult>> => ({ ok: true, value: PROFILE }))
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    await waitFor(() => { expect(screen.getByLabelText('名字')).not.toBeNull() })
+  })
+
+  it('keeps a refused rename in the field and reports the Host reason', async () => {
+    const saveName = vi.fn(async () => "human name 'Ada' collides with an existing Member handle")
+    renderSection({ saveName })
+    const field = await screen.findByLabelText('名字')
+    fireEvent.change(field, { target: { value: 'Ada Lovelace' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => { expect(screen.getByRole('alert')).not.toBeNull() })
+    expect(screen.getByRole('alert').textContent).toBe("名字没保存上：human name 'Ada' collides with an existing Member handle")
+    // Non-optimistic: the typed value survives the refusal.
+    expect((screen.getByLabelText('名字') as HTMLInputElement).value).toBe('Ada Lovelace')
+  })
+
+  it('clears the draft once the Host accepts the rename', async () => {
+    const saveName = vi.fn(async () => undefined)
+    renderSection({ saveName })
+    const field = await screen.findByLabelText('名字')
+    expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(field, { target: { value: 'Ada Lovelace' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => { expect(saveName).toHaveBeenCalledWith('Ada Lovelace') })
+    await waitFor(() => { expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true) })
+  })
+
+  it('refuses an empty name and an oversized or non-image file before any round trip', async () => {
+    const uploadAvatar = vi.fn(async () => undefined)
+    renderSection({ uploadAvatar })
+    const field = await screen.findByLabelText('名字')
+    fireEvent.change(field, { target: { value: '   ' } })
+    expect(screen.getByText('名字不能为空。')).not.toBeNull()
+    expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
+
+    const picker = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(picker, { target: { files: [new File(['x'], 'notes.txt', { type: 'text/plain' })] } })
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('只收图片文件。') })
+    const tooLarge = new File(['x'], 'big.png', { type: 'image/png' })
+    Object.defineProperty(tooLarge, 'size', { value: 11 * 1024 * 1024 })
+    fireEvent.change(picker, { target: { files: [tooLarge] } })
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('图片不能超过 10MB。') })
+    expect(uploadAvatar).not.toHaveBeenCalled()
+  })
+
+  it('draws the uploaded avatar and offers removal only while one is configured', async () => {
+    const identity = new TeamHumanIdentity({
+      loadProfile: async () => ({ ok: true, value: { ...PROFILE, avatarRef: 'avatar:1' } }),
+      loadAvatarUrl: async () => 'data:image/png;base64,AAAA',
+    })
+    const removeAvatar = vi.fn(async () => undefined)
+    renderSection({ identity, removeAvatar })
+    await waitFor(() => { expect(document.querySelector('img')).not.toBeNull() })
+    expect(document.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,AAAA')
+    fireEvent.click(screen.getByRole('button', { name: '移除头像' }))
+    await waitFor(() => { expect(removeAvatar).toHaveBeenCalledTimes(1) })
+  })
+
+  it('keeps the initial when the stored avatar cannot be decoded', async () => {
+    const identity = new TeamHumanIdentity({
+      loadProfile: async () => ({ ok: true, value: { ...PROFILE, name: 'Ada', avatarRef: 'avatar:1' } }),
+      loadAvatarUrl: async () => 'data:image/png;base64,AAAA',
+    })
+    renderSection({ identity })
+    const image = await waitFor(() => {
+      const node = document.querySelector('[data-avatar="image"]')
+      if (node === null) throw new Error('avatar image not mounted')
+      return node
+    })
+    // The Host stores any `image/…` payload without decoding it, so a stored
+    // reference is not evidence of a picture — the seat decides.
+    fireEvent.error(image)
+    await waitFor(() => { expect(document.querySelector('[data-avatar="initial"]')?.textContent).toBe('A') })
+    expect(document.querySelector('img')).toBeNull()
+  })
+
+  it('falls back to the initial when the avatar bytes cannot be read', async () => {
+    const identity = new TeamHumanIdentity({
+      loadProfile: async () => ({ ok: true, value: { ...PROFILE, name: 'zoe', avatarRef: 'avatar:gone' } }),
+      loadAvatarUrl: async () => null,
+    })
+    renderSection({ identity })
+    await waitFor(() => { expect(screen.getByText('Z')).not.toBeNull() })
+    expect(document.querySelector('img')).toBeNull()
+    expect(screen.getByRole('button', { name: '移除头像' })).not.toBeNull()
+  })
+
+  it('carries the environment check for the installation it runs in', async () => {
+    // The block is a separate projection fed through the section's injected
+    // face; this pins the wiring between the two, so a page that stopped
+    // passing the face would fail here rather than silently render nothing.
+    const environment = new TeamEnvironmentCheck({
+      loadEnvironment: async () => ({
+        ok: true,
+        value: {
+          verdict: 'out-of-range',
+          bundleVersion: '0.1.15',
+          dshVersion: '0.1.6',
+          certifiedDshVersion: '0.1.7-rc.1',
+          supportRange: { lower: '0.1.7-rc.1', upper: '0.1.8' },
+        },
+      }),
+    } as unknown as TeamEnvironmentLoader)
+    renderSection({ environment })
+    await waitFor(() => { expect(screen.getByText(zh.environmentOutOfRangeTitle)).not.toBeNull() })
+    // Above the version footnote, which is the page's other version fact.
+    const footnote = screen.getByText('版本 0.1.13')
+    expect(screen.getByText(zh.environmentOutOfRangeTitle).compareDocumentPosition(footnote))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+})
+
+describe('External agent gateway controls', () => {
+  it('renders the current controls and the live listening state', async () => {
+    renderSection({ gateway: { read: vi.fn(async () => GATEWAY_ON), save: vi.fn(async () => GATEWAY_ON) } })
+    await waitFor(() => { expect(screen.getByText('监听中 · 端口 43110')).not.toBeNull() })
+    expect((screen.getByLabelText('启用外部 Agent 网关') as HTMLInputElement).checked).toBe(true)
+    expect((screen.getByLabelText('端口') as HTMLInputElement).value).toBe('43110')
+    expect((screen.getByLabelText('Boot token') as HTMLInputElement).value).toBe('boot-secret')
+  })
+
+  it('saves only what changed and lands on the post-reconcile view', async () => {
+    const save = vi.fn(async () => GATEWAY_ON)
+    renderSection({ gateway: { read: vi.fn(async () => GATEWAY_OFF), save } })
+    const enable = await screen.findByLabelText('启用外部 Agent 网关')
+    // Enabling without a token refuses locally: the hint appears, the save
+    // button stays disabled, and no round trip is spent.
+    fireEvent.click(enable)
+    await waitFor(() => { expect(screen.getByText('启用前请先填写 Boot token。')).not.toBeNull() })
+    expect((screen.getByRole('button', { name: '保存网关设置' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(save).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('Boot token'), { target: { value: 'boot-secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存网关设置' }))
+    await waitFor(() => { expect(save).toHaveBeenCalledWith({ enabled: true, token: 'boot-secret' }) })
+    // The saved view is what the page shows: the listener is up.
+    await waitFor(() => { expect(screen.getByText('监听中 · 端口 43110')).not.toBeNull() })
+  })
+
+  it('keeps a refused edit in the fields and reports the Host reason', async () => {
+    const save = vi.fn(async () => { throw new Error('gateway port 80 is not free') })
+    renderSection({ gateway: { read: vi.fn(async () => GATEWAY_OFF), save } })
+    fireEvent.change(await screen.findByLabelText('端口'), { target: { value: '80' } })
+    fireEvent.change(screen.getByLabelText('Boot token'), { target: { value: 'boot-secret' } })
+    fireEvent.click(screen.getByLabelText('启用外部 Agent 网关'))
+    fireEvent.click(screen.getByRole('button', { name: '保存网关设置' }))
+    await waitFor(() => { expect(save).toHaveBeenCalledWith({ enabled: true, port: 80, token: 'boot-secret' }) })
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('网关设置没保存上：gateway port 80 is not free') })
+    // Non-optimistic: the typed values survive the refusal.
+    expect((screen.getByLabelText('端口') as HTMLInputElement).value).toBe('80')
+    expect((screen.getByLabelText('Boot token') as HTMLInputElement).value).toBe('boot-secret')
+  })
+
+  it('reports an unreadable gateway config inside the row, not as a dead page', async () => {
+    renderSection({ gateway: { read: vi.fn(async () => { throw new Error('host offline') }), save: vi.fn(async () => GATEWAY_OFF) } })
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toBe('网关设置读不出来：host offline') })
+    // The page's own identity rows stay readable beside the failed row.
+    expect(screen.getByLabelText('名字')).not.toBeNull()
+  })
+})

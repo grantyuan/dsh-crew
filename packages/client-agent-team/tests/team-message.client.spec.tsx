@@ -1,0 +1,445 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render } from '@testing-library/react'
+import type { AgentTeamChannelRef, AgentTeamMemberId, AgentTeamMessageRef, AgentTeamThreadRef } from '@grantyuan/dsh-crew/types'
+import { zh } from '../src/client/locales.ts'
+import type { TeamPagePayload } from '../src/client/slots.ts'
+import { rememberResolvedThreadRef, type ResolvedThreadRef } from '../src/client/refs.ts'
+import { TeamMessage } from '../src/client/TeamMessage.tsx'
+
+const t = ((key: keyof typeof zh, params?: Record<string, string | number>) => {
+  let value: string = zh[key]
+  for (const [name, replacement] of Object.entries(params ?? {})) value = value.replace(`{${name}}`, String(replacement))
+  return value
+}) as TeamPagePayload['t']
+
+afterEach(cleanup)
+
+function hasClassToken(element: Element, token: string): boolean {
+  return [...element.classList].some(className => className.includes(token))
+}
+
+function spansWithText(container: HTMLElement, text: string): HTMLElement[] {
+  return [...container.querySelectorAll('span')].filter(span => span.textContent === text)
+}
+
+describe('TeamMessage structured mention rendering', () => {
+  it('renders chips inline for plain-prose agent bodies', () => {
+    const { container } = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="@lead please look" mentionNames={['lead']} />,
+    )
+    const chips = spansWithText(container, '@lead')
+    expect(chips).toHaveLength(1)
+    expect(hasClassToken(chips[0]!, 'mention')).toBe(true)
+    const bodyDiv = chips[0]!.closest('div')
+    expect(bodyDiv).not.toBeNull()
+    expect(hasClassToken(bodyDiv!, 'messageText')).toBe(true)
+    expect(container.textContent).toContain('please look')
+    expect([...container.querySelectorAll('div')].some(div => hasClassToken(div, 'mentionsRow'))).toBe(false)
+  })
+
+  it('falls back to the trailing chip row for rich markdown agent bodies without ref navigation', () => {
+    const { container } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={'```js\nconst lead = 1\n```\nping @lead'}
+        mentionNames={['lead']}
+      />,
+    )
+    expect(container.textContent).toContain('const lead = 1')
+    expect([...container.querySelectorAll('div')].filter(div => hasClassToken(div, 'mentionsRow'))).toHaveLength(1)
+    const row = [...container.querySelectorAll('div')].find(div => hasClassToken(div, 'mentionsRow'))
+    expect(row?.textContent).toContain('@lead')
+    expect([...container.querySelectorAll('div')].some(div => hasClassToken(div, 'messageText'))).toBe(false)
+  })
+
+  it('renders mention chips inline in rich markdown once ref navigation exists', () => {
+    const { container } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={'**计划**\n\n1. ping @lead about `task:00000000-0000-0000-0000-000000000001`\n2. 回报'}
+        mentionNames={['lead', 'builder']}
+        onOpenRef={() => {}}
+      />,
+    )
+    // The spelled handle chipifies at its prose position instead of the
+    // trailing row; only the name absent from the body keeps a fallback chip.
+    const chips = spansWithText(container, '@lead')
+    expect(chips).toHaveLength(1)
+    expect(hasClassToken(chips[0]!, 'mention')).toBe(true)
+    const row = [...container.querySelectorAll('div')].find(div => hasClassToken(div, 'mentionsRow'))
+    expect(row?.textContent).toContain('@builder')
+    expect(row?.textContent).not.toContain('@lead')
+  })
+
+  it('keeps human literal bodies on the inline flow', () => {
+    const { container } = render(
+      <TeamMessage senderName="human" memberId={'member:human' as AgentTeamMemberId} human body="ping @lead" mentionNames={['lead']} />,
+    )
+    const chips = spansWithText(container, '@lead')
+    expect(chips).toHaveLength(1)
+    expect(hasClassToken(chips[0]!.closest('div')!, 'messageText')).toBe(true)
+  })
+
+  it('keeps Team Assistant notices literal like Human input, with the authored dash lines intact', () => {
+    const { container } = render(
+      <TeamMessage
+        senderName="Team Assistant"
+        memberId={'member:assistant' as AgentTeamMemberId}
+        human={false}
+        body={'Supervision retirement — builder\n\nReleased work now unclaimed:\n- integrates the interface (task #2)\n\n@lead please reassign the items above.'}
+        mentionNames={['lead']}
+      />,
+    )
+    // The body is a fixed plain-text block, so the authored `- ` lines survive
+    // instead of becoming Markdown list items, and the ask renders as a chip.
+    expect(container.textContent).toContain('- integrates the interface (task #2)')
+    const chips = spansWithText(container, '@lead')
+    expect(chips).toHaveLength(1)
+    expect(hasClassToken(chips[0]!.closest('div')!, 'messageText')).toBe(true)
+    expect([...container.querySelectorAll('div')].some(div => hasClassToken(div, 'mentionsRow'))).toBe(false)
+  })
+
+  it('renders resolved thread refs as titled chips in rich Markdown bodies', () => {
+    const threadRef = 'thread:0f0ad7ce-11d3-4c05-8a9e-6f2b1c9d7e32' as AgentTeamThreadRef
+    const { container, findAllByRole } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={`**来源**：${threadRef} 和 \`${threadRef}\``}
+        onOpenRef={() => {}}
+        onResolveThreadRefs={async threadRefs => {
+          const entries = threadRefs.map((ref): ResolvedThreadRef => ({
+            threadRef: ref,
+            channelRef: 'channel:11111111-2222-4333-8333-111111111111' as AgentTeamChannelRef,
+            title: 'alpha discussion opens here',
+          }))
+          for (const entry of entries) rememberResolvedThreadRef(entry)
+          return entries
+        }}
+        t={t}
+      />,
+    )
+    return findAllByRole('button', { name: '讨论 · alpha discussion opens here' }).then(() => {
+      const buttons = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      expect(buttons).toHaveLength(2)
+      expect(buttons.map(button => button.getAttribute('title'))).toEqual([threadRef, threadRef])
+      expect(buttons.every(button => button.closest('[class*="messageMarkdown"]') !== null)).toBe(true)
+      expect(buttons.every(button => button.closest('[class*="mentionsRow"]') === null)).toBe(true)
+      expect(container.textContent).toContain('来源')
+    })
+  })
+
+  it('distinguishes two taskless thread chips by title and navigates on click', async () => {
+    const alphaRef = 'thread:aa0ad7ce-11d3-4c05-8a9e-6f2b1c9d7e32' as AgentTeamThreadRef
+    const betaRef = 'thread:bb0ad7ce-11d3-4c05-8a9e-6f2b1c9d7e32' as AgentTeamThreadRef
+    const opened: string[] = []
+    const { findByRole } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={`见 ${alphaRef} 和 ${betaRef}`}
+        onOpenRef={ref => { opened.push(ref) }}
+        onResolveThreadRefs={async threadRefs => {
+          const entries = threadRefs.map((ref, index): ResolvedThreadRef => ({
+            threadRef: ref,
+            channelRef: 'channel:11111111-2222-4333-8333-111111111111' as AgentTeamChannelRef,
+            title: index === 0 ? 'alpha root marker' : 'beta root marker',
+          }))
+          for (const entry of entries) rememberResolvedThreadRef(entry)
+          return entries
+        }}
+        t={t}
+      />,
+    )
+    // One chip per cited Thread, each named by its own opening line — never
+    // two identical labels the reader cannot tell apart.
+    const alphaChip = await findByRole('button', { name: '讨论 · alpha root marker' })
+    const betaChip = await findByRole('button', { name: '讨论 · beta root marker' })
+    expect(alphaChip.getAttribute('title')).toBe(alphaRef)
+    expect(betaChip.getAttribute('title')).toBe(betaRef)
+    fireEvent.click(alphaChip)
+    expect(opened).toEqual([alphaRef])
+  })
+
+  it('leaves unresolvable thread refs as plain text', async () => {
+    const unknownRef = 'thread:cc0ad7ce-11d3-4c05-8a9e-6f2b1c9d7e32' as AgentTeamThreadRef
+    const { container, findByText } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={`见 ${unknownRef} 请定夺`}
+        onOpenRef={() => {}}
+        onResolveThreadRefs={async () => []}
+        t={t}
+      />,
+    )
+    await findByText(/请定夺/)
+    // Let the failed lookup settle: unknowns park for the session instead of
+    // becoming links, so no button may appear.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(container.querySelector('button')).toBeNull()
+    expect(container.textContent).toContain(unknownRef)
+  })
+
+  it('names known channel refs and leaves unknown ones as plain text', async () => {
+    const knownRef = 'channel:11111111-2222-4333-8333-111111111111' as AgentTeamChannelRef
+    const unknownRef = 'channel:99999999-2222-4333-8333-999999999999' as AgentTeamChannelRef
+    const opened: string[] = []
+    const { container, findByRole } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={`见 ${knownRef} 和 ${unknownRef} 定夺`}
+        onOpenRef={ref => { opened.push(ref) }}
+        channelNameOf={ref => ref === knownRef ? '工程' : undefined}
+        t={t}
+      />,
+    )
+    const chip = await findByRole('button', { name: '频道 · 工程' })
+    expect(chip.getAttribute('title')).toBe(knownRef)
+    fireEvent.click(chip)
+    expect(opened).toEqual([knownRef])
+    // The unknown ref never becomes a link: exactly one button exists and the
+    // raw spelling stays in the prose.
+    expect(container.querySelectorAll('button')).toHaveLength(1)
+    expect(container.textContent).toContain(unknownRef)
+  })
+
+  it('opens openable member chips in their session and labels the rest without linking', async () => {
+    const activeRef = 'member:6e8a5b10-df16-4ec0-943a-63738010953f' as AgentTeamMemberId
+    const suspendedRef = 'member:129366fb-d55a-40a0-b931-9f5b563feeba' as AgentTeamMemberId
+    const unknownRef = 'member:00000000-0000-4000-8000-000000000000' as AgentTeamMemberId
+    const sessions: string[] = []
+    const { container, findByRole } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={`问 ${activeRef} 和 ${suspendedRef} 以及 ${unknownRef} 定夺`}
+        onOpenRef={() => {}}
+        memberOf={ref => {
+          if (ref === activeRef) return { memberId: ref, handle: 'tars', sessionId: 'session-active' as never, openable: true }
+          if (ref === suspendedRef) return { memberId: ref, handle: 'ferry', openable: false }
+          return undefined
+        }}
+        onOpenMemberSession={sessionId => { sessions.push(String(sessionId)) }}
+        t={t}
+      />,
+    )
+    const chip = await findByRole('button', { name: '成员 · @tars' })
+    expect(chip.getAttribute('title')).toBe(activeRef)
+    fireEvent.click(chip)
+    expect(sessions).toEqual(['session-active'])
+    // Suspended members keep a labelled span — informative, never a link —
+    // and unknown refs stay raw prose.
+    expect(container.querySelectorAll('button')).toHaveLength(1)
+    expect(container.textContent).toContain('成员 · @ferry')
+    expect(container.textContent).toContain(unknownRef)
+  })
+})
+
+describe('TeamMessage long-body clamp', () => {
+  const longBody = '长消息正文，用于超过折叠阈值。'.repeat(80)
+
+  function clampDivs(container: HTMLElement): HTMLElement[] {
+    return [...container.querySelectorAll('div')].filter(div => hasClassToken(div, 'messageClamp'))
+  }
+
+  it('starts over-threshold bodies clamped behind the expand control', () => {
+    const { container, getByRole } = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body={longBody} t={t} />,
+    )
+    expect(clampDivs(container)).toHaveLength(1)
+    const toggle = getByRole('button', { name: '展开全文' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    // The preview still renders the full text into the clamped container, so
+    // in-body refs and mentions stay reachable without expanding.
+    expect(container.textContent).toContain('用于超过折叠阈值')
+  })
+
+  it('expands to the full body and collapses back through the toggle', () => {
+    const { container, getByRole } = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body={longBody} t={t} />,
+    )
+    fireEvent.click(getByRole('button', { name: '展开全文' }))
+    expect(clampDivs(container)).toHaveLength(0)
+    const collapse = getByRole('button', { name: '收起' })
+    expect(collapse.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(collapse)
+    expect(clampDivs(container)).toHaveLength(1)
+    expect(getByRole('button', { name: '展开全文' }).getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('marks a long body as a document through expand and collapse', () => {
+    const { container, getByRole } = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body={`## 结论\n\n${longBody}`} t={t} />,
+    )
+    // The wrapper itself carries the mark, so the document rhythm applies to
+    // the clamped preview and the expanded body alike; the class swap that
+    // expands the clamp never drops it.
+    const documents = (): HTMLElement[] =>
+      [...container.querySelectorAll('div')].filter(div => div.hasAttribute('data-document'))
+    expect(documents()).toHaveLength(1)
+    expect(documents()[0]!.querySelector('[class*="messageMarkdown"]')).not.toBeNull()
+    fireEvent.click(getByRole('button', { name: '展开全文' }))
+    expect(documents()).toHaveLength(1)
+    fireEvent.click(getByRole('button', { name: '收起' }))
+    expect(documents()).toHaveLength(1)
+  })
+
+  it('leaves short bodies unclamped without any toggle', () => {
+    const { container } = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="短消息" />,
+    )
+    expect(clampDivs(container)).toHaveLength(0)
+    expect(container.querySelector('[data-document]')).toBeNull()
+    expect(container.querySelector('button')).toBeNull()
+  })
+
+  it('keeps the post-render mention chips across expand and collapse', () => {
+    // Rich Markdown bodies get mention chips painted into the DOM after
+    // render. Toggling the clamp must not remount that subtree, or the
+    // imperatively inserted chips vanish.
+    const longRichBody = `**计划**\n\n${'折叠回归验证段落，足够长以触发限高预览。'.repeat(40)}\n\n请 @lead 关注 \`task:0123abcd-0000-0000-0000-000000000000\`。`
+    const { container, getByRole } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body={longRichBody}
+        mentionNames={['lead']}
+        onOpenRef={() => {}}
+        t={t}
+      />,
+    )
+    const chipCount = (): number => spansWithText(container, '@lead').length
+    expect(chipCount()).toBe(1)
+    fireEvent.click(getByRole('button', { name: '展开全文' }))
+    expect(chipCount()).toBe(1)
+    fireEvent.click(getByRole('button', { name: '收起' }))
+    expect(chipCount()).toBe(1)
+  })
+})
+
+describe('TeamMessage recall tombstone and Human actions', () => {
+  const messageRef = 'message:11111111-2222-4333-8333-111111111111' as AgentTeamMessageRef
+
+  it('renders the withdrawal tombstone instead of the body once recalled', () => {
+    const { container } = render(
+      <TeamMessage
+        senderName="human"
+        memberId={'member:human' as AgentTeamMemberId}
+        human
+        body="secret instruction for @builder"
+        mentionNames={['builder']}
+        messageRef={messageRef}
+        recalled
+        t={t}
+      />,
+    )
+    // Every reader sees one tombstone; the withdrawn text never reaches the DOM.
+    expect(container.textContent).toContain('该指令已被用户撤回')
+    expect(container.textContent).not.toContain('secret instruction')
+    // The page withholds editable on recalled rows, so no action row exists here.
+    expect(container.querySelector('[class*="messageActions"]')).toBeNull()
+  })
+
+  it('offers edit, withdraw, and delete actions on the Human’s own Messages', () => {
+    const edits: Array<[AgentTeamMessageRef, string]> = []
+    const recalls: Array<[AgentTeamMessageRef, 'retracted' | 'deleted']> = []
+    const { getByRole } = render(
+      <TeamMessage
+        senderName="human"
+        memberId={'member:human' as AgentTeamMemberId}
+        human
+        body="draft the incident report @builder"
+        mentionNames={['builder']}
+        messageRef={messageRef}
+        editable
+        onEditMessage={(ref, body) => { edits.push([ref, body]) }}
+        onRecallMessage={(ref, mode) => { recalls.push([ref, mode]) }}
+        t={t}
+      />,
+    )
+    fireEvent.click(getByRole('button', { name: '修改' }))
+    expect(edits).toEqual([[messageRef, 'draft the incident report @builder']])
+    fireEvent.click(getByRole('button', { name: '撤回' }))
+    fireEvent.click(getByRole('button', { name: '删除' }))
+    expect(recalls).toEqual([[messageRef, 'retracted'], [messageRef, 'deleted']])
+  })
+
+  it('keeps action buttons off rows the Human cannot manage', () => {
+    const { container } = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="agent output" t={t} />,
+    )
+    expect(container.querySelector('[class*="messageActions"]')).toBeNull()
+    expect(container.querySelectorAll('button')).toHaveLength(0)
+  })
+})
+
+describe('TeamMessage reply action', () => {
+  const messageRef = 'message:11111111-2222-4333-8333-111111111111' as AgentTeamMessageRef
+
+  it('offers a reply action on Agent Messages and reports the quoted Message with its sender', () => {
+    const replies: Array<[AgentTeamMessageRef, string, AgentTeamMemberId]> = []
+    const { getByRole } = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body="我已完成第一步，请确认下一批输入"
+        messageRef={messageRef}
+        replyable
+        onReplyMessage={(ref, body, sender) => { replies.push([ref, body, sender]) }}
+        t={t}
+      />,
+    )
+    fireEvent.click(getByRole('button', { name: '回复' }))
+    expect(replies).toEqual([[messageRef, '我已完成第一步，请确认下一批输入', 'member:builder']])
+  })
+
+  it('keeps the reply action off Human rows and recalled tombstones', () => {
+    const human = render(
+      <TeamMessage
+        senderName="human"
+        memberId={'member:human' as AgentTeamMemberId}
+        human
+        body="我自己的指令"
+        messageRef={messageRef}
+        editable
+        onEditMessage={() => {}}
+        onRecallMessage={() => {}}
+        onReplyMessage={() => {}}
+        t={t}
+      />,
+    )
+    // Human rows keep only their own management actions; the quote answers Agents.
+    expect(human.getByRole('button', { name: '修改' })).toBeTruthy()
+    expect(human.queryByRole('button', { name: '回复' })).toBeNull()
+    human.unmount()
+    const recalled = render(
+      <TeamMessage
+        senderName="Builder"
+        memberId={'member:builder' as AgentTeamMemberId}
+        human={false}
+        body="agent output"
+        messageRef={messageRef}
+        replyable
+        recalled
+        onReplyMessage={() => {}}
+        t={t}
+      />,
+    )
+    expect(recalled.queryByRole('button', { name: '回复' })).toBeNull()
+    recalled.unmount()
+  })
+})

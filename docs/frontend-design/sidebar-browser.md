@@ -1,0 +1,158 @@
+# Sidebar browser
+
+English | [中文](sidebar-browser.zh.md)
+
+The Workspace is one selector line, not a list. Channels and Agents below it belong to exactly one Workspace; collapsing it into a single trigger makes the sidebar read as "you are in X, and here is X's content" and returns the rows a low-frequency switch was holding.
+
+Nothing is hidden by that collapse — Workspace rows carry no unread mark of their own, and cross-Workspace unread is summarized by the Inbox entry, which stays above the selector: that entry's total sums every visible Workspace, so it is the one destination the selector does not scope, and it must not read as one of the rows under the line that names a single Workspace. When there is no Workspace to state — an empty roster, or a selection the roster no longer carries — the browser says so in the selector's own seat instead of rendering a dead field.
+
+The trigger is the bordered single-choice field shape the creation forms already use (`.workspaceTrigger`, 12px radius, 34px line, `aria-haspopup="menu"` plus `aria-expanded`), so the line that says where the reader is does not read as the first entry of the Channels list; it carries the selected folder tint permanently because it is always showing a selection, states the selection as its own text with the full path on `title`, and opens the public `Menu` with the current Workspace checked.
+
+The control's accessible name states both what the field is and which Workspace it shows (`工作区，Alpha`), because that value is invisible to a reader who cannot see the field.
+
+That menu is the only way to switch Workspaces, so it takes focus on open: a portaled list is placed a frame after it mounts, so the selector focuses the opened row once that list is on screen, and keeps `autoFocus` on the primitive for what the primitive owns — arrow-key movement between rows, which indexes from the focused row, and Escape's return to the trigger.
+
+The trigger takes `aria-current="page"` while the Workspace overview is the page on screen, exactly as the old selected row did, and takes the shared hover fill for it: the field's own layer is its resting background, so the fill is what marks the page.
+
+Persistent Channels/Agents sections use native button headers with `aria-expanded`, default expanded. Collapse state is a per-browser preference, not a Team fact: both panels are keyed per workspace, and `sidebar-sections.ts` persists them to one localStorage key (`dsh.agent-team.sidebar-sections`) with a read-through cache and an in-memory fallback when storage is unavailable — the Workspace selector is a field rather than a section, so it keeps no preference of its own. Rows remain quiet: Channels keep `#`; Agent rows use avatars and presence.
+
+Only the active leaf row has `aria-current="page"`. The embedded Member Session is the one overlay that can stand over a Team face the reader is still on — an Inbox page, or a Channel or Thread they opened the Agent from — and it takes the marker for its own Agent card: the face underneath keeps its place without the marker, and takes it back when the overlay closes (the Inbox entry included, which is otherwise the marked row while its page stands).
+
+Row ellipsis menus use public `Menu`, are visible on hover/focus/menu-open, and pin the row background while open.
+
+Channel and Agent editors use public Remote mutations and Host projections rather than optimistic inline edits. Agent model selection uses the public menu and Host model directory; changing an active model preserves Member and Session identity. Selecting an Agent opens its embedded Session without leaving Team mode; explicit Team navigation closes that overlay.
+
+When a Member rolls over to a fresh context through `context_rollover`, the Agents panel observes the old→new Session binding and follows exactly once — only when the embedded page equals the observed old live Session id — and never redirects an archive view.
+
+Live Members (active availability) also get two context actions in the row menu: 重置 (reset) renews the Member Session through `clearMemberContext` behind a destructive confirm and rebinds an embedded seat to the renewed Session, and 压缩 (compact) schedules one context compaction through `compactMemberContext`, optionally pinning the summarization LLM in the same model picker the editors use — the dialog acknowledges at schedule time, because the Host runs the reduction behind the Member's current activity.
+
+Every row additionally carries 历史会话: it takes over the conversation seat with the Member's read-only session-history audit page — Session generations listed newest-first (the live one marked) and a bounded cursor-paged transcript of the selected generation through `memberSessions` and `memberSessionTranscript`, rendered as authored Markdown per lane. It never activates or writes a Session, so archived logs stay browsable.
+
+Every row also carries 已暂停任务: a dialog over the Member's durable pending-interrupt stack through `memberInterrupts` — newest-first entries with the Host's restorable verdict (an anchor the lineage walk cannot prove today reads as unverified, never as optimistically returnable) and a 释放 control per entry through `resolveMemberInterrupt`. The stack reads for every lifecycle state because it is a ledger read; `resumed` closes stay the Host's own and are never offered here.
+
+The narrow rail's five icon buttons read top-down Inbox (`IconQueueOutlineRegular` at 16px) → Tasks (`IconChecklistOutlineRegular`) → Message center (`IconBrowseOutlineRegular`) → Channels (`IconListPenOutline16`) → Agents (`IconAgentPresetOutline16`); no two faces share a glyph, and none reuse the checklist (Task) or member icons.
+
+The Inbox icon is a destination: clicking it opens the Inbox page and expands the sidebar; the Tasks icon opens the Tasks page; the Message center icon opens the Message center (see [Message center](message-center.md)); the Channels/Agents icons expand the sidebar and focus their section header.
+
+Agent creation carries no Channel page and the Agent editor carries no membership section: Channel membership is managed from the Channel side (create-dialog initial members, Channel editor member rows, and the member-management dialog); a Channel-less Member stays reachable through its DM view.
+
+The create dialog is also the one import entry: a single disclosure button toggles between creating a new Member and bringing an existing one in from another Workspace. The import view reuses the shared `TeamMemberRow` roster and offers only Members that exist globally and do not yet participate here (suspended Members included — joining does not depend on availability); confirming routes the durable `joinWorkspace` and the row appears through the workspace refetch, with retry reusing the exact failed request.
+
+The row's destructive action splits by context — on a non-creation Workspace it withdraws that participation only (with its own confirm copy stating what stays), while on the creation Workspace it archives the whole Member, naming the other Workspaces it will disappear from. There is deliberately no per-Workspace badge on Agent rows: participation is visible through presence in each Workspace's list, not through labels. Members appear in every participated Workspace's list through the Host's participation projection — no Client-side filtering on top.
+
+The dialog body keeps one block rhythm — the mode switch is its first block, a 16px step above the content it switches — while the roster inside it keeps the shared 2px row density and states its caption and its loading/empty lines at the dialog's own 12/18 caption scale, so bringing a Member in does not draw the same list at a second density or its notice at title size.
+
+The embedded Member Session input surface is the shipped composer itself, unmodified: the Team registers no member-session composer surface at all — no shadow, no trigger sources, no dock strip. The keyboard contract, command and reference menus, and attachments are exactly the ordinary session's.
+
+Team mode stands the sidebar's global chrome down the same way: the shipped New Session button and the global panel rail — today the Plugins entry `ui-plugin-manager` contributes to `sidebar.panellist` — address the profile rather than the Team, so both hide while `html[data-agent-team-mode='team']` stands and return the moment Team is left.
+
+SlotCore cannot withdraw another plugin's list row and the entry's label is localized, so the rule keys off the mode attribute and the shipped `panelList` class substring instead of the copy; ordinary conversations keep both, and the browser test pins the transition from both sides — visible before entering Team, present but hidden inside it.
+
+## Inbox (收件箱)
+The Inbox entry is the first of the three global cards on the wide rail above the Workspace selector — its total sums the unread of every visible Workspace, so it is the one destination that outlives the scope the selector names, and it leads the sidebar instead of standing inside that scope — and the rail's first icon on the narrow rail, where no selector exists to lead. The Tasks card and the Message center card follow it with the same global-face discipline and no scope of their own.
+
+The entry marks its own fact the same way — a dot on the icon's top-left corner, standing for the sum of each visible Workspace's slice with mentions counted inside the Inbox total rather than alone, and rendering nothing at zero: nothing waiting is the absence of the mark, not an empty dot.
+
+The dot is 8px of `--dsw-alias-state-business-primary` — the solid ink the queue gives a Thread that named this reader, so one colour still means "this needs you" wherever it appears — ringed by 2px of whatever surface carries it — `--team-mark-ring`, which every surface that fills hands the fill it is actually on (the card on hover and as the current page, the rail button on hover, focus, and as the current page).
+
+That fill is translucent, so the ring paints two layers — the fill over that surface's own opaque fill — because the wash alone would darken an already-darkened surface a second time and read as a halo instead of a ring.
+
+The avatar stack keeps the same rule (`avatar-stack.module.css`), and each side names its own surface: the sidebar dot cuts out of `--dsw-specific-sidebar-fill`, the fill the Agent badge cuts itself out of, while the chips on Inbox page rows and Channel feed entry rows sit on the page fill `--dsw-alias-bg-base`; handing over no fill leaves both layers the same colour, which draws nothing extra — so it reads as a mark laid over the icon's strokes instead of one blending into them, on a filled card as much as on a plain one.
+
+It hangs off the icon's own wrapper (`.inboxMark`: `position: relative`, `flex: 0 0 16px`) at `-2px` on both axes, which is what puts the same dot on the same corner of the same glyph whether that icon sits in the 34px card or in the 36px rail button; on the narrow rail the mark thus stays inside the control box that the rail region clips its overflow to.
+
+The number lives in the control's accessible name on both rails (`收件箱，6 条未读`) and the rail's hover hint — one hover away, never printed in the sidebar.
+
+While the Inbox page stands, the card/icon carries `aria-current="page"` — and the rail icon wears the card's own current-page fill, because the icon-only rail has no label and the fill is the only thing that can say where the reader is.
+
+`TeamConversation` renders the same faces under one owner: Thread | Channel | Inbox | Tasks | Message center | welcome. Selecting Inbox, Tasks, or the Message center clears the Channel/Thread faces and each other; selecting a Workspace, Channel, or Thread clears all three. A Thread opened from one of those lists remembers that list as its origin: Back reads 返回收件箱列表, 返回任务列表, or 返回消息中心 and returns there, while a Thread entered from its Channel keeps Back on the Channel timeline. The origin is durable, so a reload keeps the right Back target.
+
+The Tasks page keeps the same global-position discipline as the Inbox: a durable navigation face, merged across Workspaces, with a scope-less subscription; a row click lands on that Task's Thread through the same select-Thread path the Inbox row uses.
+
+### Page frame and header
+
+The page rides the shared conversation seat — the same header band, 880px centered reading column, `clamp(18px, 3vw, 36px)` gutters, and stable scrollbar gutter Channel and Thread use. Its header carries the page h1 plus one count line built as segments rather than a sentence: the Thread count, the whole-unread total the page is about in primary 600 ink while its neighbours stay secondary, and the mention total only while the queue actually holds one.
+
+Spacing alone separates the segments, so a squeezed seat can wrap this line without dragging punctuation to the front of a line — and each segment names its own unit.
+
+The band's right edge carries one 排序 control: a labelled native select offering 最新回复 (the default), 创建时间, 未读数量, and 提及数量. Both slices re-lay under the chosen key with the Host's own order as the tiebreaker, and the choice rides `localStorage` (`dsh.agent-team.inbox-sort`) as a per-browser taste, never a Team fact.
+
+Beside it stands the page's one whole-queue action, 全部已读: it reads every Thread the queue still holds unread through, one durable read each, so the reader's own mark clears across the page instead of Thread by Thread. It acts on the queue alone — 「最近活跃」 holds no unread to clear — and it is unavailable while the queue holds none.
+
+A Thread it reads is never answered by it: the row leaves the queue, and where it lands afterwards is the Host's admission rule rather than the button's promise — the tail is the Threads this reader wrote in, so one they wrote in falls back into 「最近活跃」 while one they merely followed or were named in leaves the page. The entry's own dot follows the completed reads down. The button reads 已读中… while the sweep runs, and one refusal stops it and prints 没能清除未读，请重试 on the page's line.
+
+The 「最近活跃」 five-row cap is cut in the Host's order before the reader's key re-lays the rows, so changing the sort re-orders the same five ways back into work instead of swapping which Threads are on screen.
+
+### The two slices, and the partition inside each
+
+It reads one Inbox call per visible Workspace and partitions what comes back rather than merging the Workspaces flat: a Workspace heading, a Channel heading nested under it. A Thread then lands under the same two names every time, and the reader never has to read where a row came from off the row itself.
+
+Each Workspace slice arrives in the Host's own order — mentions first, then newest, the Thread ref breaking ties — which the page keeps as the stable tiebreaker inside a Channel group: the reader's own sort key re-lays only the rows inside a group, and group order stays fixed, so re-sorting never moves a group or changes which rows exist.
+
+The page renders the Host's two slices: 「需要我」, the unread queue the header totals above describe, and 「最近活跃」, the Threads this reader has written a Message in — newest activity first, at most five across every Workspace, never one the queue already holds — drawn by the same row component with its count capsule absent — zero is the absence of a badge rather than a badge reading zero, and such a row keeps the leading cluster every counted row opens on.
+
+Both slices are partitioned the same way, each carrying its own Workspace and Channel headings.
+
+It never acknowledges anything: opening the page is not a read; only a durable Thread read clears its marker and the badge (see [Thread Attention and Inbox](../team-collaboration/)).
+
+### Row anatomy
+
+Each row is one full-width 8px-radius queue row in the shipped two-line result-row shape — 8px inset, shared `--dsw-alias-interactive-bg-hover` fill, inset focus ring — laid out as a grid whose first track belongs to whoever is on the Thread and is exactly as wide as the cluster it draws, plus the line's 8px gap.
+
+A leading cluster hangs there on every row — counted or not, which is the point, because a track reserved for a count is empty on every Thread with nothing waiting.
+
+It centres on the identity line it leads rather than sharing that line's baseline, because the chip that is the Human's picture has none to share: a browser reads a replaced box as resting on its bottom edge, so baseline alignment dropped the identity line 4px and made that row 4px taller while an initial-led row stayed put (the shipped two-line row centres its own marker on its heading line the same way, `.searchResultHeading`).
+
+Everything the row says opens on the column after it, so the identity line, the gist under it, and the section heading above it share one left edge (34px from the row's edge) on every row that draws a single face — which is what the section heading is inset to. A stack widens its own row by 12px per extra face instead of every other row reserving the width of the widest stack. The row has three left edges where it had two: the count and the gist at 8px, the provenance at 34px, and the section heading a third.
+
+### Information order
+
+The row carries the Human-fixed information order.
+
+(0) Every row opens with who is on it — the Task's live Claim owners where it has any, drawn as the shared 18px Member stack in the Channel feed's own words (`claimers`) and by its own rule (the Thread entry row above states it: unreleased Claims of a Task still in progress or review, in Claim order, deduped), and the actor behind the row's own instant (`newestActor`) where no Claim is live, because that is all anybody knows about such a Thread.
+
+The Host resolves both, so the row needs no Member roster of its own, and the same Thread draws the same cluster in either section.
+
+(1) The identity line — the queue's own provenance, led by `Task #N` as a hairline chip when the Thread is taskful. Which Workspace and which Channel the row lives in is stated once by the headings above it, so the line keeps its position for what actually varies between rows instead of repeating two constants down the page.
+
+It stays one run and clamps to one line with an ellipsis, because a squeezed seat shortens the provenance rather than folding one row into three lines, while `overflow: hidden` stops a long marker from pushing a scrollbar into the shared timeline.
+
+The identity is what a queue reader scans for, so it carries the row's ink; while the gist held the heaviest ink and the identity the lightest, ten rows read as ten paragraphs rather than ten entries.
+
+(2) The count closes that identity line, one line-gap left of the instant — the shared count capsule (see Count capsule), filled when the Thread named this reader and drawn as a hairline in `--dsw-alias-border-l2` when it merely moved, so one grammar carries both kinds of unread the queue now mixes and only the ink separates them, and a Thread never shifts its row when it is named again.
+
+The count reads `99+` past ninety-nine, and the mention split inside it reaches assistive tech and hover through the capsule's own label — the row's visible text stays the Thread rather than a second count.
+
+(3) The gist under it — the Thread's opening line capped at 120 characters straight from the Host's `previewText`, 13px/20 secondary on the identity's own column, one line.
+
+(4) The newest instant closing the identity line behind the count — the Inbox row time of the Typography table — with the precise local `YYYY-MM-DD HH:mm` on the element's `title`.
+
+That line is its own size container: the count capsule's 18px floor, its 8px gap, and this instant's 28px together need 62px — 70px once the count reaches two digits — and below that width the instant is not drawn at all, because a queue row that cannot hold both keeps the count and its own edge instead of hanging the instant past it; the row keeps its two-line shape, and the Thread states the exact instant.
+
+(5) The row keeps its two lines and the new marks live inside them. The decision chip — `待你决策` in `--dsw-alias-state-business-primary` inside the same hairline shape the Task marker uses — sits on the identity line beside the count only while `needsHumanDecision` stands: an open Task awaiting acceptance, or the newest Message naming the Human actually asking them for a decision — naming alone never lights it.
+
+The clocks trail the gist on its own line in quiet 11px tabular ink: `创建于 …` from the Host's `createdOccurredAt`, then `@name 回复于 …` from `latestReplyActor` and `latestReplyOccurredAt`, each segment carrying its exact instant in its `title`, the reply actor drawn from the Client's Human identity where the reader was the one who replied.
+
+Absence and yielding draw the zero the way the row already does: a Thread nobody has answered shows no reply segment, a Thread that waits on nobody shows no chip, and the second line is a size container too — a seat under 340px yields the clocks entirely rather than fold the row, exactly as the identity line yields the instant when it cannot hold it.
+
+### Section counts and row activation
+
+Each section heading carries its own slice's count — the queue's, and the tail's as the five it was capped to — inset to that same 34px column, and the Workspace heading inside it takes that same inset while its nested Channel heading sits one step further in and one step quieter, so the two levels never read as siblings. Clicking a row selects the row's Workspace and opens its Thread.
+
+### States and subscriptions
+
+The empty state speaks the shared empty-state language — the same 13px `strong` title and 12px hint pair Channel and Thread use — reading 「收件箱是空的」 with the hint 「你参与的 Thread 有新活动、或有人提到你时，会出现在这里」; loading, error, and retry reuse the shared conversation classes, and a failed background refresh keeps the rows and reports through `role="alert"` in `--dsw-alias-state-error-primary`.
+
+While the page is open it subscribes once without a change scope and refetches the list on every wake; closed, the fetches stop.
+
+The badge subscribes the same way for its totals and re-pulls only totals (`limit: 1`), never lists. The badge additionally refreshes from every completed durable Thread read: the Host's changes stream deliberately never wakes on reads (a read changes no shared projection), but the read consumes this reader's unread facts, markers included.
+
+## Tasks (任务)
+
+The Tasks page is the Human's cross-Workspace Task list: every Task with its sub-task linkage and live progress, readable without opening a Thread. It reuses the Inbox page frame — the same shared surface classes, the two-section rhythm (进行中 above 已完成), and the section counts — and the Inbox row geometry: a status dot in the gutter, the crumb line naming the Workspace when more than one participates, the per-Channel ordinal chip, the derived status, owners as an avatar stack, and the relative instant trailing.
+
+A parent row adds its sub-task progress (`n/m 子任务`); the subject is the preview line. Sub-tasks indent one step under their parent; a row whose parent is itself a sub-task, or whose parent row is absent from the list, flattens to top level — the list never hides a row behind a missing link. Clicking a row selects that row's Workspace and opens the Task's Thread.
+
+Open rows carry a selection checkbox outside the row button, so selecting never opens the Thread; the first tick raises one sticky batch bar — the selected count, 验收所选, 关闭所选, 清除选择 — that resolves the selection through one Host `changeTasks` call per touched Workspace. The bar's note reports committed, already-terminal, and failed counts; a committed run clears its selection and its note outlives the bar as one status line, while a failed run keeps the selection for retry.
+
+The empty state speaks the shared pair (「还没有任务」 plus its hint); loading, error, and retry reuse the shared conversation classes. While open, the page fetches each participated Workspace once and subscribes without a change scope, refetching on every wake; closed, the fetches stop.

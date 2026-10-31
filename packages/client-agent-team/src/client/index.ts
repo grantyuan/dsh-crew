@@ -1,0 +1,479 @@
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+import type {
+  AgentTeamAddMemberRequest,
+  AgentTeamArchiveChannelRequest,
+  AgentTeamArchiveMemberRequest,
+  AgentTeamClientMemberStatus,
+  AgentTeamInboxRequest,
+  AgentTeamMessageCenterRequest,
+  AgentTeamSendMessageRequest,
+  AgentTeamSummarizeThreadRequest,
+  AgentTeamThreadHistoryRequest,
+  AgentTeamThreadObservationsRequest,
+  AgentTeamThreadReadRequest,
+  AgentTeamCreateChannelRequest,
+  AgentTeamGetAttachmentRequest,
+  AgentTeamJoinWorkspaceRequest,
+  AgentTeamLeaveWorkspaceRequest,
+  AgentTeamJoinChannelRequest,
+  AgentTeamMembersRequest,
+  AgentTeamMemberPromptViewRequest,
+  AgentTeamPromoteThreadRequest,
+  AgentTeamPutAttachmentRequest,
+  AgentTeamRecoverMemberRequest,
+  AgentTeamClearMemberContextRequest,
+  AgentTeamCompactMemberContextRequest,
+  AgentTeamMemberInterruptsRequest,
+  AgentTeamResolveMemberInterruptRequest,
+  AgentTeamMemberSessionsRequest,
+  AgentTeamMemberSessionTranscriptRequest,
+  AgentTeamExternalContextRequest,
+  AgentTeamCurateMemberPromptRequest,
+  AgentTeamDiagnoseMemberRequest,
+  AgentTeamRemoveChannelMemberRequest,
+  AgentTeamReplyRequest,
+  AgentTeamEditMessageRequest,
+  AgentTeamRecallMessageRequest,
+  AgentTeamResolveTaskRefsRequest,
+  AgentTeamResolveThreadRefsRequest,
+  AgentTeamTaskRequest,
+  AgentTeamTasksBatchRequest,
+  AgentTeamTasksRequest,
+  AgentTeamMemberTasksRequest,
+  AgentTeamUpdateChannelRequest,
+  AgentTeamUpdateMemberRequest,
+  AgentTeamViewRequest,
+} from '@grantyuan/dsh-crew/types'
+import agentTeamRemote from '@grantyuan/dsh-crew/remote'
+import type {} from '@deepseek-ai/dsh-client-connection/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings-general/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import { HumanSettingsSection } from './HumanSettingsSection.tsx'
+import { TeamHumanIdentity } from './human-identity.ts'
+import { TeamEnvironmentCheck } from './environment-check.ts'
+import { bytesToBase64 } from './attachment-preview.ts'
+import { TeamNavigation } from './navigation.ts'
+import { TeamChangeStream, TeamReadStream, type TeamChangeListener, type TeamChangeScope } from './team-changes.ts'
+import { TeamDraftStore } from './drafts.ts'
+import { TeamDockStore } from './dock.ts'
+import { TeamFooterAction } from './TeamFooterAction.tsx'
+import { TeamMembersAction } from './TeamMembersAction.tsx'
+import { TeamHumanToast } from './TeamHumanToast.tsx'
+import { TeamPageDock } from './TeamPageDock.tsx'
+import { TeamWorkspaceBrowser } from './TeamWorkspaceBrowser.tsx'
+import { en, zh, type TeamKey } from './locales.ts'
+
+export type { TeamMode, TeamNavigationActions, TeamNavigationSnapshot } from './navigation.ts'
+export type { TeamKey } from './locales.ts'
+export { TeamNavigation } from './navigation.ts'
+export { TeamDockStore, type TeamDockSnapshot } from './dock.ts'
+
+const NS = 'team'
+
+export const inject = [
+  'slots', 'workspaces', 'locale', 'remote', 'remote.session', 'sessions', 'connection', 'conversation', 'uiWorkspace', 'layout',
+]
+
+/**
+ * 0.1.7 moved the conversation selection into the workspace service: the
+ * rendered session is the one holding its `mainView` reference (the shipped
+ * consumers read the same projection), so the Team client reads the selection
+ * through retention instead of a service-owned `current`.
+ */
+function currentMainSessionId(ctx: ClientContext): AgentTeamClientMemberStatus['member']['sessionId'] | undefined {
+  const sessions = ctx.sessions as unknown as ISessions
+  return Object.values(sessions.list.getSnapshot().byId)
+    .find(session => (session.retainedBy.mainView ?? 0) > 0)?.id
+}
+
+/**
+ * Session ids this client opened as Member views, per client instance. The
+ * 0.1.7 workspace service exposes no clear, so a dead return target leaves
+ * the departed Member selection in place; excluding Member sessions from the
+ * next capture keeps that stale selection from becoming a false return
+ * target.
+ */
+const openedMemberSessions = new WeakMap<ClientContext, Set<string>>()
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    team: TeamKey
+  }
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    teamNavigation: TeamNavigation
+    teamDrafts: TeamDraftStore
+    teamDock: TeamDockStore
+  }
+}
+
+function registerModeShadow<T extends object>(
+  ctx: ClientContext,
+  navigation: TeamNavigation,
+  name: 'sidebar.workspaces' | 'rightbar' | 'sidebar.settings',
+  component: T,
+  inject: () => Record<string, unknown>,
+): void {
+  ctx.slots.inject(name, () => {
+    let dispose: (() => void) | undefined
+    const reconcile = (): void => {
+      // Team mode owns its three seats outright. The frame's center stays the
+      // shipped conversation seat — the Human's session, or an embedded
+      // Member's — so the dock renders the Team pages beside it instead of
+      // taking the center over.
+      const active = navigation.getSnapshot().mode === 'team'
+      if (active && dispose === undefined) {
+        dispose = ctx.slots.register({
+          name,
+          priority: -100,
+          locale: NS,
+          inject,
+        } as never, component as never)
+      } else if (!active && dispose !== undefined) {
+        dispose()
+        dispose = undefined
+      }
+    }
+    const unsubscribe = navigation.subscribe(reconcile)
+    reconcile()
+    return () => {
+      unsubscribe()
+      dispose?.()
+      dispose = undefined
+    }
+  })
+}
+
+function applyUi(ctx: ClientContext): void {
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'agent-team: dictionaries')
+
+  const navigation = new TeamNavigation()
+  const disposeNavigation = ctx.reflect.provide('teamNavigation', navigation)
+  const drafts = new TeamDraftStore()
+  const disposeDrafts = ctx.reflect.provide('teamDrafts', drafts)
+  const dock = new TeamDockStore()
+  const disposeDock = ctx.reflect.provide('teamDock', dock)
+  // The Human's own identity: one projection every seat reads, refreshed once
+  // after a profile write so a rename reaches the timeline and the member refs
+  // without a reload. Reads are demand-driven — the first seat that subscribes
+  // starts the read. The profile page writes back through the Team Remote, so
+  // the Client never names the Host's own profile entry.
+  const humanIdentity = new TeamHumanIdentity({
+    loadProfile: () => ctx.remote.agentTeam.humanProfile({}),
+    loadAvatarUrl: async (avatarRef: string) => {
+      // Avatar bytes ride the dedicated avatar Remote (never the TTL-bound
+      // attachment cache); a data URL is what an `<img>` seat can show directly.
+      const result = await ctx.remote.agentTeam.getHumanAvatar({ avatarRef })
+      if (!result.ok || !result.value.mediaType.startsWith('image/')) return null
+      return `data:${result.value.mediaType};base64,${result.value.bytesBase64}`
+    },
+  })
+  // The local environment check: a fact about this installation rather than
+  // about the Human, so it is its own projection and never a field of the
+  // identity above. Read once, on the first subscriber, and never written back.
+  const environment = new TeamEnvironmentCheck({
+    loadEnvironment: () => ctx.remote.agentTeam.environment({}),
+  })
+  ctx.effect(() => () => {
+    navigation.dispose()
+    drafts.dispose()
+    dock.dispose()
+    humanIdentity.dispose()
+    environment.dispose()
+    void disposeNavigation()
+    void disposeDrafts()
+    void disposeDock()
+  }, 'agent-team: navigation service')
+
+  // Embedding a Member's conversation selects its Session through the shipped
+  // workspace service. The return target is captured on first entry only —
+  // switching between Member Sessions keeps pointing at the Human's original
+  // session — and each departed Member session is remembered (runtime-only) so
+  // the next Team entry can reopen the conversation the Human last had open.
+  let lastMemberSessionId: AgentTeamClientMemberStatus['member']['sessionId'] | undefined
+  const openMemberSessionImpl = (sessionId: AgentTeamClientMemberStatus['member']['sessionId']): void => {
+    const snapshot = navigation.getSnapshot()
+    const current = currentMainSessionId(ctx)
+    const memberSessions = openedMemberSessions.get(ctx) ?? new Set<string>()
+    openedMemberSessions.set(ctx, memberSessions)
+    memberSessions.add(sessionId)
+    const returnTo = snapshot.memberSessionId === undefined && current !== undefined && current !== sessionId && !memberSessions.has(current) ? current : undefined
+    navigation.actions().enterMemberSession(sessionId, returnTo)
+    ctx.uiWorkspace.openSession(sessionId)
+  }
+
+  // The one restore owner: leaving an embedded Member Session view must
+  // rebind the underlying selection, or the departed Member session stays the
+  // workspace service's `mainView` retention into the next Member entry's
+  // return-target capture. Takeover is conditional — only when the selection
+  // still IS the departed Member session — so a selection someone else made
+  // in the meantime survives. A dead return target keeps the departed
+  // selection: 0.1.7 exposes no public clear, and the retention is inert
+  // behind the Team seat until the next open.
+  ctx.effect(() => {
+    let previous = navigation.getSnapshot()
+    const restore = (): void => {
+      const snapshot = navigation.getSnapshot()
+      const departed = previous.memberSessionId
+      const returnTo = previous.returnToSessionId
+      previous = snapshot
+      if (departed === undefined || snapshot.memberSessionId !== undefined) return
+      lastMemberSessionId = departed
+      if (currentMainSessionId(ctx) !== departed) return
+      if (returnTo !== undefined && (ctx.sessions as unknown as ISessions).list.getSnapshot().byId[returnTo] !== undefined) ctx.uiWorkspace.openSession(returnTo)
+    }
+    const unsubscribe = navigation.subscribe(restore)
+    return () => {
+      unsubscribe()
+      restore()
+    }
+  }, 'agent-team: member session restore')
+
+  // The last Team page the Human clicked comes back on the next Team entry.
+  // The durable faces ride the navigation snapshot; the one runtime-only face —
+  // the embedded Member conversation — is remembered here and reopened only
+  // when that Session still exists, so a renewed or removed Member simply
+  // leaves the underlying face in the seat.
+  ctx.effect(() => {
+    let previous = navigation.getSnapshot()
+    const reenter = (): void => {
+      const snapshot = navigation.getSnapshot()
+      const wasTeam = previous.mode === 'team'
+      previous = snapshot
+      if (wasTeam || snapshot.mode !== 'team' || snapshot.memberSessionId !== undefined) return
+      const last = lastMemberSessionId
+      if (last === undefined) return
+      lastMemberSessionId = undefined
+      if ((ctx.sessions as unknown as ISessions).list.getSnapshot().byId[last] === undefined) return
+      openMemberSessionImpl(last)
+    }
+    const unsubscribe = navigation.subscribe(reenter)
+    return () => {
+      unsubscribe()
+    }
+  }, 'agent-team: member conversation reentry')
+
+  const changes = new TeamChangeStream(ctx.remote)
+  ctx.effect(() => () => changes.dispose(), 'agent-team: change subscriptions')
+  // The Harness resumes a live generation across reconnects, but a stream that
+  // already ended for good is this layer's to rebuild — and a new Host generation
+  // is the one moment the scope it was waiting for can be there again.
+  ctx.on('connection/reset', () => { changes.recover() })
+  const reads = new TeamReadStream()
+
+  const loadMemberGroups = async () => {
+    const workspaces = ctx.workspaces.list.getSnapshot().items
+    const groups = await Promise.all(workspaces.map(async workspace => {
+      const result = await ctx.remote.agentTeam.members({ workspaceId: workspace.workspaceId })
+      if (!result.ok) throw new Error(result.error.message)
+      // The members modal is a listing surface: archived Members are hidden
+      // everywhere, and removed (inactive) ones never belong in a roster.
+      const members = result.value.filter(status => status.member.state !== 'inactive' && status.member.state !== 'archived')
+      return { workspaceId: workspace.workspaceId, workspaceTitle: workspace.title, members }
+    }))
+    return groups.filter(group => group.members.length > 0)
+  }
+
+  // Remote bindings shared by every Team seat; the dock's page bodies extend
+  // them with the Thread-level writes the pages carry.
+  const sharedRemotes = {
+    loadChannels: (request: AgentTeamViewRequest) => ctx.remote.agentTeam.view(request),
+    loadInbox: (request: AgentTeamInboxRequest) => ctx.remote.agentTeam.inbox(request),
+    loadTasks: (request: AgentTeamTasksRequest) => ctx.remote.agentTeam.tasks(request),
+    loadMessageCenter: (request: AgentTeamMessageCenterRequest) => ctx.remote.agentTeam.messageCenter(request),
+    subscribeReads: (listener: () => void) => reads.subscribe(listener),
+    subscribeChanges: (scope: TeamChangeScope, listener: TeamChangeListener) => changes.subscribe(scope, listener),
+    drafts,
+    humanIdentity,
+    loadMembers: (request: AgentTeamMembersRequest) => ctx.remote.agentTeam.members(request),
+    loadMemberTasks: (request: AgentTeamMemberTasksRequest) => ctx.remote.agentTeam.memberTasks(request),
+    // The Agents panel's reassignment consultation: one Human Message naming
+    // the Task and the requested taker, delivered to the Team leader's Channel.
+    sendMessage: (request: AgentTeamSendMessageRequest) => ctx.remote.agentTeam.sendMessage(request),
+    joinChannel: (request: AgentTeamJoinChannelRequest) => ctx.remote.agentTeam.joinChannel(request),
+    removeChannelMember: (request: AgentTeamRemoveChannelMemberRequest) => ctx.remote.agentTeam.removeChannelMember(request),
+    updateChannel: (request: AgentTeamUpdateChannelRequest) => ctx.remote.agentTeam.updateChannel(request),
+    archiveChannel: (request: AgentTeamArchiveChannelRequest) => ctx.remote.agentTeam.archiveChannel(request),
+    updateMember: (request: AgentTeamUpdateMemberRequest) => ctx.remote.agentTeam.updateMember(request),
+    loadPromptView: (request: AgentTeamMemberPromptViewRequest) => ctx.remote.agentTeam.memberPromptView(request),
+    recoverMember: (request: AgentTeamRecoverMemberRequest) => ctx.remote.agentTeam.recoverMember(request),
+    clearMemberContext: (request: AgentTeamClearMemberContextRequest) => ctx.remote.agentTeam.clearMemberContext(request),
+    diagnoseMember: (request: AgentTeamDiagnoseMemberRequest) => ctx.remote.agentTeam.diagnoseMember(request),
+    compactMemberContext: (request: AgentTeamCompactMemberContextRequest) => ctx.remote.agentTeam.compactMemberContext(request),
+    loadMemberInterrupts: (request: AgentTeamMemberInterruptsRequest) => ctx.remote.agentTeam.memberInterrupts(request),
+    releaseMemberInterrupt: (request: AgentTeamResolveMemberInterruptRequest) => ctx.remote.agentTeam.resolveMemberInterrupt(request),
+    loadMemberSessions: (request: AgentTeamMemberSessionsRequest) => ctx.remote.agentTeam.memberSessions(request),
+    loadMemberSessionTranscript: (request: AgentTeamMemberSessionTranscriptRequest) => ctx.remote.agentTeam.memberSessionTranscript(request),
+    loadExternalContext: (request: AgentTeamExternalContextRequest) => ctx.remote.agentTeam.externalContext(request),
+    // The in-flight curation pass stays cancellable: the dialog's stop button
+    // aborts through this signal, all the way to the Host's completion.
+    curateMemberPrompt: (request: AgentTeamCurateMemberPromptRequest, signal?: AbortSignal) => ctx.remote.agentTeam.curateMemberPrompt(request, signal),
+    archiveMember: (request: AgentTeamArchiveMemberRequest) => ctx.remote.agentTeam.archiveMember(request),
+    joinWorkspace: (request: AgentTeamJoinWorkspaceRequest) => ctx.remote.agentTeam.joinWorkspace(request),
+    leaveWorkspace: (request: AgentTeamLeaveWorkspaceRequest) => ctx.remote.agentTeam.leaveWorkspace(request),
+    // The Host-scoped catalog needs no live Member, so suspended ones stay editable too.
+    loadModels: () => ctx.remote.session.modelCatalog(),
+    openMemberSession: openMemberSessionImpl,
+  }
+  // The dock's tab bodies render the same pages the conversation seat used to,
+  // so they carry the same Thread-level remotes — including the durable read
+  // that consumes this reader's mention markers (the Host's changes stream
+  // never wakes on reads, so the Human's badge refreshes from the read itself).
+  const dockRemotes = {
+    ...sharedRemotes,
+    readThread: async (request: AgentTeamThreadReadRequest) => {
+      const result = await ctx.remote.agentTeam.readThread(request)
+      if (result.ok) reads.bump()
+      return result
+    },
+    loadThreadHistory: (request: AgentTeamThreadHistoryRequest) => ctx.remote.agentTeam.threadHistory(request),
+    threadObservations: (request: AgentTeamThreadObservationsRequest) => ctx.remote.agentTeam.threadObservations(request),
+    summarizeThread: (request: AgentTeamSummarizeThreadRequest, signal?: AbortSignal) => ctx.remote.agentTeam.summarizeThread(request, signal),
+    putAttachment: (request: AgentTeamPutAttachmentRequest) => ctx.remote.agentTeam.putAttachment(request),
+    getAttachment: (request: AgentTeamGetAttachmentRequest) => ctx.remote.agentTeam.getAttachment(request),
+    reply: (request: AgentTeamReplyRequest) => ctx.remote.agentTeam.reply(request),
+    editMessage: (request: AgentTeamEditMessageRequest) => ctx.remote.agentTeam.editMessage(request),
+    recallMessage: (request: AgentTeamRecallMessageRequest) => ctx.remote.agentTeam.recallMessage(request),
+    changeTask: (request: AgentTeamTaskRequest) => ctx.remote.agentTeam.changeTask(request),
+    changeTasks: (request: AgentTeamTasksBatchRequest) => ctx.remote.agentTeam.changeTasks(request),
+    promoteThread: (request: AgentTeamPromoteThreadRequest) => ctx.remote.agentTeam.promoteThread(request),
+    resolveTaskRefs: (request: AgentTeamResolveTaskRefsRequest) => ctx.remote.agentTeam.resolveTaskRefs(request),
+    resolveThreadRefs: (request: AgentTeamResolveThreadRefsRequest) => ctx.remote.agentTeam.resolveThreadRefs(request),
+  }
+
+  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+    name: 'sidebar.footer.action',
+    id: 'agent-team',
+    order: 100,
+    locale: NS,
+    inject: () => ({
+      navigation,
+      ...navigation.actions(),
+      // The footer is the only surface that leaves Team mode; closing the
+      // embedded Member Session view rebinds the underlying selection through
+      // the same root-scope restore owner, so there is exactly one restore
+      // path and no double open.
+      leaveTeam: () => {
+        navigation.actions().exitMemberSession()
+        navigation.actions().leaveTeam()
+      },
+    }),
+  }, TeamFooterAction as never))
+
+  const dockInject = (): Record<string, unknown> => ({
+    navigation,
+    dock,
+    ...navigation.actions(),
+    ...dockRemotes,
+    // The frame sizes its right column from this report alone: shown reserves
+    // the track, fullscreen covers the frame, hidden hands the column back.
+    syncPresentation: (presentation: { shown: boolean; track: boolean; fullscreen: boolean }) => {
+      if (presentation.shown) ctx.layout.openRightbar(presentation.track, presentation.fullscreen)
+      else ctx.layout.closeRightbar()
+    },
+  })
+
+  registerModeShadow(ctx, navigation, 'sidebar.workspaces', TeamWorkspaceBrowser as never, () => ({
+    navigation,
+    ...navigation.actions(),
+    ...sharedRemotes,
+    dock,
+    addMember: (request: AgentTeamAddMemberRequest) => ctx.remote.agentTeam.addMember(request),
+    createChannel: (request: AgentTeamCreateChannelRequest) => ctx.remote.agentTeam.createChannel(request),
+  }))
+  registerModeShadow(ctx, navigation, 'rightbar', TeamPageDock as never, dockInject)
+  registerModeShadow(ctx, navigation, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups }))
+
+  // The Human's new-message banner rides the frame's overlay seat, mounted in
+  // both modes: an assistant notice or a teammate mention addressed to the
+  // Human slides a ten-second banner across the window, and its action jumps
+  // to the Thread (entering Team mode when needed). The reads it watches are
+  // the same durable Inbox the sidebar badge sums.
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'agent-team-human-toast',
+    locale: NS,
+    inject: () => ({
+      navigation,
+      ...navigation.actions(),
+      loadInbox: (request: AgentTeamInboxRequest) => ctx.remote.agentTeam.inbox(request),
+      subscribeChanges: (scope: TeamChangeScope, listener: TeamChangeListener) => changes.subscribe(scope, listener),
+      subscribeReads: (listener: () => void) => reads.subscribe(listener),
+    }),
+  }, TeamHumanToast as never))
+
+  // The Human profile page: one settings section, ordered between General (0)
+  // and Models (10) so identity sits near the top. Writes go through the Team
+  // Remote, which answers with the Host's own rejection reason (a name
+  // collides, an empty one), and the shared identity re-reads afterwards, so a
+  // rename lands in the timeline and the member refs at the same moment the
+  // page shows it.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'team-human',
+    order: 5,
+    label: () => ctx.locale.bind(NS)('humanSettingsNav'),
+    locale: NS,
+    inject: () => ({
+      identity: humanIdentity,
+      environment,
+      gateway: {
+        read: async () => {
+          const read = await ctx.remote.agentTeam.gatewayConfig()
+          if (!read.ok) throw new Error(read.error.message)
+          return read.value
+        },
+        save: async (patch: { enabled?: boolean; port?: number; token?: string }) => {
+          const saved = await ctx.remote.agentTeam.setGatewayConfig(patch)
+          if (!saved.ok) throw new Error(saved.error.message)
+          return saved.value
+        },
+      },
+      saveName: async (name: string) => {
+        const saved = await ctx.remote.agentTeam.setHumanProfile({ name })
+        if (!saved.ok) return saved.error.message
+        await humanIdentity.refresh()
+        return undefined
+      },
+      uploadAvatar: async (file: File) => {
+        const put = await ctx.remote.agentTeam.putHumanAvatar({
+          name: file.name,
+          ...(file.type === '' ? {} : { mediaType: file.type }),
+          bytesBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+        })
+        if (!put.ok) return put.error.message
+        const saved = await ctx.remote.agentTeam.setHumanProfile({ avatarRef: put.value.avatarRef })
+        if (!saved.ok) return saved.error.message
+        await humanIdentity.refresh()
+        return undefined
+      },
+      removeAvatar: async () => {
+        const { avatarRef } = humanIdentity.getSnapshot()
+        if (avatarRef === undefined) return undefined
+        // Bytes first, then the reference: a failed clear leaves a readable
+        // avatar instead of a reference to bytes nobody can load.
+        await ctx.remote.agentTeam.removeHumanAvatar({ avatarRef })
+        const cleared = await ctx.remote.agentTeam.setHumanProfile({ avatarRef: null })
+        if (!cleared.ok) return cleared.error.message
+        await humanIdentity.refresh()
+        return undefined
+      },
+    }),
+  }, HumanSettingsSection as never))
+}
+
+export async function apply(ctx: ClientContext): Promise<void> {
+  const disposeRemote = await ctx.remote.$mount(agentTeamRemote)
+  ctx.effect(() => () => { void disposeRemote() }, 'agent-team: remote')
+  ctx.inject(['remote.agentTeam'], ready => { applyUi(ready as ClientContext) })
+}
