@@ -95,6 +95,26 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     mainReference = runtime.sessions.retain(sessionId as never, { source: 'mainView' })
   })
   runtime.ctx.provide('uiWorkspace', { startSession: vi.fn(), connectWorkspace: vi.fn(async () => 'ordinary-session'), openSession })
+  // The Team registers its pages as tab types in the shipped right Sidebar;
+  // the bench records the stage-one definitions instead of the Sidebar's
+  // registry — its claim ranking and seats belong to Harness — so specs can
+  // assert what types the plugin contributed and with what copy.
+  const tabTypes: { readonly id: string; readonly kind: string; readonly title: (address: string) => string; readonly canOpen?: (address: string) => boolean; readonly patterns?: readonly string[]; readonly guide?: readonly { id: string; order: number; title: () => string }[] }[] = []
+  runtime.ctx.provide('sidebarRightTabs', {
+    register: (definition: (typeof tabTypes)[number]) => {
+      tabTypes.push(definition)
+      return () => {
+        const index = tabTypes.indexOf(definition)
+        if (index >= 0) tabTypes.splice(index, 1)
+      }
+    },
+    get: (kind: string) => tabTypes.find(definition => definition.kind === kind),
+    entries: () => tabTypes,
+    candidates: (address: string) => tabTypes.filter(definition => definition.canOpen?.(address) ?? false),
+    claim: (address: string) => { throw new Error(`bench claim: ${address}`) },
+    guide: () => tabTypes.flatMap(definition => definition.guide ?? []),
+    subscribe: () => () => {},
+  } as never)
   // The shipped conversation reads the developer-tools switch and per-domain
   // config scopes through the config-form registry.
   const developerTools = createSnapshotStore(true)
@@ -704,5 +724,5 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   const disposeSettings = runtime.slots.register({ name: 'sidebar.settings', priority: 0 }, BaselineSettings as never)
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
-  return { runtime, team, view, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, openSession, summarizeThread, seedDigest, failDigest }
+  return { runtime, team, view, sidebarTabTypes: tabTypes, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, openSession, summarizeThread, seedDigest, failDigest }
 }

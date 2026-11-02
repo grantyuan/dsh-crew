@@ -51,6 +51,21 @@ async function bench(persisted: string | null = null) {
   } as never)
   const uiWorkspace = { openSession: vi.fn(), startSession: vi.fn(), connectWorkspace: vi.fn(async () => 'workspace:one') }
   ctx.provide('uiWorkspace', uiWorkspace as never)
+  // The Team registers its pages as right-Sidebar tab types at apply time;
+  // the bench never mounts the Sidebar, so it records the registrations and
+  // answers `get` — the mode-shadow behavior under test does not ride them.
+  const tabTypes: { id: string; kind: string }[] = []
+  ctx.provide('sidebarRightTabs', {
+    register: (definition: { id: string; kind: string }) => {
+      tabTypes.push(definition)
+      return () => {
+        const index = tabTypes.indexOf(definition)
+        if (index >= 0) tabTypes.splice(index, 1)
+      }
+    },
+    get: (kind: string) => tabTypes.find(definition => definition.kind === kind),
+    entries: () => tabTypes,
+  } as never)
   ctx.provide('connection', { api: { llm: { models: vi.fn(async () => ({ result: { ok: true, value: { groups: [], failures: [] } } })) } } } as never)
   ctx.provide('workspaces', {
     list: workspaceFeed(),

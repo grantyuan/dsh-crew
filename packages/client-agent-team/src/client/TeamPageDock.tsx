@@ -7,6 +7,7 @@ import { faceOfSnapshot } from './dock.ts'
 import type { TeamDockProps } from './slots.ts'
 import type { TeamNavigationSnapshot } from './navigation.ts'
 import { useHumanIdentity } from './human-identity.ts'
+import { WelcomeSurface } from './TeamWelcomeSurface.tsx'
 import { TeamChannelPage } from './TeamChannelPage.tsx'
 import { TeamInboxPage } from './TeamInboxPage.tsx'
 import { TeamMessageCenterPage } from './TeamMessageCenterPage.tsx'
@@ -14,7 +15,6 @@ import { TeamSessionHistoryPage } from './TeamSessionHistoryPage.tsx'
 import { TeamTasksPage } from './TeamTasksPage.tsx'
 import { TeamThreadPage } from './TeamThreadPage.tsx'
 import css from './dock.module.css'
-import conversationCss from './conversation.module.css'
 
 /** Splits beyond this stop being readable in a column; the button refuses quietly. */
 const MAX_PANES = 3
@@ -405,18 +405,4 @@ function TeamPageSurface(props: { tab: TeamDockTab; navigationState: TeamNavigat
       return <TeamChannelPage key={tab.id} humanName={humanName} {...(humanAvatarUrl === undefined ? {} : { humanAvatarUrl })} workspaceId={workspaceId} channelRef={tab.channelRef} drafts={pages.drafts} putAttachment={pages.putAttachment} getAttachment={pages.getAttachment} loadChannels={pages.loadChannels} subscribeChanges={pages.subscribeChanges} loadMembers={pages.loadMembers} loadInbox={pages.loadInbox} sendMessage={pages.sendMessage} joinChannel={pages.joinChannel} removeChannelMember={pages.removeChannelMember} selectThread={pages.selectThread} selectChannel={pages.selectChannel} backToChannels={pages.backToChannels} resolveTaskRefs={pages.resolveTaskRefs} resolveThreadRefs={pages.resolveThreadRefs} openMemberSession={pages.openMemberSession} t={t} />
     }
   }
-}
-
-/** The overview body: the Workspace's title and the pick-a-Channel hint. */
-function WelcomeSurface({ workspaceId, workspaceTitle, t }: { workspaceId?: WorkspaceId; workspaceTitle?: string; t: TeamDockProps['t'] }) {
-  const welcome = workspaceId === undefined
-    ? { eyebrow: t('teamMode'), title: t('team'), body: t('empty') }
-    : { eyebrow: workspaceTitle ?? workspaceId, title: t('channels'), body: t('selectChannelHint') }
-  return <main className={conversationCss.welcomeSurface} data-team-dock-welcome>
-    <div className={conversationCss.welcome}>
-      <span className={conversationCss.welcomeEyebrow}>{welcome.eyebrow}</span>
-      <h1>{welcome.title}</h1>
-      <p>{welcome.body}</p>
-    </div>
-  </main>
 }

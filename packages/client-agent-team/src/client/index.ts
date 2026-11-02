@@ -53,6 +53,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-general/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -68,6 +69,8 @@ import { TeamFooterAction } from './TeamFooterAction.tsx'
 import { TeamMembersAction } from './TeamMembersAction.tsx'
 import { TeamHumanToast } from './TeamHumanToast.tsx'
 import { TeamPageDock } from './TeamPageDock.tsx'
+import { TeamSidebarTabBody } from './TeamSidebarTabBody.tsx'
+import { TEAM_TAB_IDS, teamTabDefinitions } from './team-tab-types.ts'
 import { TeamWorkspaceBrowser } from './TeamWorkspaceBrowser.tsx'
 import { en, zh, type TeamKey } from './locales.ts'
 
@@ -79,7 +82,7 @@ export { TeamDockStore, type TeamDockSnapshot } from './dock.ts'
 const NS = 'team'
 
 export const inject = [
-  'slots', 'workspaces', 'locale', 'remote', 'remote.session', 'sessions', 'connection', 'conversation', 'uiWorkspace', 'layout',
+  'slots', 'workspaces', 'locale', 'remote', 'remote.session', 'sessions', 'connection', 'conversation', 'uiWorkspace', 'layout', 'sidebarRightTabs',
 ]
 
 /**
@@ -393,6 +396,32 @@ function applyUi(ctx: ClientContext): void {
   }))
   registerModeShadow(ctx, navigation, 'rightbar', TeamPageDock as never, dockInject)
   registerModeShadow(ctx, navigation, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups }))
+
+  // The Team pages' second home: tab types in the shipped right Sidebar,
+  // registered for the plugin's whole lifetime and not mode-shadowed — a tab
+  // the Human opened in Team mode must keep its body when the sidebar moves
+  // between sessions, and the page bodies hold no Team facts. Stage one
+  // contributes the types themselves; stage two the bodies, keyed by each
+  // definition's own id. (While the dock still shadows `rightbar` these bodies
+  // do not render; the dock retires once every entry point lands here.)
+  ctx.effect(() => {
+    const disposers = teamTabDefinitions(key => ctx.locale.bind(NS)(key)).map(definition => ctx.sidebarRightTabs.register(definition))
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
+  }, 'agent-team: right-sidebar tab types')
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => {
+    const tabInject = () => ({ navigation, ...navigation.actions(), ...dockRemotes })
+    const disposers = TEAM_TAB_IDS.map(key => ctx.slots.register({
+      name: 'sidebar.right.pane.tab',
+      key,
+      locale: NS,
+      inject: tabInject,
+    } as never, TeamSidebarTabBody as never))
+    return () => {
+      for (const dispose of disposers) dispose()
+    }
+  }), 'agent-team: right-sidebar tab bodies')
 
   // The Human's new-message banner rides the frame's overlay seat, mounted in
   // both modes: an assistant notice or a teammate mention addressed to the

@@ -275,6 +275,17 @@ export type TeamPagePayload = PropsRuntime<'rightbar'> & PropsLocale<'team'> & T
 }
 
 /**
+ * The sidebar tab body's props: the same seat-agnostic page payload the dock
+ * hosts, minus the right column's owner geometry, met by the tab seat's own
+ * standard kit — `useTabInfo` gives the occurrence its address, params, and
+ * revision. The pages never read the seat: the body adapter resolves the tab's
+ * refs and passes named props down, so a tab shows what its own open carried
+ * even while the Human browses elsewhere.
+ */
+export type TeamSidebarTabBodyProps = Omit<TeamPagePayload, 'width' | 'viewportWidth' | 'canShow'>
+  & PropsRuntime<'sidebar.right.pane.tab'>
+
+/**
  * The Human's new-message banner: a frame-level overlay seat that watches the
  * same durable Inbox the sidebar badge reads and toasts each new direct
  * arrival. It mounts in both modes, so it needs the navigation actions and the
