@@ -20,16 +20,19 @@ Client remote service
 `InvocationDescriptor` 是 local reflection metadata，不是 wire message。Wire request 和 response fields 保持为显式 typed values。修改 Remote 时更新 declaration 和 tests，重新生成，然后运行 typecheck/build；不要手工编辑 artifact。
 
 ## Client plugin 和 slot composition
-Team browser plugin 是 external Client plugin。Shipped Shell 继续拥有 outer layout。Team mode 站立期间，Team 增加一个 additive footer action，并动态 shadow 三个 seats：
+Team browser plugin 是 external Client plugin。Shipped Shell 继续拥有 outer layout。Team mode 站立期间，Team 增加一个 additive footer action，并动态 shadow 两个 seats：
 
 ```text
 sidebar.footer.action       additive Team entry
 sidebar.workspaces          Team shadow, priority -100
-rightbar（团队面板 dock）    Team shadow, priority -100
 sidebar.settings            Team shadow, priority -100
 ```
 
-Frame 的 `main` conversation seat 在任何 Team 状态下都保持 shipped —— Human 当前 session，或选中 Member 时的嵌入式 session —— Team 页面从不占据中央。它们作为 tab 渲染在右栏 dock 中：一个 dock entry 以 priority -100 shadow `rightbar`，把 Inbox、Tasks、Message Center、Channel、Thread 和 session-history 页面承载为一到三个纵向分栏里的 tab，每个分栏可最大化、可关闭，dock 本身可全屏覆盖 frame，并可从 sidebar 的开关关闭。dock 通过 `ctx.layout.openRightbar`/`closeRightbar` 上报 presentation（`shown`/`track`/`fullscreen`），与 ui-sidebar-right 使用同一 face，frame 继续拥有右栏几何。
+Frame 的 `main` conversation seat 在任何 Team 状态下都保持 shipped —— Human 当前 session，或选中 Member 时的嵌入式 session —— Team 页面从不占据中央；`rightbar` 也始终归 shipped Sidebar，Team 从不 shadow 它。Team 页面经 Sidebar 公开的两段式路径成为其 tab 类型：一段向 `ctx.sidebarRightTabs` 注册 definition，二段把 body 注册进 keyed seat `sidebar.right.pane.tab`，key 就是 definition 自己的 `id`。
+
+Channel 与 Thread 是按地址寻址的 resource（`dsh-resource://team/...`）：整个地址就是 tab 的 content identity，因此同一 Channel 重复打开是 reveal 已有 tab，不同 Channel 则是各自独立的 tab，靠 Sidebar 自身的拆分与浮动机制并览。Inbox、Tasks、Message Center 是无参数 page type，每 pane 去重；session-history 以品牌化 Member id 作为 page params。
+
+因为 shipped Sidebar 在 Team mode 同样拥有右栏，它的 file/resource tabs——以及中央对话里每个点开它们的链接——在 Team 模式与模式外行为完全一致。Team 的每个入口都先写 navigation snapshot（它记住 Team mode 重开的页面），再打开或 reveal 该 face 对应的 tab；列展开由 Sidebar 的 navigation face 在同一步完成。没有挂载 Session surface 时命令会 throw，landing 静默吞下：durable face 照常移动，之后的 Team-mode 进入会重放它。
 
 Browser activation 顺序是：
 
@@ -83,7 +86,9 @@ UI work 的边界如下：
 
   Thread reads 使用 Host projections（`readThread`、`threadHistory`）和 Host mutations（replies、promotion、Task actions）。 当前 Thread UI 不提供 Attention controls 或 observations；其 Host Remote methods 留给后续自有 UI。 Human 的新消息横幅挂在 frame 的 `shell.overlay` 座位，两种模式下都保持挂载：它监视与侧栏徽标同一份 durable Inbox，每条发给 Human 的 direct 到达都会滑出一条停留十秒的横幅，其操作进入 Team 模式并打开对应 Thread；首次看到积压的那轮只初始化游标，挂载前就已未读的内容不会触发横幅。Agent 编辑器的模型字段新增有序备用路由选择器（添加、排序、移除；清空列表即清除该 pin），Prompt 对话框会原样回显存储列表，其 commit 不会把它清掉。
 
-Browser 会持久化 Team navigation mode、Workspace selection、最近选中的 Channel 或 Thread 以及 Inbox、Tasks 两张列表页的位置（回到 Team 时恢复位置），但不持久化 unread、Attention 与「有什么在等 Human」。dock 的分栏布局——哪些 tab 在哪个分栏、分栏尺寸、最大化的分栏、展开/全屏 presentation——是同一组 navigation fact 之外的浏览器持久化 presentation memory；tab 显示的内容仍是 snapshot 的 face，进入 Team mode 会回到 Human 最后停留的 face，Member 会话仍在时还包括嵌入式 Member 对话（runtime-only 记忆：Member 已续期或移除时不再重开）。
+Browser 会持久化 Team navigation mode、Workspace selection、最近选中的 Channel 或 Thread 以及 Inbox、Tasks 两张列表页的位置（回到 Team 时恢复位置），但不持久化 unread、Attention 与「有什么在等 Human」。哪些 tab 开着、各在哪个 pane、如何分栏，是 shipped Sidebar 自己的 per-Session 持久化——Team 不再保存任何平行的布局 store。
+
+进入 Team mode（以及以 Team mode 完成的启动恢复）会重落 snapshot 所指的最后 face——以 reveal 方式，Sidebar 已持久化该 tab 时只呈现一次；Member 会话仍在时还包括嵌入式 Member 对话（runtime-only 记忆：Member 已续期或移除时不再重开）。离开 Team mode 不回收任何东西：Sidebar 的 tab 是 per-Session 状态，不是 Team chrome。session-history 页的 返回 会关闭自己的 tab——不同于 Thread 的 Back 落回其来源列表或 Channel，它下面没有任何 Team 页面。
 
   每条 Inbox row 自带 Host 解析好的时间戳——`createdOccurredAt`、`latestReplyOccurredAt` 与其 `latestReplyActor`、以及 `needsHumanDecision`（某个 open Task 停在 `in_review` 等验收，或一条点名 Human 的 Message 在向其要决定且其后 Human 再无发言——单纯点名从不点亮它）——行因此不需自己再做 Thread read；页头的 排序 控件按本浏览器偏好重排这些行，这份偏好存 `localStorage`，从不成为 Team fact。
 
@@ -99,3 +104,9 @@ Browser 会持久化 Team navigation mode、Workspace selection、最近选中�
 - 保持 Team mode enter/leave、refresh recovery、slot restoration 和 narrow layout behavior。
 
 UI redesign 已完成。需要理解当时的取舍时，查 [`.scratch/archive/2026-08/ui-redesign/`](../../.scratch/archive/2026-08/ui-redesign/)；它是历史设计背景，不是当前实现权威。UI 改动的当前验收规则见 [`development/README.zh.md`](../development/README.zh.md)。
+
+## 在案限制
+
+- 中央对话栏无法由 plugin 拆分：`AppFrame` 每帧只渲染一个 `main` entry，conversation 面板是 ui-conversation 私有且绑定 slot Session 作用域——同时并览多个标准 Session 需要 Harness 侧的未来能力，而不是 Team 代码。
+- Sidebar 的拆分预算（docked panes 加浮动面板）与空间规则是 shipped policy，Team 不扩宽。
+- Team 页面是 Workspace 级事实，渲染在 per-Session 的 Sidebar tab 里：切换在屏 Session 时，tab 集合按 Sidebar 自身的 retained-session 规则走。
