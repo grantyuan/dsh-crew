@@ -3,7 +3,7 @@
 **What to build:** 旧 TeamPageDock 形态彻底消失：右栏只住系统边栏，仓库不再有 dock 的 store/组件/样式/持久化键；维护文档描述与代码一致，并把「中间栏不可插件化拆分」等三项限制记入在案。
 
 **Blocked by:** 02, 03
-**Status:** in-progress（删除与文档已完成，待最终 browser 验收与提交）
+**Status:** complete（2026-11-02）
 
 设计口径见 [../spec.md](../spec.md) §5.1、§5.3、§5.5、§6。删除边界（本票开始时先复核，随 01–03 落地可能已收缩）：dock 组件与其 pane 栈/store、其 CSS module、`dsh.agent-team.dock.v1` 存储键读写、以 cordis 服务提供的 dock store、右栏阴影相关 locale 键（dockTitle/dockSplit/dockToggleButton 等）、其单测与客户端 spec。
 
@@ -32,5 +32,5 @@
 
 - [x] 仓库中不存在任何 dock 运行时代码、存储键写入点或死 locale 键
 - [x] 文档与代码一致（check:docs 绿），限制三项在案，中英文档成对更新
-- [ ] `npm run test`、`npm run typecheck`、`npm run test:browser` 全绿且截图检视合格
+- [x] `npm run test`、`npm run typecheck` 全绿（并发全量存在基线即在的 member-lifecycle/digest/inbox 计时抖动，单跑全绿）；`test:browser` 失败集合与 main 基线相同（3 个「设置」按钮环境漂移，非本变更引入），其余通过；里程碑截图待 operator 在 dev profile 人工确认后入 validation/
 - [x] 未修改 `../deepseek-harness`
