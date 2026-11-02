@@ -51,9 +51,16 @@ async function bench(persisted: string | null = null) {
   } as never)
   const uiWorkspace = { openSession: vi.fn(), startSession: vi.fn(), connectWorkspace: vi.fn(async () => 'workspace:one') }
   ctx.provide('uiWorkspace', uiWorkspace as never)
-  // The Team registers its pages as right-Sidebar tab types at apply time;
-  // the bench never mounts the Sidebar, so it records the registrations and
-  // answers `get` — the mode-shadow behavior under test does not ride them.
+  // The Team lands its pages through the Sidebar's navigation face and
+  // registers its tab types at apply time; the bench records both without the
+  // shipped Sidebar behind them.
+  const openResource = vi.fn()
+  const openTab = vi.fn()
+  ctx.provide('sidebarRight', {
+    openResource,
+    openTab,
+    mounted: { getSnapshot: () => undefined, subscribe: () => () => {} },
+  } as never)
   const tabTypes: { id: string; kind: string }[] = []
   ctx.provide('sidebarRightTabs', {
     register: (definition: { id: string; kind: string }) => {
@@ -72,10 +79,6 @@ async function bench(persisted: string | null = null) {
     pickDirectory: vi.fn(async () => null),
     create: vi.fn(),
   } as never)
-  // The Team dock reports the right column's presentation through the layout
-  // face; the bench records the reports without a frame behind them.
-  const layout = { openRightbar: vi.fn(), closeRightbar: vi.fn(), toggleSidebar: vi.fn() }
-  ctx.provide('layout', layout as never)
   const slots = ctx.get('slots') as SlotRegistry
   const root = () => null
   slots.register({ name: 'root', children: {
@@ -91,7 +94,8 @@ async function bench(persisted: string | null = null) {
   slots.register({ name: 'sidebar.workspaces', priority: 0 }, root)
   slots.register({ name: 'sidebar.settings', priority: 0 }, root)
   // ui-sidebar-right occupies the right column in the shipped composition; the
-  // bench mirrors that baseline so the Team dock's takeover is observable.
+  // bench mirrors that baseline so the specs can prove the Team leaves it
+  // alone: its pages land as Sidebar tab types, never as a rightbar takeover.
   slots.register({ name: 'rightbar', priority: 0 }, root)
   // The shipped Conversation occupies the keyed main panel under the reserved
   // 'conversation' key and declares the composer seats below it, mirroring
@@ -104,12 +108,12 @@ async function bench(persisted: string | null = null) {
     'conversation.composer.bar': { kind: 'single', scope: 'session-maybe' },
     'conversation.input.dock': { kind: 'list', scope: 'session' },
   } } as never, root)
-  return { ctx, slots, uiWorkspace, layout }
+  return { ctx, slots, uiWorkspace, openResource, openTab, tabTypes }
 }
 
 describe('Team Client slot takeover', () => {
-  it('enters and leaves Team mode by shadowing the Team seats and leaving the conversation seat shipped', async () => {
-    const { ctx, slots } = await bench()
+  it('enters and leaves Team mode by shadowing its two seats, and never takes the right column or the center', async () => {
+    const { ctx, slots, tabTypes } = await bench()
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
 
@@ -118,14 +122,16 @@ describe('Team Client slot takeover', () => {
     expect(slots.entriesOfSlot('rightbar')).toHaveLength(1)
     expect(slots.entriesOfSlot('sidebar.settings')).toHaveLength(1)
     expect(slots.entries('sidebar.footer.action')).toHaveLength(1)
+    // The six Team pages ride the Sidebar's public tab registry from apply on.
+    expect(tabTypes.map(tab => tab.kind)).toEqual(['team-channel', 'team-thread', 'team-inbox', 'team-tasks', 'team-message-center', 'team-session-history'])
 
     ctx.teamNavigation.actions().enterTeam()
     expect(slots.entries('sidebar.workspaces')).toHaveLength(2)
-    expect(slots.entries('rightbar')).toHaveLength(2)
     expect(slots.entries('sidebar.settings')).toHaveLength(2)
     expect(slots.entriesOfSlot('sidebar.workspaces')[0]!.options.priority).toBe(-100)
-    // The dock takes the right column; the conversation seat stays shipped.
-    expect(slots.entriesOfSlot('rightbar')[0]!.options.priority).toBe(-100)
+    // The right column stays the shipped Sidebar's, and so does the center.
+    expect(slots.entriesOfSlot('rightbar')).toHaveLength(1)
+    expect(slots.entriesOfSlot('rightbar')[0]!.options.priority).toBe(0)
     expect(slots.entries('main')).toHaveLength(1)
     expect(slots.spec('sidebar.workspaces.directoryFlow')).toBeUndefined()
 
@@ -133,6 +139,9 @@ describe('Team Client slot takeover', () => {
     expect(slots.entries('sidebar.workspaces')).toHaveLength(1)
     expect(slots.entries('rightbar')).toHaveLength(1)
     expect(slots.entries('sidebar.settings')).toHaveLength(1)
+    // The tab types outlive the mode: they are registered for the plugin's
+    // lifetime, not mode-shadowed, and dispose only with the fiber.
+    expect(tabTypes).toHaveLength(6)
 
     await fiber.dispose()
     expect(slots.entries('sidebar.footer.action')).toHaveLength(0)
@@ -144,7 +153,7 @@ describe('Team Client slot takeover', () => {
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     ctx.teamNavigation.actions().enterTeam()
-    expect(() => slots.register({ name: 'rightbar', priority: -100 }, () => null))
+    expect(() => slots.register({ name: 'sidebar.workspaces', priority: -100 }, () => null))
       .toThrow(/already has a registration at priority -100/i)
   })
 
@@ -154,7 +163,7 @@ describe('Team Client slot takeover', () => {
     await fiber.await()
     for (let index = 0; index < 3; index += 1) {
       ctx.teamNavigation.actions().enterTeam()
-      expect(slots.entriesOfSlot('rightbar')[0]!.options.priority).toBe(-100)
+      expect(slots.entriesOfSlot('sidebar.workspaces')[0]!.options.priority).toBe(-100)
       ctx.teamNavigation.actions().leaveTeam()
       expect(slots.entries('sidebar.workspaces')).toHaveLength(1)
       expect(slots.entries('rightbar')).toHaveLength(1)
@@ -168,14 +177,18 @@ describe('Team Client slot takeover', () => {
     expect(slots.entries('sidebar.footer.action')).toHaveLength(0)
   })
 
-  it('mounts Team shadows immediately when persisted mode is Team', async () => {
-    const { ctx, slots } = await bench(JSON.stringify({ mode: 'team', workspaceId: 'workspace:one' }))
+  it('mounts Team shadows immediately when persisted mode is Team, and lands the remembered page', async () => {
+    const { ctx, slots, openResource } = await bench(JSON.stringify({ mode: 'team', workspaceId: 'workspace:one', channelRef: 'channel:engineering' }))
     const fiber = ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
     expect(ctx.teamNavigation.getSnapshot().mode).toBe('team')
-    expect(slots.entries('rightbar')).toHaveLength(2)
+    expect(slots.entriesOfSlot('sidebar.workspaces')[0]!.options.priority).toBe(-100)
+    // A boot restored into Team mode is that mode's entry for this run: the
+    // remembered Channel lands as a Sidebar tab.
+    expect(openResource).toHaveBeenCalledWith(expect.stringContaining('dsh-resource://team/channel/'))
     await fiber.dispose()
-    expect(slots.entries('rightbar')).toHaveLength(1)
+    expect(slots.entriesOfSlot('sidebar.workspaces')).toHaveLength(1)
+    expect(slots.entriesOfSlot('rightbar')).toHaveLength(1)
   })
 
   it('keeps Team chrome mounted for a Member Session view and restores the return session on leave', async () => {
@@ -202,10 +215,10 @@ describe('Team Client slot takeover', () => {
 
     expect(uiWorkspace.openSession).toHaveBeenCalledWith('session:builder')
     expect(ctx.teamNavigation.getSnapshot()).toMatchObject({ mode: 'team', memberSessionId: 'session:builder', returnToSessionId: 'session:human-origin' })
-    // The conversation seat is the shipped root in every Team state; the dock
-    // and both sidebars stay mounted around it.
+    // The conversation seat and the right column are shipped in every Team
+    // state; only the two side shadows move.
     expect(slots.entries('main')).toHaveLength(1)
-    expect(slots.entries('rightbar')).toHaveLength(2)
+    expect(slots.entries('rightbar')).toHaveLength(1)
     // The Member view registers no composer surface at all: the shipped
     // InputBar owns the bar, its trigger overlay, and the dock — the Team
     // chrome is sidebar-only around the embedded session.
@@ -284,24 +297,11 @@ describe('Team Client slot takeover', () => {
     ctx.teamNavigation.actions().selectChannel('channel:engineering' as never)
     expect(ctx.teamNavigation.getSnapshot().memberSessionId).toBeUndefined()
     expect(slots.entries('main')).toHaveLength(1)
-    // Team chrome stays mounted through the whole exchange.
-    expect(slots.entries('rightbar')).toHaveLength(2)
+    // Team chrome stays mounted through the whole exchange; the Channel lands
+    // as a Sidebar tab, not as a takeover.
+    expect(slots.entries('rightbar')).toHaveLength(1)
 
     await fiber.dispose()
   })
 
-  it('reports the dock presentation to the layout face as Team mode moves', async () => {
-    const { ctx, slots, layout } = await bench()
-    const fiber = ctx.plugin({ inject: [...inject], apply })
-    await fiber.await()
-    expect(layout.openRightbar).not.toHaveBeenCalled()
-
-    ctx.teamNavigation.actions().enterTeam()
-    // The dock's seat registered, but nothing mounted renders it — the report
-    // rides the mounted component, so an entry-count-only bench sees no call.
-    expect(slots.entries('rightbar')).toHaveLength(2)
-    expect(layout.openRightbar).not.toHaveBeenCalled()
-
-    await fiber.dispose()
-  })
 })

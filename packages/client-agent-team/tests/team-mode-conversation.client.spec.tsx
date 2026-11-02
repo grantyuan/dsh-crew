@@ -761,7 +761,9 @@ describe('Team conversation surfaces', () => {
 
   it('restores persisted Team mode, reconciles a stale Workspace, renders the rail, and unloads cleanly', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'stale' })
-    expect(await b.view.findByRole('heading', { name: '频道' })).toBeTruthy()
+    // The overview no longer opens a dock page; the Team chrome is proven by
+    // its own left sidebar standing, and the stale Workspace reconciles next.
+    expect(await b.view.findByRole('button', { name: /收件箱/ })).toBeTruthy()
     await vi.waitFor(() => expect(b.runtime.ctx.teamNavigation.getSnapshot().workspaceId).toBe('w1'))
 
     fireEvent.click(b.view.getByRole('button', { name: 'Toggle fixture sidebar' }))
@@ -773,22 +775,24 @@ describe('Team conversation surfaces', () => {
 
     await b.team.dispose()
     // The unload contract is that no Team shadow leaks: the slot ledger shows
-    // the shipped doubles back as the winners of every Team seat, and the
-    // dock's right column stands down entirely. The assertion reads the
-    // registry rather than the DOM because disposing the Team fiber
-    // unregisters its locale namespace, and that revision bump re-renders the
-    // shipped conversation double mid-teardown — a bench-only artifact of the
-    // dock architecture keeping the conversation mounted through Team mode.
+    // the shipped doubles back as the winners of the two side seats the Team
+    // shadows. The right column is never taken by Team now — the bench's
+    // stand-in TabHost owns it at priority 0 throughout — so the check is that
+    // no -100 Team takeover survives in it. The assertion reads the registry
+    // rather than the DOM because disposing the Team fiber unregisters its
+    // locale namespace, and that revision bump re-renders the shipped
+    // conversation double mid-teardown — a bench-only artifact of keeping the
+    // conversation mounted through Team mode.
     expect(b.runtime.slots.entriesOfSlot('sidebar.workspaces').map(entry => entry.options.priority)).toEqual([0])
     expect(b.runtime.slots.entriesOfSlot('sidebar.settings').map(entry => entry.options.priority)).toEqual([0])
-    expect(b.runtime.slots.entriesOfSlot('rightbar')).toHaveLength(0)
+    expect(b.runtime.slots.entriesOfSlot('rightbar').every(entry => entry.options.priority !== -100)).toBe(true)
     expect(b.runtime.slots.entries('sidebar.footer.action')).toHaveLength(0)
     await b.runtime.dispose()
   })
 
   it('states the current Workspace on one line and switches through its menu', async () => {
     const b = await runtimeWithTeam({ mode: 'team' })
-    expect(await b.view.findByRole('heading', { name: '频道' })).toBeTruthy()
+    expect(await b.view.findByRole('button', { name: /收件箱/ })).toBeTruthy()
     // The selector renders in the wide sidebar only, and collapsing the fixture
     // keeps that wide surface mounted for another 150ms (SidebarRoot's collapse
     // settle) before the rail replaces it. Every assertion below reads the wide

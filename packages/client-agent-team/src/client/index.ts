@@ -68,7 +68,8 @@ import { TeamDockStore } from './dock.ts'
 import { TeamFooterAction } from './TeamFooterAction.tsx'
 import { TeamMembersAction } from './TeamMembersAction.tsx'
 import { TeamHumanToast } from './TeamHumanToast.tsx'
-import { TeamPageDock } from './TeamPageDock.tsx'
+import { faceOfSnapshot } from './dock.ts'
+import { openTeamTabFor, withTeamSidebarTabs } from './team-tab-open.ts'
 import { TeamSidebarTabBody } from './TeamSidebarTabBody.tsx'
 import { TEAM_TAB_IDS, teamTabDefinitions } from './team-tab-types.ts'
 import { TeamWorkspaceBrowser } from './TeamWorkspaceBrowser.tsx'
@@ -82,7 +83,7 @@ export { TeamDockStore, type TeamDockSnapshot } from './dock.ts'
 const NS = 'team'
 
 export const inject = [
-  'slots', 'workspaces', 'locale', 'remote', 'remote.session', 'sessions', 'connection', 'conversation', 'uiWorkspace', 'layout', 'sidebarRightTabs',
+  'slots', 'workspaces', 'locale', 'remote', 'remote.session', 'sessions', 'connection', 'conversation', 'uiWorkspace', 'sidebarRightTabs', 'sidebarRight',
 ]
 
 /**
@@ -123,17 +124,17 @@ declare module '@deepseek-ai/cordis' {
 function registerModeShadow<T extends object>(
   ctx: ClientContext,
   navigation: TeamNavigation,
-  name: 'sidebar.workspaces' | 'rightbar' | 'sidebar.settings',
+  name: 'sidebar.workspaces' | 'sidebar.settings',
   component: T,
   inject: () => Record<string, unknown>,
 ): void {
   ctx.slots.inject(name, () => {
     let dispose: (() => void) | undefined
     const reconcile = (): void => {
-      // Team mode owns its three seats outright. The frame's center stays the
+      // Team mode owns its two seats outright. The frame's center stays the
       // shipped conversation seat — the Human's session, or an embedded
-      // Member's — so the dock renders the Team pages beside it instead of
-      // taking the center over.
+      // Member's — and the right column stays the shipped Sidebar: the Team
+      // pages live in its tabs.
       const active = navigation.getSnapshot().mode === 'team'
       if (active && dispose === undefined) {
         dispose = ctx.slots.register({
@@ -354,6 +355,17 @@ function applyUi(ctx: ClientContext): void {
     resolveThreadRefs: (request: AgentTeamResolveThreadRefsRequest) => ctx.remote.agentTeam.resolveThreadRefs(request),
   }
 
+  // The one landing seam: every sidebar entry point and in-page jump moves
+  // the navigation snapshot first (memory stays the authority for what Team
+  // mode reopens), then opens or reveals the tab that face names in the
+  // shipped right Sidebar. The footer's mode switches land nothing directly —
+  // the re-entry pass below replays the remembered face on entering Team mode.
+  const landCurrentFace = (): void => {
+    const face = faceOfSnapshot(navigation.getSnapshot())
+    if (face !== undefined) openTeamTabFor(face, ctx.sidebarRight)
+  }
+  const tabLandingActions = withTeamSidebarTabs(navigation.actions(), landCurrentFace)
+
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: 'agent-team',
@@ -373,37 +385,45 @@ function applyUi(ctx: ClientContext): void {
     }),
   }, TeamFooterAction as never))
 
-  const dockInject = (): Record<string, unknown> => ({
-    navigation,
-    dock,
-    ...navigation.actions(),
-    ...dockRemotes,
-    // The frame sizes its right column from this report alone: shown reserves
-    // the track, fullscreen covers the frame, hidden hands the column back.
-    syncPresentation: (presentation: { shown: boolean; track: boolean; fullscreen: boolean }) => {
-      if (presentation.shown) ctx.layout.openRightbar(presentation.track, presentation.fullscreen)
-      else ctx.layout.closeRightbar()
-    },
-  })
-
   registerModeShadow(ctx, navigation, 'sidebar.workspaces', TeamWorkspaceBrowser as never, () => ({
     navigation,
-    ...navigation.actions(),
+    ...tabLandingActions,
     ...sharedRemotes,
-    dock,
     addMember: (request: AgentTeamAddMemberRequest) => ctx.remote.agentTeam.addMember(request),
     createChannel: (request: AgentTeamCreateChannelRequest) => ctx.remote.agentTeam.createChannel(request),
   }))
-  registerModeShadow(ctx, navigation, 'rightbar', TeamPageDock as never, dockInject)
   registerModeShadow(ctx, navigation, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups }))
+
+  // Entering Team mode reopens the last page the Human stood on, as a tab in
+  // the shipped Sidebar: the durable faces ride the navigation snapshot, the
+  // embedded Member conversation stays its own runtime-only memory. Leaving
+  // Team mode asks for nothing back — the Sidebar keeps its own per-Session
+  // tabs, exactly as it does outside Team.
+  ctx.effect(() => {
+    let previous = navigation.getSnapshot()
+    const onMove = (): void => {
+      const snapshot = navigation.getSnapshot()
+      const entered = previous.mode !== 'team' && snapshot.mode === 'team' && snapshot.memberSessionId === undefined
+      previous = snapshot
+      if (entered) landCurrentFace()
+    }
+    // A boot restored into Team mode is that mode's entry for this run: the
+    // remembered page lands as a tab too. The Sidebar's own per-Session
+    // persistence may already hold it; the landing reveal is idempotent.
+    if (previous.mode === 'team' && previous.memberSessionId === undefined) landCurrentFace()
+    const unsubscribe = navigation.subscribe(onMove)
+    return () => {
+      unsubscribe()
+    }
+  }, 'agent-team: team mode tab reentry')
 
   // The Team pages' second home: tab types in the shipped right Sidebar,
   // registered for the plugin's whole lifetime and not mode-shadowed — a tab
   // the Human opened in Team mode must keep its body when the sidebar moves
   // between sessions, and the page bodies hold no Team facts. Stage one
   // contributes the types themselves; stage two the bodies, keyed by each
-  // definition's own id. (While the dock still shadows `rightbar` these bodies
-  // do not render; the dock retires once every entry point lands here.)
+  // definition's own id. The retired dock keeps its files only until its
+  // store, styles, and specs are deleted in the contract pass.
   ctx.effect(() => {
     const disposers = teamTabDefinitions(key => ctx.locale.bind(NS)(key)).map(definition => ctx.sidebarRightTabs.register(definition))
     return () => {
@@ -411,7 +431,7 @@ function applyUi(ctx: ClientContext): void {
     }
   }, 'agent-team: right-sidebar tab types')
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => {
-    const tabInject = () => ({ navigation, ...navigation.actions(), ...dockRemotes })
+    const tabInject = () => ({ navigation, ...tabLandingActions, ...dockRemotes })
     const disposers = TEAM_TAB_IDS.map(key => ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key,
@@ -434,7 +454,7 @@ function applyUi(ctx: ClientContext): void {
     locale: NS,
     inject: () => ({
       navigation,
-      ...navigation.actions(),
+      ...tabLandingActions,
       loadInbox: (request: AgentTeamInboxRequest) => ctx.remote.agentTeam.inbox(request),
       subscribeChanges: (scope: TeamChangeScope, listener: TeamChangeListener) => changes.subscribe(scope, listener),
       subscribeReads: (listener: () => void) => reads.subscribe(listener),

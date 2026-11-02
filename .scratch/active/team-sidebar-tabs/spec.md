@@ -48,6 +48,7 @@
 - 中间栏标准对话文件链接：系统边栏回挂即自动恢复；ExpandButton 复活。
 - 嵌入成员会话：维持现状（中间栏单会话切换）。
 - dock 开合 toggle 按钮移除（右栏展开/收起归系统边栏）。
+- 执行期补充两条口径：线程类页面（Channel/Thread）的 Back 经包裹动作 reveal 下层列表/频道 tab，自己 tab 保留；session-history 的「返回」额外关闭自己的 tab（`useTabInfo().tab.actions.close()`）——它下层没有 Team 页面可回，「离开页面」在 tab 世界就是关 tab。e2e 与单测均按此钉住。
 
 ### 5.3 状态与持久化
 

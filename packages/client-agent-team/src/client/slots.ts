@@ -136,8 +136,6 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
   & TeamNavigationActions
   & {
     navigation: TeamNavigationSource
-    /** The dock layout store: the sidebar's toggle reads and flips it. */
-    dock: TeamDockStore
     loadMembers: (request: AgentTeamMembersRequest) => Promise<RemoteResult<readonly AgentTeamClientMemberStatus[]>>
     /** One Workspace's per-Member working queues behind the Agents panel's task surfaces. */
     loadMemberTasks: (request: AgentTeamMemberTasksRequest) => Promise<RemoteResult<AgentTeamMemberTasks>>

@@ -54,7 +54,13 @@ export function TeamSidebarTabBody(props: TeamSidebarTabBodyProps) {
       return <TeamMessageCenterPage key={tab.id} useWorkspaces={useWorkspaces} loadMessageCenter={pages.loadMessageCenter} loadChannels={pages.loadChannels} readThread={pages.readThread} reply={pages.reply} subscribeChanges={pages.subscribeChanges} selectWorkspace={pages.selectWorkspace} selectThread={pages.selectThread} humanName={humanName} {...humanAvatarProps} t={t} />
     case TEAM_SESSION_HISTORY_KIND: {
       const workspaceId: WorkspaceId | undefined = target.workspaceId ?? navigationState.workspaceId
-      return <TeamSessionHistoryPage key={tab.id} memberId={target.memberId} {...(workspaceId === undefined ? {} : { workspaceId })} loadMembers={pages.loadMembers} loadMemberSessions={pages.loadMemberSessions} loadMemberSessionTranscript={pages.loadMemberSessionTranscript} loadExternalContext={pages.loadExternalContext} exitSessionHistory={pages.exitSessionHistory} t={t} />
+      // Leaving the review page closes its own tab: unlike a Thread's Back —
+      // which lands on the list or Channel the Thread came from — session
+      // history has no page underneath it, so the tab is what the Human left.
+      return <TeamSessionHistoryPage key={tab.id} memberId={target.memberId} {...(workspaceId === undefined ? {} : { workspaceId })} loadMembers={pages.loadMembers} loadMemberSessions={pages.loadMemberSessions} loadMemberSessionTranscript={pages.loadMemberSessionTranscript} loadExternalContext={pages.loadExternalContext} exitSessionHistory={() => {
+        pages.exitSessionHistory()
+        tab.actions.close()
+      }} t={t} />
     }
     case TEAM_THREAD_KIND:
       return <TeamThreadPage key={tab.id} humanName={humanName} {...humanAvatarProps} workspaceId={target.workspaceId} putAttachment={pages.putAttachment} threadRef={target.threadRef} {...(target.threadOrigin === undefined ? {} : { threadOrigin: target.threadOrigin })} backFromThread={pages.backFromThread} selectChannel={pages.selectChannel} selectThread={pages.selectThread} resolveTaskRefs={pages.resolveTaskRefs} resolveThreadRefs={pages.resolveThreadRefs} openMemberSession={pages.openMemberSession} {...(target.channelRef === undefined ? {} : { channelRef: target.channelRef })} {...(target.taskRef === undefined ? {} : { taskRef: target.taskRef })} {...(target.taskNumber === undefined ? {} : { taskNumber: target.taskNumber })} drafts={pages.drafts} getAttachment={pages.getAttachment} readThread={pages.readThread} loadChannels={pages.loadChannels} loadThreadHistory={pages.loadThreadHistory} threadObservations={pages.threadObservations} summarizeThread={pages.summarizeThread} subscribeChanges={pages.subscribeChanges} loadMembers={pages.loadMembers} reply={pages.reply} editMessage={pages.editMessage} recallMessage={pages.recallMessage} changeTask={pages.changeTask} promoteThread={pages.promoteThread} t={t} />

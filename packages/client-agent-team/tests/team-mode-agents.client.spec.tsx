@@ -116,10 +116,9 @@ describe('Team agent surfaces', () => {
     fireEvent.click(b.view.getByRole('button', { name: '团队' }))
     await waitFor(() => expect(document.documentElement.dataset.agentTeamMode).toBe('team'))
     expect(mainViewSessionId(b)).toBe('ordinary-session')
-    expect(await b.view.findByRole('heading', { name: '频道' })).toBeTruthy()
-    // The name appears three times: the selector row, the dock overview tab's
-    // own label, and the welcome body the dock opens with.
-    expect(b.view.getAllByText('Alpha')).toHaveLength(3)
+    expect(await b.view.findByRole('button', { name: /收件箱/ })).toBeTruthy()
+    // The overview lands no tab now — the name stands once, on the selector.
+    expect(b.view.getAllByText('Alpha')).toHaveLength(1)
     expect(b.view.queryByText('设置')).toBeNull()
     const membersTrigger = b.view.getByRole('button', { name: '成员' })
     const delayedMembers = Promise.withResolvers<Awaited<ReturnType<typeof b.members>>>()
@@ -154,8 +153,8 @@ describe('Team agent surfaces', () => {
   it('loads Workspace Agents and creates a durable Member without optimistic rows', async () => {
     const b = await runtimeWithTeam({ initialChannels: true })
     fireEvent.click(b.view.getByRole('button', { name: '团队' }))
-    expect(await b.view.findByText('从左侧选择一个频道开始协作')).toBeTruthy()
-
+    // The agents panel is the readiness line: no page tab stands for the
+    // overview, and the roster loads underneath the selector.
     expect(await b.view.findByText('builder')).toBeTruthy()
     expect(b.view.getByRole('img', { name: '可用' })).toBeTruthy()
     expect(b.view.getByRole('img', { name: '工作中' })).toBeTruthy()
@@ -731,8 +730,8 @@ describe('Team archival surfaces', () => {
     await within(page).findByText('transcript tail of session-archived')
     await waitFor(() => expect(b.memberSessionTranscript).toHaveBeenCalledWith({ memberId: 'member:builder', sessionId: 'session-archived' }))
 
-    // 返回 clears the face; the page's durable navigation survives a reload,
-    // so re-entering Team mode without touching the sidebar reopens it.
+    // 返回 clears the durable face and closes the page's own tab: session
+    // history has no Team page underneath it, so leaving means the tab goes.
     fireEvent.click(within(page).getByRole('button', { name: '返回' }))
     await waitFor(() => expect(b.view.container.querySelector('[data-team-session-history]')).toBeNull())
     await b.runtime.dispose()

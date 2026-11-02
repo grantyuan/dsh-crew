@@ -1,7 +1,7 @@
 import { RemoteStream, RemoteStreamCarrierError } from '@deepseek-ai/dsh-api-gateway/client'
 import type { AgentTeamChangesRequest } from '@grantyuan/dsh-crew/types'
 import { vi } from 'vitest'
-import { useState } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { AgentTeamAddMemberRequest, AgentTeamCreateChannelRequest, AgentTeamMemberDiagnostic, AgentTeamReplyRequest, AgentTeamSendMessageRequest, AgentTeamTask } from '@grantyuan/dsh-crew/types'
 import { COMMON_NS, LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
@@ -100,6 +100,76 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   // registry — its claim ranking and seats belong to Harness — so specs can
   // assert what types the plugin contributed and with what copy.
   const tabTypes: { readonly id: string; readonly kind: string; readonly title: (address: string) => string; readonly canOpen?: (address: string) => boolean; readonly patterns?: readonly string[]; readonly guide?: readonly { id: string; order: number; title: () => string }[] }[] = []
+  // The Team's landing controller drives the Sidebar through its navigation
+  // face. The bench does not mount the shipped Sidebar: this double applies
+  // the same open semantics — reveal by identity, else append and make active,
+  // pages deduplicate per kind (session history per Member) — onto a tab
+  // store, and the TabHost below renders every open tab's body through the
+  // keyed `sidebar.right.pane.tab` seat the Team registers, so page specs read
+  // the same bodies production renders while `openResource`/`openTab` stay
+  // assertable through their call records. `teamTabs()` reads the store.
+  interface BenchTab {
+    readonly id: string
+    readonly key: string
+    readonly kind: string
+    readonly contentId: string
+    readonly params: unknown
+    readonly revision: number
+  }
+  const tabStore = createSnapshotStore<{ readonly tabs: readonly BenchTab[]; readonly activeId?: string }>({ tabs: [] })
+  const throwOpens = { active: false }
+  let tabSequence = 0
+  const upsertTab = (identity: string, kind: string, contentId: string, params: unknown): void => {
+    if (throwOpens.active) throw new Error('sidebarRight: no session surface is mounted')
+    const state = tabStore.getSnapshot()
+    const existing = state.tabs.find(tab => tab.key === identity)
+    if (existing !== undefined) {
+      tabStore.set({ activeId: existing.id, tabs: state.tabs.map(tab => tab.key === identity ? { ...tab, revision: tab.revision + 1, ...(params === undefined ? {} : { params }) } : tab) })
+      return
+    }
+    const id = `bench-tab-${++tabSequence}`
+    tabStore.set({ activeId: id, tabs: [...state.tabs, { id, key: identity, kind, contentId, params, revision: 1 }] })
+  }
+  const closeTab = (id: string): void => {
+    const state = tabStore.getSnapshot()
+    const index = state.tabs.findIndex(tab => tab.id === id)
+    if (index < 0) return
+    const tabs = state.tabs.filter(tab => tab.id !== id)
+    const nextActive = tabs[Math.max(0, index - 1)]?.id
+    tabStore.set({ tabs, ...(nextActive === undefined ? {} : { activeId: nextActive }) })
+  }
+  const openResource = vi.fn((address: string, options?: { kind?: string; params?: unknown }) => {
+    const kind = address.startsWith('dsh-resource://team/channel/') ? 'team-channel'
+      : address.startsWith('dsh-resource://team/thread/') ? 'team-thread'
+        : options?.kind ?? ''
+    if (kind !== 'team-channel' && kind !== 'team-thread') throw new Error(`bench openResource: unexpected address "${address}"`)
+    upsertTab(`${kind}:${address}`, kind, address, options?.params)
+  })
+  const openTab = vi.fn((kind: string, options?: { params?: unknown }) => {
+    if (kind === 'team-session-history') {
+      const params = options?.params as { memberId?: string } | undefined
+      upsertTab(`${kind}:${params?.memberId ?? ''}`, kind, `sidebar://page/${kind}`, params)
+      return
+    }
+    if (kind === 'team-inbox' || kind === 'team-tasks' || kind === 'team-message-center') {
+      upsertTab(kind, kind, `sidebar://page/${kind}`, options?.params)
+      return
+    }
+    throw new Error(`bench openTab: unexpected kind "${kind}"`)
+  })
+  runtime.ctx.provide('sidebarRight', {
+    openResource,
+    openTab,
+    mounted: { getSnapshot: () => 'ordinary-session', subscribe: () => () => {} },
+    close: vi.fn(),
+    active: vi.fn(() => undefined),
+    focus: vi.fn(),
+    isExpanded: vi.fn(() => true),
+    toggleExpanded: vi.fn(),
+    split: vi.fn(),
+    float: vi.fn(),
+    dock: vi.fn(),
+  } as never)
   runtime.ctx.provide('sidebarRightTabs', {
     register: (definition: (typeof tabTypes)[number]) => {
       tabTypes.push(definition)
@@ -714,6 +784,40 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     rightbar: { kind: 'single', scope: 'root' },
     'shell.overlay': { kind: 'list', scope: 'root' },
   } as never, Frame as never)
+  // The right column stays unclaimed by the Team now; the bench occupies it
+  // with the TabHost. The host declares the keyed tab seat as its own
+  // children (render authority per SlotCore), dispatches one occurrence per
+  // open tab, and fakes only the tabInfo hook the shipped Sidebar would bind.
+  type TeamTabHostProps = PropsRenderSlots<'sidebar.right.pane.tab'>
+  function TeamTabHost({ renderSlot }: TeamTabHostProps) {
+    const state = useSyncExternalStore(tabStore.subscribe, tabStore.getSnapshot, tabStore.getSnapshot)
+    // Only the active tab's body mounts — the shipped Sidebar's default
+    // (keepMounted off), and what the dock did with one pane: inactive tab
+    // bodies are absent from the DOM, so page queries address one surface.
+    const active = state.tabs.find(tab => tab.id === state.activeId)
+    if (active === undefined) return <section data-team-tab-host />
+    return <section data-team-tab-host>
+      <div data-team-tab={active.kind} data-team-tab-revision={String(active.revision)}>
+        {renderSlot('sidebar.right.pane.tab', {}, {
+          entryKey: `agent-team.${active.kind}`,
+          hookContext: {
+            tab: { id: active.id, kind: active.kind, contentId: active.contentId, title: active.kind, navigation: { address: active.contentId, params: active.params, revision: active.revision }, signal: new AbortController().signal },
+            actions: { close: () => { closeTab(active.id) }, bindCommands: () => () => {}, openResource, openTab },
+          } as never,
+        })}
+      </div>
+    </section>
+  }
+  runtime.slots.register({
+    name: 'rightbar',
+    children: {
+      'sidebar.right.pane.tab': {
+        kind: 'keyed',
+        scope: 'session',
+        inject: { hooks: { tabInfo: (_standard: unknown, context: { readonly tab: unknown; readonly actions?: unknown }) => () => ({ tab: { ...context.tab as object, actions: context.actions } }) } },
+      },
+    },
+  } as never, TeamTabHost as never)
   await runtime.mount({ inject: [...injectSidebar], apply: applySidebar })
   // The shipped ConversationRoot occupies the conversation seat — the same
   // surface production mounts — so member-session specs assert the
@@ -724,5 +828,5 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   const disposeSettings = runtime.slots.register({ name: 'sidebar.settings', priority: 0 }, BaselineSettings as never)
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
-  return { runtime, team, view, sidebarTabTypes: tabTypes, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, openSession, summarizeThread, seedDigest, failDigest }
+  return { runtime, team, view, sidebarTabTypes: tabTypes, openResource, openTab, teamTabs: () => tabStore.getSnapshot().tabs, failSidebarOpens: (active: boolean) => { throwOpens.active = active }, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, openSession, summarizeThread, seedDigest, failDigest }
 }

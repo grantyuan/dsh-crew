@@ -33,7 +33,7 @@ function boundedPreview(text: string): string {
  * either mode. The first pass only seeds the seen-cursor — a backlog that
  * predates this mount never toasts.
  */
-export function TeamHumanToast({ navigation, loadInbox, subscribeChanges, subscribeReads, enterTeam, selectThread, t, useWorkspaces }: TeamToastProps) {
+export function TeamHumanToast({ navigation, loadInbox, subscribeChanges, subscribeReads, enterTeam, selectWorkspace, selectThread, t, useWorkspaces }: TeamToastProps) {
   const workspaces = useWorkspaces(state => state.items)
   const [show, setShow] = useState<ToastShow | undefined>(undefined)
   const seenRef = useRef<Map<string, number> | undefined>(undefined)
@@ -98,8 +98,11 @@ export function TeamHumanToast({ navigation, loadInbox, subscribeChanges, subscr
     actions={[{ label: t('toastView'), onClick: () => {
       setShow(undefined)
       // The jump is one durable navigation: enter Team mode (a no-op when
-      // already in it) and open the Thread — the dock follows the face.
+      // already in it), stand on the row's Workspace, then open its Thread —
+      // the wrapped selectThread lands the Thread tab in the right Sidebar,
+      // and that address needs the Workspace, so it is named first.
       enterTeam()
+      selectWorkspace(show.workspaceId)
       selectThread(show.threadRef, show.channelRef)
     } }]}
     onDone={() => { setShow(current => current?.key === show.key ? undefined : current) }}

@@ -89,10 +89,10 @@ describe('human new-message toast', () => {
     await waitFor(() => expect(JSON.parse(localStorage.getItem('dsh.agent-team.navigation') ?? '')).toMatchObject({
       mode: 'team', threadRef: 'thread:w1',
     }))
-    // The banner leaves with the jump; the Thread face opened in the dock.
+    // The banner leaves with the jump; the Thread face lands as a Sidebar tab.
     await waitFor(() => expect(within(document.body).queryByText(/The deploy is blocked/)).toBeNull())
-    const dock = await b.view.findByRole('region', { name: '团队面板' })
-    await waitFor(() => expect(within(dock).getByRole('tab', { name: /Thread/ })).toBeTruthy())
+    await waitFor(() => expect(b.openResource).toHaveBeenCalledWith(expect.stringContaining('dsh-resource://team/thread/'), expect.anything()))
+    await waitFor(() => expect(b.view.container.querySelector('[data-team-tab="team-thread"]')).not.toBeNull())
   })
 
   it('toasts each new direct sequence once and stays quiet on the same cursor', async () => {
