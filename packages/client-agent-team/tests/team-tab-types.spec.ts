@@ -92,6 +92,10 @@ describe('teamTabTargetOf', () => {
     expect(target).toEqual({ kind: TEAM_THREAD_KIND, workspaceId: workspace, threadRef, channelRef, taskRef: 'task:1' as AgentTeamTaskRef, taskNumber: 7, threadOrigin: 'messages' })
     expect(teamTabTargetOf({ kind: TEAM_THREAD_KIND, address: teamThreadAddress(workspace, threadRef), params: undefined }))
       .toEqual({ kind: TEAM_THREAD_KIND, workspaceId: workspace, threadRef })
+    // The locate anchor rides params like the other context: a 「定位」 re-open
+    // of a standing Thread tab re-navigates it with the new anchor.
+    expect(teamTabTargetOf({ kind: TEAM_THREAD_KIND, address: teamThreadAddress(workspace, threadRef), params: { focusSequence: 42 } }))
+      .toEqual({ kind: TEAM_THREAD_KIND, workspaceId: workspace, threadRef, focusSequence: 42 })
   })
 
   it('keeps list pages parameterless and session history keyed by its Member', () => {

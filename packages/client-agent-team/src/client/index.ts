@@ -361,8 +361,9 @@ function applyUi(ctx: ClientContext): void {
   // shipped right Sidebar. The footer's mode switches land nothing directly —
   // the re-entry pass below replays the remembered face on entering Team mode.
   const landCurrentFace = (): void => {
-    const face = faceOfSnapshot(navigation.getSnapshot())
-    if (face !== undefined) openTeamTabFor(face, ctx.sidebarRight)
+    const snapshot = navigation.getSnapshot()
+    const face = faceOfSnapshot(snapshot)
+    if (face !== undefined) openTeamTabFor(face, ctx.sidebarRight, face.kind === 'thread' ? snapshot.focusSequence : undefined)
   }
   const tabLandingActions = withTeamSidebarTabs(navigation.actions(), landCurrentFace)
 

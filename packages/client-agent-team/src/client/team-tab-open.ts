@@ -1,5 +1,6 @@
 import type { ISidebarRight } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { TeamTabFace } from './dock.ts'
+import type { TeamThreadOrigin } from './navigation.ts'
 import type { TeamNavigationActions } from './navigation.ts'
 import { teamChannelAddress, teamThreadAddress } from './team-address.ts'
 import { TEAM_INBOX_KIND, TEAM_MESSAGES_KIND, TEAM_SESSION_HISTORY_KIND, TEAM_TASKS_KIND } from './team-tab-types.ts'
@@ -17,7 +18,19 @@ import { TEAM_INBOX_KIND, TEAM_MESSAGES_KIND, TEAM_SESSION_HISTORY_KIND, TEAM_TA
  * swallowed here. The navigation snapshot still remembers the face, and the
  * Team-mode re-entry pass replays it once a Session stands again.
  */
-export function openTeamTabFor(face: TeamTabFace, sidebarRight: ISidebarRight): void {
+/** One Thread open's navigation params: the context the leaf carries beside
+ * its own identity, plus the one-shot locate anchor when the open is a
+ * Message Center 「定位」. The anchor rides params, not the address: two opens
+ * of one Thread are one tab, and a new anchor is a re-navigation. */
+export interface TeamThreadOpenParams {
+  readonly channelRef?: string
+  readonly taskRef?: string
+  readonly taskNumber?: number
+  readonly threadOrigin?: TeamThreadOrigin
+  readonly focusSequence?: number
+}
+
+export function openTeamTabFor(face: TeamTabFace, sidebarRight: ISidebarRight, focusSequence?: number): void {
   try {
     switch (face.kind) {
       case 'channel':
@@ -31,7 +44,8 @@ export function openTeamTabFor(face: TeamTabFace, sidebarRight: ISidebarRight): 
               ...(face.taskRef === undefined ? {} : { taskRef: face.taskRef }),
               ...(face.taskNumber === undefined ? {} : { taskNumber: face.taskNumber }),
               ...(face.threadOrigin === undefined ? {} : { threadOrigin: face.threadOrigin }),
-            },
+              ...(focusSequence === undefined ? {} : { focusSequence }),
+            } satisfies TeamThreadOpenParams as never,
           })
         }
         break

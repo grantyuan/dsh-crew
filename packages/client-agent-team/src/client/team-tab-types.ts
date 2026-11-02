@@ -46,6 +46,8 @@ export interface TeamResourceParams {
   readonly taskRef?: AgentTeamTaskRef
   readonly taskNumber?: number
   readonly threadOrigin?: TeamThreadOrigin
+  /** One-shot locate anchor from a Message Center 「定位」 open; the page owns its replay. */
+  readonly focusSequence?: number
 }
 
 /** Navigation params the session-history page needs: which Member, which Workspace. */
@@ -130,6 +132,7 @@ export type TeamTabTarget =
     readonly taskRef?: AgentTeamTaskRef
     readonly taskNumber?: number
     readonly threadOrigin?: TeamThreadOrigin
+    readonly focusSequence?: number
   }
   | { readonly kind: typeof TEAM_INBOX_KIND | typeof TEAM_TASKS_KIND | typeof TEAM_MESSAGES_KIND }
   | { readonly kind: typeof TEAM_SESSION_HISTORY_KIND; readonly memberId: AgentTeamMemberId; readonly workspaceId?: WorkspaceId }
@@ -166,6 +169,7 @@ export function teamTabTargetOf(input: {
         ...(params?.taskRef === undefined ? {} : { taskRef: params.taskRef }),
         ...(params?.taskNumber === undefined ? {} : { taskNumber: params.taskNumber }),
         ...(params?.threadOrigin === undefined ? {} : { threadOrigin: params.threadOrigin }),
+        ...(params?.focusSequence === undefined ? {} : { focusSequence: params.focusSequence }),
       }
     }
     case TEAM_INBOX_KIND:

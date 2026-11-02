@@ -184,6 +184,13 @@ describe('Team Message Center surfaces', () => {
     await waitFor(() => expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '')).toMatchObject({
       threadRef: 'thread:w1', threadOrigin: 'messages', focusSequence: 12,
     }))
+    // The same open lands the Thread tab through the Sidebar face, and the
+    // anchor rides the tab's params so the body can hand it to the page.
+    await waitFor(() => expect(b.openResource).toHaveBeenCalledWith(
+      expect.stringContaining('dsh-resource://team/thread/'),
+      expect.objectContaining({ params: expect.objectContaining({ focusSequence: 12 }) }),
+    ))
+    await waitFor(() => expect(b.view.container.querySelector('[data-team-tab="team-thread"]')).not.toBeNull())
     await b.runtime.dispose()
   })
 
