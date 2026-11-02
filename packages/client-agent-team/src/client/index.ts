@@ -61,14 +61,12 @@ import { HumanSettingsSection } from './HumanSettingsSection.tsx'
 import { TeamHumanIdentity } from './human-identity.ts'
 import { TeamEnvironmentCheck } from './environment-check.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
-import { TeamNavigation } from './navigation.ts'
+import { faceOfSnapshot, TeamNavigation } from './navigation.ts'
 import { TeamChangeStream, TeamReadStream, type TeamChangeListener, type TeamChangeScope } from './team-changes.ts'
 import { TeamDraftStore } from './drafts.ts'
-import { TeamDockStore } from './dock.ts'
 import { TeamFooterAction } from './TeamFooterAction.tsx'
 import { TeamMembersAction } from './TeamMembersAction.tsx'
 import { TeamHumanToast } from './TeamHumanToast.tsx'
-import { faceOfSnapshot } from './dock.ts'
 import { openTeamTabFor, withTeamSidebarTabs } from './team-tab-open.ts'
 import { TeamSidebarTabBody } from './TeamSidebarTabBody.tsx'
 import { TEAM_TAB_IDS, teamTabDefinitions } from './team-tab-types.ts'
@@ -77,8 +75,7 @@ import { en, zh, type TeamKey } from './locales.ts'
 
 export type { TeamMode, TeamNavigationActions, TeamNavigationSnapshot } from './navigation.ts'
 export type { TeamKey } from './locales.ts'
-export { TeamNavigation } from './navigation.ts'
-export { TeamDockStore, type TeamDockSnapshot } from './dock.ts'
+export { faceOfSnapshot, type TeamTabFace, type TeamTabFaceKind, TeamNavigation } from './navigation.ts'
 
 const NS = 'team'
 
@@ -117,7 +114,6 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     teamNavigation: TeamNavigation
     teamDrafts: TeamDraftStore
-    teamDock: TeamDockStore
   }
 }
 
@@ -165,8 +161,6 @@ function applyUi(ctx: ClientContext): void {
   const disposeNavigation = ctx.reflect.provide('teamNavigation', navigation)
   const drafts = new TeamDraftStore()
   const disposeDrafts = ctx.reflect.provide('teamDrafts', drafts)
-  const dock = new TeamDockStore()
-  const disposeDock = ctx.reflect.provide('teamDock', dock)
   // The Human's own identity: one projection every seat reads, refreshed once
   // after a profile write so a rename reaches the timeline and the member refs
   // without a reload. Reads are demand-driven — the first seat that subscribes
@@ -191,12 +185,10 @@ function applyUi(ctx: ClientContext): void {
   ctx.effect(() => () => {
     navigation.dispose()
     drafts.dispose()
-    dock.dispose()
     humanIdentity.dispose()
     environment.dispose()
     void disposeNavigation()
     void disposeDrafts()
-    void disposeDock()
   }, 'agent-team: navigation service')
 
   // Embedding a Member's conversation selects its Session through the shipped
@@ -288,7 +280,7 @@ function applyUi(ctx: ClientContext): void {
     return groups.filter(group => group.members.length > 0)
   }
 
-  // Remote bindings shared by every Team seat; the dock's page bodies extend
+  // Remote bindings shared by every Team seat; the sidebar tab bodies extend
   // them with the Thread-level writes the pages carry.
   const sharedRemotes = {
     loadChannels: (request: AgentTeamViewRequest) => ctx.remote.agentTeam.view(request),
@@ -329,11 +321,11 @@ function applyUi(ctx: ClientContext): void {
     loadModels: () => ctx.remote.session.modelCatalog(),
     openMemberSession: openMemberSessionImpl,
   }
-  // The dock's tab bodies render the same pages the conversation seat used to,
-  // so they carry the same Thread-level remotes — including the durable read
+  // The tab bodies render the same pages the conversation seat used to, so
+  // they carry the same Thread-level remotes — including the durable read
   // that consumes this reader's mention markers (the Host's changes stream
   // never wakes on reads, so the Human's badge refreshes from the read itself).
-  const dockRemotes = {
+  const pageRemotes = {
     ...sharedRemotes,
     readThread: async (request: AgentTeamThreadReadRequest) => {
       const result = await ctx.remote.agentTeam.readThread(request)
@@ -423,8 +415,7 @@ function applyUi(ctx: ClientContext): void {
   // the Human opened in Team mode must keep its body when the sidebar moves
   // between sessions, and the page bodies hold no Team facts. Stage one
   // contributes the types themselves; stage two the bodies, keyed by each
-  // definition's own id. The retired dock keeps its files only until its
-  // store, styles, and specs are deleted in the contract pass.
+  // definition's own id.
   ctx.effect(() => {
     const disposers = teamTabDefinitions(key => ctx.locale.bind(NS)(key)).map(definition => ctx.sidebarRightTabs.register(definition))
     return () => {
@@ -432,7 +423,7 @@ function applyUi(ctx: ClientContext): void {
     }
   }, 'agent-team: right-sidebar tab types')
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => {
-    const tabInject = () => ({ navigation, ...tabLandingActions, ...dockRemotes })
+    const tabInject = () => ({ navigation, ...tabLandingActions, ...pageRemotes })
     const disposers = TEAM_TAB_IDS.map(key => ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key,

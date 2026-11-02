@@ -12,7 +12,7 @@ export function WelcomeSurface({ workspaceId, workspaceTitle, t }: { workspaceId
   const welcome = workspaceId === undefined
     ? { eyebrow: t('teamMode'), title: t('team'), body: t('empty') }
     : { eyebrow: workspaceTitle ?? workspaceId, title: t('channels'), body: t('selectChannelHint') }
-  return <main className={css.welcomeSurface} data-team-dock-welcome>
+  return <main className={css.welcomeSurface} data-team-welcome>
     <div className={css.welcome}>
       <span className={css.welcomeEyebrow}>{welcome.eyebrow}</span>
       <h1>{welcome.title}</h1>

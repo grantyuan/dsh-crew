@@ -107,7 +107,7 @@ describe('Team sidebar tab body', () => {
     const { props, remotes } = bodyProps({ kind: TEAM_CHANNEL_KIND, address })
     const { container } = render(<TeamSidebarTabBody {...(props as unknown as TeamSidebarTabBodyProps)} />)
     await waitFor(() => expect(remotes.loadChannels).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'w1', channelRef: 'channel:a' })))
-    expect(container.querySelector('[data-team-dock-welcome]')).toBeNull()
+    expect(container.querySelector('[data-team-welcome]')).toBeNull()
   })
 
   it('keeps two Channel tabs for two refs independent of one another', async () => {
@@ -137,19 +137,19 @@ describe('Team sidebar tab body', () => {
     const opened = bodyProps({ kind: TEAM_SESSION_HISTORY_KIND, address: 'sidebar://page/team-session-history', params: { memberId: 'member:iris', workspaceId: 'w1' } })
     const { container: openedBox } = render(<TeamSidebarTabBody {...(opened.props as unknown as TeamSidebarTabBodyProps)} />)
     await waitFor(() => expect(opened.remotes.loadMemberSessions).toHaveBeenCalledWith({ memberId: 'member:iris' }))
-    expect(openedBox.querySelector('[data-team-dock-welcome]')).toBeNull()
+    expect(openedBox.querySelector('[data-team-welcome]')).toBeNull()
     const bare = bodyProps({ kind: TEAM_SESSION_HISTORY_KIND, address: 'sidebar://page/team-session-history', params: undefined })
     const { container: bareBox } = render(<TeamSidebarTabBody {...(bare.props as unknown as TeamSidebarTabBodyProps)} />)
-    expect(bareBox.querySelector('[data-team-dock-welcome]')).not.toBeNull()
+    expect(bareBox.querySelector('[data-team-welcome]')).not.toBeNull()
   })
 
   it('draws the welcome surface for an unclaimed address or a kind no Team type registered', () => {
     const crossed = bodyProps({ kind: TEAM_CHANNEL_KIND, address: teamThreadAddress(workspace, 'thread:9' as AgentTeamThreadRef) })
     const { container: crossedBox } = render(<TeamSidebarTabBody {...(crossed.props as unknown as TeamSidebarTabBodyProps)} />)
-    expect(crossedBox.querySelector('[data-team-dock-welcome]')).not.toBeNull()
+    expect(crossedBox.querySelector('[data-team-welcome]')).not.toBeNull()
     const unknown = bodyProps({ kind: 'some-other-kinds-tab', address: 'dsh-resource://file/session/s1/a.md' })
     const { container: unknownBox } = render(<TeamSidebarTabBody {...(unknown.props as unknown as TeamSidebarTabBodyProps)} />)
-    expect(unknownBox.querySelector('[data-team-dock-welcome]')).not.toBeNull()
+    expect(unknownBox.querySelector('[data-team-welcome]')).not.toBeNull()
   })
 
   it('opens the Inbox page for the browsed Workspace without reading any Channel', async () => {
@@ -157,6 +157,6 @@ describe('Team sidebar tab body', () => {
     const { container } = render(<TeamSidebarTabBody {...(props as unknown as TeamSidebarTabBodyProps)} />)
     await waitFor(() => expect(remotes.loadInbox).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'w1' })))
     expect(remotes.loadChannels).not.toHaveBeenCalled()
-    expect(container.querySelector('[data-team-dock-welcome]')).toBeNull()
+    expect(container.querySelector('[data-team-welcome]')).toBeNull()
   })
 })

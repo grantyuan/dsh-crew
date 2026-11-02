@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { STORAGE_KEY, TeamNavigation } from '../src/client/navigation.ts'
+import { faceOfSnapshot, STORAGE_KEY, TeamNavigation } from '../src/client/navigation.ts'
 
 function storage(): Storage {
   const values = new Map<string, string>()
@@ -299,4 +299,25 @@ describe('TeamNavigation', () => {
     expect(new TeamNavigation().getSnapshot()).toEqual({ mode: 'team', workspaceId: 'workspace:one' })
   })
 
+})
+
+describe('faceOfSnapshot', () => {
+  const w1 = 'w1' as never
+  const channelA = 'channel:a' as never
+  const thread1 = 'thread:1' as never
+  const builder = 'member:builder' as never
+  const team = (patch: Record<string, unknown>): never => ({ mode: 'team', ...patch }) as never
+
+  it('reads the leaf the sidebar state names', () => {
+    expect(faceOfSnapshot({ mode: 'conversation' } as never)).toBeUndefined()
+    expect(faceOfSnapshot(team({}))).toEqual({ kind: 'overview' })
+    expect(faceOfSnapshot(team({ workspaceId: w1 }))).toEqual({ kind: 'overview', workspaceId: w1 })
+    expect(faceOfSnapshot(team({ inbox: true }))).toEqual({ kind: 'inbox' })
+    expect(faceOfSnapshot(team({ tasks: true }))).toEqual({ kind: 'tasks' })
+    expect(faceOfSnapshot(team({ messages: true }))).toEqual({ kind: 'messages' })
+    expect(faceOfSnapshot(team({ sessionHistory: builder }))).toEqual({ kind: 'sessionHistory', memberId: builder })
+    expect(faceOfSnapshot(team({ workspaceId: w1, channelRef: channelA }))).toEqual({ kind: 'channel', channelRef: channelA, workspaceId: w1 })
+    expect(faceOfSnapshot(team({ workspaceId: w1, channelRef: channelA, threadRef: thread1, threadOrigin: 'tasks', taskNumber: 3 })))
+      .toEqual({ kind: 'thread', threadRef: thread1, workspaceId: w1, channelRef: channelA, taskNumber: 3, threadOrigin: 'tasks' })
+  })
 })

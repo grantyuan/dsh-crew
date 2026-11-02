@@ -1,7 +1,5 @@
 import type { ISidebarRight } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
-import type { TeamTabFace } from './dock.ts'
-import type { TeamThreadOrigin } from './navigation.ts'
-import type { TeamNavigationActions } from './navigation.ts'
+import type { TeamNavigationActions, TeamTabFace, TeamThreadOrigin } from './navigation.ts'
 import { teamChannelAddress, teamThreadAddress } from './team-address.ts'
 import { TEAM_INBOX_KIND, TEAM_MESSAGES_KIND, TEAM_SESSION_HISTORY_KIND, TEAM_TASKS_KIND } from './team-tab-types.ts'
 

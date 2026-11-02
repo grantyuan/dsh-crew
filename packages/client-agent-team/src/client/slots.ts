@@ -91,7 +91,6 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TeamNavigationActions, TeamNavigationSnapshot } from './navigation.ts'
 import type { TeamChangeListener, TeamChangeScope } from './team-changes.ts'
 import type { TeamDraftStore } from './drafts.ts'
-import type { TeamDockStore } from './dock.ts'
 import type { TeamHumanIdentitySource } from './human-identity.ts'
 
 export interface TeamNavigationSource {
@@ -294,23 +293,6 @@ export type TeamToastProps = PropsRuntime<'shell.overlay'> & PropsLocale<'team'>
   loadInbox: (request: AgentTeamInboxRequest) => Promise<RemoteResult<AgentTeamInbox>>
   subscribeChanges: SubscribeTeamChanges
   subscribeReads: (listener: () => void) => () => void
-}
-
-/** The presentation the dock reports to the frame's right column. */
-export interface TeamDockPresentation {
-  /** Whether the dock is drawn at all. */
-  readonly shown: boolean
-  /** Whether the drawn dock reserves a grid track the conversation makes room for. */
-  readonly track: boolean
-  /** Whether the dock covers the frame, independently of its retained track. */
-  readonly fullscreen: boolean
-}
-
-export type TeamDockProps = TeamPagePayload & {
-  /** The dock layout store: panes, tabs, and presentation, browser-persisted. */
-  dock: TeamDockStore
-  /** Report the dock's presentation to the frame whenever it changes. */
-  syncPresentation: (presentation: TeamDockPresentation) => void
 }
 
 export type TeamSettingsProps = PropsRuntime<'sidebar.settings'> & PropsLocale<'team'> & {
