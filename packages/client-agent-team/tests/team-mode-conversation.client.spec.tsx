@@ -143,10 +143,18 @@ describe('Team conversation surfaces', () => {
     })
     // The unfiltered Inbox slice: this Thread needs the Human for 150 facts of
     // which only one is a mention, so the badge is not a mention count.
+    // A full Host row, not just the badge fields: the Human banner mounted in
+    // the same runtime reads newestActor/previewText from every direct row, so
+    // a partial fixture would crash that watcher with an unhandled error.
     b.seedInbox([{
-      workspaceId: 'w1', channelRef: 'channel:engineering',
+      workspaceId: 'w1', channelRef: 'channel:engineering', channelName: 'engineering',
+      taskNumber: 1, task: { taskRef: 'task:1', channelRef: 'channel:engineering', threadRef: 'thread:1', status: 'in_progress', resolution: 'open' },
       thread: { threadRef: 'thread:1', taskRef: 'task:1', revision: 4 },
-      unreadCount: 150, directCount: 1, newestSequence: 9, newestOccurredAt: '2026-08-21T09:30:00.000Z',
+      unreadCount: 150, directCount: 1, previewText: '开工任务',
+      createdOccurredAt: '2026-08-21T09:00:00.000Z',
+      latestReplyOccurredAt: '2026-08-21T09:30:00.000Z', latestReplyActor: { memberId: 'member:builder', name: 'builder' },
+      needsHumanDecision: true, newestSequence: 9, newestOccurredAt: '2026-08-21T09:30:00.000Z',
+      newestActor: { memberId: 'member:builder', name: 'builder' }, claimOwners: [],
     }])
     fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
     // The label carries the real number and the semantics; the capsule caps at 99+.

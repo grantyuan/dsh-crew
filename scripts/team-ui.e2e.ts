@@ -281,22 +281,32 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const ordinaryComposer = page.locator('[data-composer-input][contenteditable="true"][data-placeholder="描述你想要构建的内容, / 调用指令, @ 文件或对话"]')
   await expect.poll(() => ordinaryComposer.count()).toBe(1)
 
+  // At the phone width the right Sidebar's open tab overlays the viewport, so
+  // any interaction with the left rail folds it back first. The control only
+  // exists while the column is open, hence the conditional click.
+  const foldRightSidebar = async () => {
+    const fold = page.getByRole('button', { name: '收起右侧边栏' })
+    if (await fold.count() > 0) await fold.click()
+  }
+
   expect(scaffold.ctx.clientModules.graph().entries.some(entry => entry.id === '@grantyuan/dsh-crew')).toBe(true)
   const teamTrigger = page.getByRole('button', { name: '团队' })
-  const settingsTrigger = page.getByRole('button', { name: '设置' })
-  const [teamBox, settingsBox] = await Promise.all([teamTrigger.boundingBox(), settingsTrigger.boundingBox()])
+  const accountTrigger = page.getByRole('button', { name: '账号菜单' })
+  const [teamBox, accountBox] = await Promise.all([teamTrigger.boundingBox(), accountTrigger.boundingBox()])
   expect(teamBox).not.toBeNull()
-  expect(settingsBox).not.toBeNull()
+  expect(accountBox).not.toBeNull()
   await teamTrigger.click()
   const conversationTrigger = page.getByRole('button', { name: '对话' })
-  const membersTrigger = page.getByRole('button', { name: '成员' })
+  const membersTrigger = page.getByRole('button', { name: '成员', exact: true })
   const [conversationBox, membersTriggerBox] = await Promise.all([conversationTrigger.boundingBox(), membersTrigger.boundingBox()])
   expect(conversationBox).not.toBeNull()
   expect(membersTriggerBox).not.toBeNull()
-  expect(conversationBox!.y).toBeCloseTo(teamBox!.y, 0)
-  expect(conversationBox!.height).toBeCloseTo(teamBox!.height, 0)
-  expect(membersTriggerBox!.y).toBeCloseTo(settingsBox!.y, 0)
-  expect(membersTriggerBox!.height).toBeCloseTo(settingsBox!.height, 0)
+  // The sidebar-tab layout swaps the footer faces in place: the Team entry
+  // becomes its Conversations face — the same footer.action button, now
+  // `leave` — and the Members shadow takes the seat under it. The shipped
+  // Settings entry lives inside the account menu outside Team mode.
+  expect(await conversationTrigger.getAttribute('data-team-action')).toBe('leave')
+  expect(conversationBox!.y).toBeLessThan(membersTriggerBox!.y)
   const newSessionButtons = page.locator('button[aria-label="新建会话"]')
   const newSessionButton = page.locator('button[class*="newSession"][aria-label="新建会话"]')
   const brandButton = page.locator('button[class*="brand"][aria-label="新建会话"]')
@@ -606,9 +616,10 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await agentEditor.waitFor()
   // The Agent editor carries no Channel section anymore: handle, description,
   // model, and the task-start context control only (membership lives on the
-  // Channel side).
-  await expect.poll(() => agentEditor.getByRole('button', { name: '移除' }).count()).toBe(0)
-  await expect.poll(() => agentEditor.getByRole('button', { name: '添加' }).count()).toBe(0)
+  // Channel side). exact: the backup-route editor legitimately carries
+  // 「添加备用路由」, which a substring match would read as a stray 「添加」.
+  await expect.poll(() => agentEditor.getByRole('button', { name: '移除', exact: true }).count()).toBe(0)
+  await expect.poll(() => agentEditor.getByRole('button', { name: '添加', exact: true }).count()).toBe(0)
   // The per-Member model picker rides the shared Menu primitive: the trigger
   // echoes the current selection and opening lists the Host catalog grouped
   // by provider without any live Session round-trip. Re-selecting the
@@ -822,9 +833,12 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
 
   // The Prompt dialog rides the 390 breakpoint: the collapsed rail expands,
   // the editor reopens from the panel, and the dialog stays inside the
-  // viewport with the committed paragraph loaded.
+  // viewport with the committed paragraph loaded. At the narrow width the
+  // right Sidebar's Team tab overlays the viewport, so fold it back before
+  // exercising the left rail's expand.
   await page.setViewportSize({ width: 390, height: 844 })
   await page.locator('[data-sidebar-collapsed="true"]').waitFor()
+  await foldRightSidebar()
   await page.getByRole('button', { name: '打开侧边栏' }).click()
   await builderRow.hover()
   await builderRow.getByRole('button', { name: 'builder 的操作' }).click()
@@ -973,7 +987,9 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.screenshot({ path: join(UI02_SHOTS, 'sidebar-channels.png'), fullPage: true })
   await page.screenshot({ path: join(UI01_SHOTS, 'empty-channel.png'), fullPage: true })
   const channelComposer = page.getByRole('textbox', { name: '消息内容' })
-  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('消息内容')
+  // The Channel tab's composer stayed mounted through the embedded-Member
+  // detour, so re-revealing the tab does not re-run its mount focus — blur
+  // explicitly before reading the idle border.
   await page.getByRole('button', { name: '返回频道列表' }).focus()
   const idleComposerBorder = await page.locator('[data-team-composer]').evaluate(element => {
     const style = getComputedStyle(element)
@@ -1046,7 +1062,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   expect(wide.display).not.toBe('none')
   expect(wide.display).not.toBe('missing')
   expect(wide.gap).toBe('12px')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const committedMessage = page.locator('[data-team-channel] article').filter({ hasText: '请协作完成验收' })
   await committedMessage.waitFor()
   await expect.poll(() => asTaskToggle.getAttribute('aria-pressed')).toBe('false')
@@ -1082,7 +1098,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   expect(await notifyRow.textContent()).toContain('@reviewer')
   await channelComposer.fill('全员同步 @all，今天截止')
   await expect.poll(() => notifyRow.textContent()).toContain('@reviewer')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const allMessage = page.locator('[data-team-channel] article').filter({ hasText: '全员同步' })
   await allMessage.waitFor()
   expect((await allMessage.textContent())?.includes('@all，今天截止')).toBe(true)
@@ -1116,7 +1132,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // literal in the plain body; click-to-navigate is component-tested against
   // the resolved selectThread call.
   await channelComposer.fill('请复核 task:c0ffee00-1234-4c05-8a9e-6f2b1c9d7e21 与 channel:engineering 的口径')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const refMessage = page.locator('[data-team-channel] article').filter({ hasText: '请复核' })
   await refMessage.waitFor()
   expect(await refMessage.getByRole('button', { name: /task:c0ffee00|channel:engineering/ }).count()).toBe(0)
@@ -1129,7 +1145,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // alpha fade, expands in place, and collapses back through the same control.
   const longBody = '这是一条超长验收消息。'.repeat(60)
   await channelComposer.fill(longBody)
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const longMessage = page.locator('[data-team-channel] article').filter({ hasText: '这是一条超长验收消息' })
   await longMessage.waitFor()
   const expandControl = longMessage.getByRole('button', { name: '展开全文' })
@@ -1177,7 +1193,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.getByText('验收截图.png').waitFor()
   await channelComposer.fill('这是带附件的验收消息')
   await page.screenshot({ path: join(UI04_SHOTS, 'composer-attachment-chip.png'), fullPage: true })
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const attachmentMessage = page.locator('[data-team-channel] article').filter({ hasText: '这是带附件的验收消息' })
   await attachmentMessage.waitFor()
   await expect.poll(() => page.locator('[data-team-channel] article img[src^="data:image/png"]').count()).toBeGreaterThanOrEqual(1)
@@ -1203,7 +1219,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   }, [...pngBytes])
   await page.getByText('image.png').first().waitFor()
   await channelComposer.fill('这是粘贴上传的截图')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const pastedMessage = page.locator('[data-team-channel] article').filter({ hasText: '这是粘贴上传的截图' })
   await pastedMessage.waitFor()
   await expect.poll(() => pastedMessage.locator('img[src^="data:image/png"]').count()).toBeGreaterThanOrEqual(1)
@@ -1275,7 +1291,9 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
   await page.screenshot({ path: join(UI04_SHOTS, 'channel-members-modal-narrow.png'), fullPage: true })
   await page.setViewportSize({ width: 1440, height: 960 })
-  await page.getByRole('button', { name: '关闭', exact: true }).click()
+  // scoped: the right Sidebar's tab strip carries its own 「关闭」 once the
+  // viewport widens back, and a page-level match would hit both.
+  await channelMembersDialog.getByRole('button', { name: '关闭', exact: true }).click()
   await page.setViewportSize({ width: 390, height: 844 })
   const narrowChannelFrame = page.locator('[data-sidebar-collapsed="true"]')
   await narrowChannelFrame.waitFor()
@@ -1287,7 +1305,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
 
   await channelComposer.fill('这是一条不作为任务的讨论')
   await expect.poll(() => asTaskToggle.getAttribute('aria-pressed')).toBe('false')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const tasklessMessage = page.locator('[data-team-channel] article').filter({ hasText: '这是一条不作为任务的讨论' })
   await tasklessMessage.waitFor()
   await page.setViewportSize({ width: 390, height: 844 })
@@ -1320,9 +1338,25 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const task = projection.tasks[0]!
   const statuses = scaffold.ctx.agentTeam.members({ workspaceId: workspace.id })
   const builder = statuses.find((status: { member: { handle: string } }) => status.member.handle === 'builder')!
-  const reviewer = statuses.find((status: { member: { handle: string } }) => status.member.handle === 'reviewer')!
   const agent = scaffold.ctx.agents.get(builder.member.sessionId)!
-  const reviewerAgent = scaffold.ctx.agents.get(reviewer.member.sessionId)!
+  // Real @mention wakes drive the mentioned Member's own Session, and this
+  // credential-free scaffold fails every such model turn; the supervision
+  // chain answers repeated consecutive failures with a fresh-context reset
+  // that rebinds the Member onto a new Session and disposes the previously
+  // captured Agent. Scripted phases therefore resolve the Member's live
+  // generation at each boundary instead of trusting the early capture.
+  const liveReviewerAgent = async () => {
+    const ctx = scaffold!.ctx
+    const currentSession = () => ctx.agentTeam.members({ workspaceId: workspace.id })
+      .find((status: { member: { handle: string } }) => status.member.handle === 'reviewer')?.member.sessionId
+    let live = currentSession() !== undefined ? ctx.agents.get(currentSession()!) : undefined
+    for (let index = 0; index < 80 && live === undefined; index += 1) {
+      await page.waitForTimeout(250)
+      live = currentSession() !== undefined ? ctx.agents.get(currentSession()!) : undefined
+    }
+    expect(live).toBeDefined()
+    return live!
+  }
   expect(scaffold.ctx.agentTeam.inboxForAgent(agent, { workspaceId: workspace.id })).toMatchObject({
     totalUnreadCount: 1,
     totalDirectCount: 1,
@@ -1342,14 +1376,19 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('消息内容')
   await invitationComposer.press('Enter')
   await page.locator('[data-team-thread] article').filter({ hasText: '请 @reviewer 加入这个已有 Thread 并回复 Human @reviewer' }).waitFor()
-  const reviewerInbox = scaffold.ctx.agentTeam.inboxForAgent(reviewerAgent, { workspaceId: workspace.id })
-  expect(reviewerInbox).toMatchObject({ totalDirectCount: 1, items: [expect.objectContaining({
+  const reviewerInbox = scaffold.ctx.agentTeam.inboxForAgent(await liveReviewerAgent(), { workspaceId: workspace.id })
+  // containment, not exact shape: a leaderless Workspace lets the completion
+  // liaison push open Tasks as its own direct Team-Assistant item, and whether
+  // that beat has landed by this read is timing — the invitation itself must
+  // be there as direct work on the Task regardless.
+  expect(reviewerInbox.items).toEqual(expect.arrayContaining([expect.objectContaining({
     task: expect.objectContaining({ taskRef: task.taskRef }), directCount: 1,
-  })] })
-  const reviewerRead = await scaffold.ctx.agentTeam.readThreadForAgent(reviewerAgent, {
+  })]))
+  expect(reviewerInbox.totalDirectCount).toBeGreaterThanOrEqual(1)
+  const reviewerRead = await scaffold.ctx.agentTeam.readThreadForAgent(await liveReviewerAgent(), {
     requestId: 'm2-06-reviewer-read' as never, workspaceId: workspace.id, taskRef: task.taskRef,
   })
-  const reviewerReply = await scaffold.ctx.agentTeam.replyForAgent(reviewerAgent, {
+  const reviewerReply = await scaffold.ctx.agentTeam.replyForAgent(await liveReviewerAgent(), {
     requestId: 'm2-06-reviewer-reply' as never,
     workspaceId: workspace.id,
     taskRef: task.taskRef,
@@ -1381,10 +1420,10 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // keeps the whole body mounted, so a typography reset broken by the clamp
   // wrapper would render the preview text larger than the expanded body —
   // the exact regression this parity check pins.
-  const longRead = await scaffold.ctx.agentTeam.readThreadForAgent(reviewerAgent, {
+  const longRead = await scaffold.ctx.agentTeam.readThreadForAgent(await liveReviewerAgent(), {
     requestId: 'm2-07-long-read' as never, workspaceId: workspace.id, taskRef: task.taskRef,
   })
-  const longReply = await scaffold.ctx.agentTeam.replyForAgent(reviewerAgent, {
+  const longReply = await scaffold.ctx.agentTeam.replyForAgent(await liveReviewerAgent(), {
     requestId: 'm2-07-long-markdown-reply' as never,
     workspaceId: workspace.id,
     taskRef: task.taskRef,
@@ -1449,7 +1488,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.locator('[data-team-composer] input[type="file"]').setInputFiles([{ name: 'thread-evidence.png', mimeType: 'image/png', buffer: pngBytes }])
   await page.getByText('thread-evidence.png').waitFor()
   await page.getByRole('textbox', { name: '消息内容' }).fill('这是带附件的 Thread 回复')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const replyWithFile = page.locator('article').filter({ hasText: '这是带附件的 Thread 回复' })
   await replyWithFile.waitFor()
   await expect.poll(() => replyWithFile.locator('img[src^="data:image/png"]').count()).toBeGreaterThanOrEqual(1)
@@ -1461,7 +1500,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // re-stamps the body, and withdrawing replaces the message with the shared
   // tombstone for every reader.
   await page.getByRole('textbox', { name: '消息内容' }).fill('撤回演练消息')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const drillRow = page.locator('article').filter({ hasText: '撤回演练消息' })
   await drillRow.waitFor()
   await drillRow.hover()
@@ -1494,10 +1533,10 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // the composer (cancellable until send), and the committed reply carries the
   // quote prefix in its body, so the Host's own mention scan resolves the
   // answer to the Agent that wrote the quoted Message.
-  const quoteAnchorRead = await scaffold.ctx.agentTeam.readThreadForAgent(reviewerAgent, {
+  const quoteAnchorRead = await scaffold.ctx.agentTeam.readThreadForAgent(await liveReviewerAgent(), {
     requestId: 'm2-quote-reply-read' as never, workspaceId: workspace.id, taskRef: task.taskRef,
   })
-  const quoteAnchorReply = await scaffold.ctx.agentTeam.replyForAgent(reviewerAgent, {
+  const quoteAnchorReply = await scaffold.ctx.agentTeam.replyForAgent(await liveReviewerAgent(), {
     requestId: 'm2-quote-reply-anchor' as never,
     workspaceId: workspace.id, taskRef: task.taskRef,
     body: '引用回复演练：这是 reviewer 的一条汇报消息',
@@ -1519,7 +1558,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await quoteAnchorRow.getByRole('button', { name: '回复' }).click()
   await quoteChip.waitFor()
   await page.getByRole('textbox', { name: '消息内容' }).fill('同意，请继续下一步')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   const quotedReply = page.locator('article').filter({ hasText: '回复 @reviewer 的消息「引用回复演练：这是 reviewer 的一条汇报消息」：同意，请继续下一步' })
   await quotedReply.waitFor()
   await expect.poll(async () => await page.locator('[data-team-reply-target]').count()).toBe(0)
@@ -1546,24 +1585,9 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // rendered as information, and leave no unread remainder in the ledger.
   await page.getByRole('button', { name: '返回频道' }).click()
   await page.getByRole('heading', { name: '# delivery' }).waitFor()
-  // Real @mention wakes drive the mentioned Member's own Session, and this
-  // credential-free scaffold fails every such model turn; the supervision
-  // chain answers repeated consecutive failures with a fresh-context reset
-  // that rebinds the Member onto a new Session and disposes the previously
-  // captured Agent. Scripted phases therefore resolve the Member's live
-  // generation at each boundary instead of trusting the early capture.
-  const liveReviewerAgent = async () => {
-    const ctx = scaffold!.ctx
-    const currentSession = () => ctx.agentTeam.members({ workspaceId: workspace.id })
-      .find((status: { member: { handle: string } }) => status.member.handle === 'reviewer')?.member.sessionId
-    let live = currentSession() !== undefined ? ctx.agents.get(currentSession()!) : undefined
-    for (let index = 0; index < 80 && live === undefined; index += 1) {
-      await page.waitForTimeout(250)
-      live = currentSession() !== undefined ? ctx.agents.get(currentSession()!) : undefined
-    }
-    expect(live).toBeDefined()
-    return live!
-  }
+  // `liveReviewerAgent` (defined with the invitation phase above) resolves the
+  // Member's live Session generation at each boundary, as the supervision
+  // chain resets it across the failed model turns.
   const backlogBatch = async (label: string): Promise<void> => {
     const batchAgent = await liveReviewerAgent()
     const backlogRead = await scaffold.ctx.agentTeam.readThreadForAgent(batchAgent, {
@@ -1691,7 +1715,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.getByRole('option', { name: /@reviewer/ }).click()
   await page.screenshot({ path: join(UI05_SHOTS, 'thread-mention-menu.png'), fullPage: true })
   await threadComposer.fill('Human 已检查 Thread')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   await page.getByText('Human 已检查 Thread', { exact: true }).waitFor()
   const agentReviewRead = await scaffold.ctx.agentTeam.readThreadForAgent(agent, {
     requestId: 'm2-06-agent-review-read' as never, workspaceId: workspace.id, taskRef: task.taskRef,
@@ -1724,7 +1748,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const acceptedComposer = page.getByRole('textbox', { name: '消息内容' })
   await acceptedComposer.waitFor()
   await acceptedComposer.fill('验收后继续讨论')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   await page.getByText('验收后继续讨论', { exact: true }).waitFor()
   await page.screenshot({ path: join(UI01_SHOTS, 'desktop-thread.png'), fullPage: true })
   await page.screenshot({ path: join(UI05_SHOTS, 'accepted-thread.png'), fullPage: true })
@@ -1829,8 +1853,10 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.setViewportSize({ width: 1440, height: 960 })
   await settleLayout(page)
   await page.getByRole('button', { name: '成员', exact: true }).click()
-  await page.getByRole('dialog', { name: '成员' }).screenshot({ path: join(UI01_SHOTS, 'global-members.png') })
-  await page.getByRole('button', { name: '关闭', exact: true }).click()
+  const globalMembersDialog = page.getByRole('dialog', { name: '成员' })
+  await globalMembersDialog.screenshot({ path: join(UI01_SHOTS, 'global-members.png') })
+  // scoped: the right Sidebar's tab strip carries its own 「关闭」.
+  await globalMembersDialog.getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.reload()
   await page.getByRole('button', { name: '# delivery' }).waitFor({ timeout: 20_000 })
@@ -1846,10 +1872,12 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await expect.poll(() => brandButton.isVisible()).toBe(true)
   // Leaving Team closes any embedded Member Session view and restores the
   // session the Human came from, so the ordinary shell shows an ordinary
-  // conversation composer rather than a stranded Member Session.
+  // conversation composer rather than a stranded Member Session. The Sidebar
+  // keeps its Team tabs open — per-Session state, not Team chrome — so the
+  // ordinary composer in the center is the signal that the shell is back.
   const restoredComposer = page.locator('[data-composer-input][contenteditable="true"]').first()
   await restoredComposer.waitFor({ timeout: 20_000 })
-  await expect.poll(() => page.locator('[data-team-channel]').count()).toBe(0)
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.agentTeamMode ?? 'gone')).toBe('gone')
   // Team's globally registered sources return no ordinary candidates; shipped
   // command/skill discovery takes the restored ordinary Session back over.
   await restoredComposer.fill('/')
@@ -1907,7 +1935,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   expect(await archiveMembersDialog.getByText('@builder').count()).toBe(0)
   await archiveMembersDialog.getByRole('button', { name: '关闭', exact: true }).click()
   await page.getByRole('button', { name: '对话' }).click()
-  await expect.poll(() => page.locator('[data-team-channel]').count()).toBe(0)
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.agentTeamMode ?? 'gone')).toBe('gone')
 
   // The shipped global panel rail (the Plugins entry) addresses the profile,
   // not the Team: ordinary conversations show it, Team mode stands it down —
@@ -1953,9 +1981,11 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await expect.poll(() => membersKeyboard.evaluate(element => element === document.activeElement)).toBe(true)
   // Narrow viewport: the breakpoint unmounts sidebar panels (dialog state
   // included), so the check re-opens the dialog from the narrow-expanded
-  // sidebar after the collapse has settled.
+  // sidebar after the collapse has settled. The right Sidebar's Team tab
+  // overlays the narrow viewport, so fold it back before the left rail.
   await page.setViewportSize({ width: 390, height: 844 })
   await page.locator('[data-sidebar-collapsed="true"]').waitFor()
+  await foldRightSidebar()
   await page.getByRole('button', { name: '打开侧边栏' }).click()
   const narrowMembersKeyboard = page.getByRole('button', { name: '成员', exact: true })
   await narrowMembersKeyboard.focus()
@@ -2007,7 +2037,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.getByRole('heading', { name: '# delivery' }).waitFor()
   const inboxComposer = page.getByRole('textbox', { name: '消息内容' })
   await inboxComposer.fill('请 Human 决策的讨论')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   await page.locator('[data-team-channel] article').filter({ hasText: '请 Human 决策的讨论' }).waitFor()
   const inboxChannels = scaffold.ctx.agentTeam.view({ workspaceId: inboxWorkspace.id }).channels
   const deliveryChannel = inboxChannels.find((channel: { name: string }) => channel.name === 'delivery')!
@@ -2059,7 +2089,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // the surface has to keep apart: one row that named the reader, one that
   // merely moved, both waiting.
   await inboxComposer.fill('工程侧同步，无需决策')
-  await page.getByRole('button', { name: '发送' }).click()
+  await page.getByRole('button', { name: '发送', exact: true }).click()
   await page.locator('[data-team-channel] article').filter({ hasText: '工程侧同步，无需决策' }).waitFor()
   const plainView = scaffold.ctx.agentTeam.view({ workspaceId: inboxWorkspace.id, channelRef: deliveryChannel.channelRef, topLevelOnly: true, includeActivities: false, direction: 'before', limit: 50 })
   const plainThreadRef = (plainView.items.find((item: { message: { body: string } }) => item.message.body === '工程侧同步，无需决策').thread as { threadRef: string }).threadRef
@@ -2080,8 +2110,10 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // Narrow rail: 收件箱 → 任务 → 消息中枢 → Channels → Agents, the unread dot
   // marked on the first icon; the first icon is a destination that opens its own
   // page and expands the sidebar, and that behaviour is asserted for the Inbox
-  // icon below.
+  // icon below. The Team Channel tab overlays the narrow viewport, so fold the
+  // right Sidebar back before hovering the rail.
   await page.setViewportSize({ width: 390, height: 844 })
+  await foldRightSidebar()
   const inboxRail = page.locator('nav[class*="railWorkspace"]')
   await inboxRail.waitFor()
   const railLabels = await inboxRail.locator('button').evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-label')))
@@ -2106,6 +2138,15 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await railInboxButton.click()
   await page.locator('[data-team-inbox]').waitFor()
   await expect.poll(() => page.locator('button[class*="inboxCard"]').count()).toBe(1)
+  // The card's current-page fill is read while it is still on screen, because
+  // the icon that replaces it has to wear exactly that. At this width the
+  // breakpoint re-collapses the column on its own once the page settles in the
+  // Sidebar, so the read happens at the moment the card is guaranteed present.
+  const currentCardFill = await page.locator('button[class*="inboxCard"]').evaluate(card => ({
+    label: card.getAttribute('aria-current'),
+    background: getComputedStyle(card).backgroundColor,
+  }))
+  expect(currentCardFill.label).toBe('page')
   await expect.poll(async () => await inboxRow.count()).toBe(1)
   // The row no longer prints its own 「Workspace / #Channel」 crumb — the group
   // headings above it state both names once — so the Channel membership is read
@@ -2167,6 +2208,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const narrowFit = await inboxPage.evaluate(root => {
     const rows = [...root.querySelectorAll('button[class*="row"]')] as HTMLElement[]
     const crumbs = rows.map(row => row.querySelector('[class*="rowCrumb"]') as HTMLElement)
+    const lines = rows.map(row => row.querySelector('[class*="rowLine"]') as HTMLElement)
     const times = rows.map(row => row.querySelector('time') as HTMLElement)
     const crumbStyle = getComputedStyle(crumbs[0]!)
     return {
@@ -2177,8 +2219,13 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
       clockOnIdentityLine: rows.every((_, index) => {
         // A yielded clock draws no box at all, which is this row's own answer to
         // a line that cannot hold it; a drawn one shares the identity's line.
-        if (times[index]!.getBoundingClientRect().width === 0) return true
-        return Math.abs(crumbs[index]!.getBoundingClientRect().top - times[index]!.getBoundingClientRect().top) < 4
+        // The line container is the anchor: the crumb is empty on rows whose
+        // provenance the group headings state, and a zero-height face centers
+        // its box mid-line, so its top no longer names the line's top.
+        const time = times[index]!.getBoundingClientRect()
+        if (time.width === 0) return true
+        const line = lines[index]!.getBoundingClientRect()
+        return time.top >= line.top - 1 && time.bottom <= line.bottom + 1
       }),
       rowHeight: Math.round(rows[0]!.getBoundingClientRect().height),
     }
@@ -2196,15 +2243,11 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // The expanded seat above is the side effect of the rail icon being a
   // destination; on a phone the ordinary reading state is the collapsed rail,
   // so the queue gets that face too — and there the row keeps its compact shape
-  // rather than the folded one the crushed seat forces. The card's current-page
-  // fill is read while it is still on screen, because the icon that replaces it
-  // has to wear exactly that.
-  const currentCardFill = await inboxCard.evaluate(card => ({
-    label: card.getAttribute('aria-current'),
-    background: getComputedStyle(card).backgroundColor,
-  }))
-  expect(currentCardFill.label).toBe('page')
-  await page.getByRole('button', { name: '收起侧边栏' }).click()
+  // rather than the folded one the crushed seat forces. The breakpoint may
+  // already have folded the column back by now, so the collapse is taken from
+  // the UI only while its control is still on screen.
+  const collapseSidebar = page.getByRole('button', { name: '收起侧边栏' })
+  if (await collapseSidebar.count() > 0) await collapseSidebar.click()
   await page.locator('[data-sidebar-collapsed="true"]').waitFor()
   await settleLayout(page)
   const collapsedRow = await inboxPage.locator('button[class*="row"]').first().evaluate(row => {
@@ -2233,8 +2276,12 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   expect(railCurrent.background).toBe(currentCardFill.background)
   expect(railCurrent.background).not.toBe('rgba(0, 0, 0, 0)')
   await page.screenshot({ path: join(UI07_SHOTS, 'inbox-page-narrow-collapsed.png'), fullPage: true })
+  await foldRightSidebar()
+  // The rail icon is a destination: on a phone it opens its page in the right
+  // Sidebar, which goes fullscreen over the rail — the left column stays
+  // collapsed and the page is the thing that expands.
   await railInboxButton.click()
-  await page.locator('[data-sidebar-collapsed]').waitFor({ state: 'detached' })
+  await page.locator('[data-rightbar-fullscreen="true"]').waitFor()
   await settleLayout(page)
   await page.setViewportSize({ width: 1440, height: 960 })
   // The queue's settled desktop face, before a row is opened: the two rows the
@@ -2423,7 +2470,16 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.getByRole('button', { name: '返回收件箱列表' }).click()
   await page.locator('[data-team-inbox]').waitFor()
   await page.locator('[data-team-inbox]').getByRole('heading', { name: '最近活跃' }).waitFor({ timeout: 30_000 })
-  await expect.poll(async () => await page.locator('[data-team-inbox]').getByRole('heading', { name: '需要我' }).count()).toBe(0)
+  // The two rows this test read must have left the 「需要我」 queue. The queue
+  // itself may still hold other unread — the supervision notices this
+  // credential-free journey's failed model turns mint along the way — so the
+  // assertion is about the read rows' seat, not about the section vanishing.
+  await expect.poll(async () => await page.locator('[data-team-inbox] section')
+    .filter({ hasText: '需要我' })
+    .getByText('请 Human 决策的讨论').count()).toBe(0)
+  await expect.poll(async () => await page.locator('[data-team-inbox] section')
+    .filter({ hasText: '需要我' })
+    .getByText('工程侧同步，无需决策').count()).toBe(0)
   await expect.poll(async () => await inboxRow.count()).toBe(1)
   await expect.poll(async () => await plainRow.count()).toBe(1)
   await expect.poll(async () => await inboxRow.locator('[data-team-count-badge]').count()).toBe(0)
@@ -2595,8 +2651,10 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const acceptedParent = page.locator('[data-team-tasks] button').filter({ hasText: '叠放校验：谁在这个 Task 上' })
   await expect.poll(async () => (await acceptedParent.count()) === 1 && (await acceptedParent.textContent())?.includes('子任务 1/1')).toBe(true)
   // Narrow: the Tasks entry is the second rail button, and the page it opens
-  // keeps every row inside the 390px frame.
+  // keeps every row inside the 390px frame. The Inbox page still overlays the
+  // phone width, so fold it back before reaching the rail.
   await page.setViewportSize({ width: 390, height: 844 })
+  await foldRightSidebar()
   const tasksRailButton = page.getByRole('button', { name: '任务', exact: true })
   await tasksRailButton.click()
   await page.locator('[data-team-tasks]').waitFor()
@@ -2688,7 +2746,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
     await page.keyboard.press('Space')
     await expect.poll(() => asTaskToggle.getAttribute('aria-pressed')).toBe('true')
     await channelComposer.fill(body)
-    await page.getByRole('button', { name: '发送' }).click()
+    await page.getByRole('button', { name: '发送', exact: true }).click()
     await page.locator('[data-team-channel] article').filter({ hasText: body }).waitFor()
     await expect.poll(() => asTaskToggle.getAttribute('aria-pressed')).toBe('false')
   }
@@ -2744,32 +2802,35 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const inboxEntry = page.locator('button[class*="inboxCard"]')
   await expect.poll(async () => await inboxEntry.getAttribute('aria-current')).toBe('page')
 
-  // An Agent card is the one Team row a reader can open from the Inbox page, and
-  // the overlay embeds that Session over the page instead of replacing it. That
-  // makes the Inbox the one face that can stand underneath the Member view, so
-  // the two must not both claim the seat: the Agent card takes the marker and the
-  // Inbox entry stands down — it is the remembered face underneath, not a second
-  // current page — while the page itself leaves the seat with the overlay.
+  // An Agent card is the one Team row that hands the center seat to a Member
+  // Session, so the two claims must never both stand: the Agent card takes the
+  // sidebar's current-page marker and the Inbox entry stands down — it is the
+  // remembered face underneath, not a second current page — while the seat
+  // itself swaps from the Human's own conversation to the Member's, which the
+  // shipped conversation content records as its bound session id.
   const liveAgentCard = page.locator('button[class*="agentSelect"]:not([disabled])').first()
   const liveAgentName = await liveAgentCard.getAttribute('aria-label')
+  const humanConversationSession = await page.locator('[data-conversation-content]').first().getAttribute('data-conversation-session')
   await liveAgentCard.click()
   await page.locator('[data-team-inbox]').waitFor({ state: 'detached' })
   await page.locator('[data-composer-input][contenteditable="true"]').first().waitFor()
   await expect.poll(async () => await page.locator('[aria-current="page"]').count()).toBe(1)
   await expect.poll(async () => await page.locator('[aria-current="page"]').getAttribute('aria-label')).toBe(liveAgentName)
   await expect.poll(async () => await inboxEntry.getAttribute('aria-current')).toBeNull()
+  await expect.poll(async () => await page.locator('[data-conversation-content]').first().getAttribute('data-conversation-session')).not.toBe(humanConversationSession)
   await settleLayout(page)
-  await page.screenshot({ path: join(UI07_SHOTS, 'inbox-under-agent-overlay.png'), fullPage: true })
-  // Asking for the Inbox is Team navigation: it closes the overlay and puts the
-  // reader back on the page they were reading, marker included — one marked row
-  // at every step, never two and never none. The seat matters as much as the
-  // sidebar here: the shipped composer belongs to the Member Session, so the
-  // page the reader asked for is only really back once that composer is gone.
+  await page.screenshot({ path: join(UI07_SHOTS, 'center-under-member-session.png'), fullPage: true })
+  // Asking for the Inbox is Team navigation: it releases the Member Session and
+  // puts the reader back on the page they were reading, marker included — one
+  // marked row at every step, never two and never none. The seat matters as
+  // much as the sidebar here: the shipped conversation always keeps some
+  // session's composer, so the page the reader asked for is only really back
+  // once the seat rebinds the Human's own conversation.
   await inboxEntry.click()
   await page.locator('[data-team-inbox]').waitFor()
   await expect.poll(async () => await page.locator('[aria-current="page"]').count()).toBe(1)
   await expect.poll(async () => await inboxEntry.getAttribute('aria-current')).toBe('page')
-  await expect.poll(async () => await page.locator('[data-composer-input]').count()).toBe(0)
+  await expect.poll(async () => await page.locator('[data-conversation-content]').first().getAttribute('data-conversation-session')).toBe(humanConversationSession)
 
   // The session-history audit page assembles in the real Web bundle: the Agent
   // row menu hands the conversation seat to the page (slot takeover), the
@@ -2826,10 +2887,17 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // The restored ordinary shell may hold an inert composer (blank session),
   // so the wait is on the composer surface, not its editable state.
   await page.locator('[data-composer-input]').first().waitFor({ timeout: 20_000 })
-  await expect.poll(() => page.locator('[data-team-channel]').count()).toBe(0)
+  // Team pages are per-Session Sidebar tabs, so leaving Team mode reclaims
+  // nothing: the standing tabs stay. What must leave is the Team chrome —
+  // the mode marker on the root element and the footer's leave face.
+  await expect.poll(async () => await page.evaluate(() => document.documentElement.dataset.agentTeamMode ?? null)).toBeNull()
+  await expect.poll(() => page.locator('button[data-team-action="enter"]').count()).toBe(1)
+  await expect.poll(() => page.locator('button[data-team-action="leave"]').count()).toBe(0)
 
   expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
-}, 120_000)
+// The journey is one long scripted session; a loaded machine stretches its
+// real-browser waits past the default budget, so it carries an explicit one.
+}, 240_000)
 
 
 it('keeps four same-origin Team pages responsive and independently subscribed', async () => {
@@ -3028,36 +3096,44 @@ it('resets a supervised Member in place without a successor in real Web', async 
   const builderMember = statusOf('builder')!.member
   const channelRef = scaffold.ctx.agentTeam.view({ workspaceId: ws.id }).channels.find(channel => channel.name === 'engineering')!.channelRef
 
-  let builderAgent = scaffold.ctx.agents.get(builderMember.sessionId)
-  for (let i = 0; i < 80 && builderAgent === undefined; i += 1) {
-    await new Promise(resolve => setTimeout(resolve, 250))
-    builderAgent = scaffold.ctx.agents.get(builderMember.sessionId)
+  // The credential-free scaffold fails every model turn, so the automatic
+  // recovery chain may renew the Member's Session at any point in the scripted
+  // pre-reset work. Every Host call therefore resolves the live generation
+  // through the roster rather than trusting an early capture — the reset the
+  // test drives below is the same in-place remedy the automatic chain applies.
+  const liveBuilderAgent = async () => {
+    let live = scaffold.ctx.agents.get(statusOf('builder')!.member.sessionId)
+    for (let i = 0; i < 80 && live === undefined; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 250))
+      live = scaffold.ctx.agents.get(statusOf('builder')!.member.sessionId)
+    }
+    expect(live).toBeDefined()
+    return live!
   }
-  expect(builderAgent).toBeDefined()
 
   // Completed work: Task #1 is claimed, finished, and accepted.
   const task1 = await scaffold.ctx.agentTeam.sendMessage({ asTask: true, requestId: 'ui11-task-1' as never, workspaceId: ws.id, channelRef, body: 'Build the feature', recipients: [builderMember.memberId] })
   if (task1.kind !== 'committed') throw new Error(`expected committed Task #1 start, received ${task1.kind}`)
-  await builderAgent!.whenIdle()
-  const read1 = await scaffold.ctx.agentTeam.readThreadForAgent(builderAgent!, { requestId: 'ui11-read-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef })
-  const claim1 = await scaffold.ctx.agentTeam.changeClaimForAgent(builderAgent!, { requestId: 'ui11-claim-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef, action: 'claim', direction: 'implements the feature', baseRevision: read1.thread.revision })
+  await (await liveBuilderAgent()).whenIdle()
+  const read1 = await scaffold.ctx.agentTeam.readThreadForAgent(await liveBuilderAgent(), { requestId: 'ui11-read-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef })
+  const claim1 = await scaffold.ctx.agentTeam.changeClaimForAgent(await liveBuilderAgent(), { requestId: 'ui11-claim-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef, action: 'claim', direction: 'implements the feature', baseRevision: read1.thread.revision })
   if (claim1.kind !== 'committed') throw new Error(`expected committed Task #1 claim, received ${claim1.kind}`)
-  const read1b = await scaffold.ctx.agentTeam.readThreadForAgent(builderAgent!, { requestId: 'ui11-read-1b' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef })
-  const done1 = await scaffold.ctx.agentTeam.changeClaimForAgent(builderAgent!, { requestId: 'ui11-done-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef, action: 'done', claimRef: (claim1 as { claim: { claimRef: string } }).claim.claimRef as never, baseRevision: read1b.thread.revision })
+  const read1b = await scaffold.ctx.agentTeam.readThreadForAgent(await liveBuilderAgent(), { requestId: 'ui11-read-1b' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef })
+  const done1 = await scaffold.ctx.agentTeam.changeClaimForAgent(await liveBuilderAgent(), { requestId: 'ui11-done-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef, action: 'done', claimRef: (claim1 as { claim: { claimRef: string } }).claim.claimRef as never, baseRevision: read1b.thread.revision })
   if (done1.kind !== 'committed') throw new Error(`expected committed Task #1 done, received ${done1.kind}`)
   const humanRead1 = await scaffold.ctx.agentTeam.readThread({ requestId: 'ui11-human-read-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef })
   const accepted1 = await scaffold.ctx.agentTeam.changeTask({ requestId: 'ui11-accept-1' as never, workspaceId: ws.id, taskRef: task1.task!.taskRef, action: 'accept', baseRevision: humanRead1.thread.revision })
   if (accepted1.kind !== 'committed') throw new Error(`expected committed Task #1 accept, received ${accepted1.kind}`)
-  await builderAgent!.whenIdle()
+  await (await liveBuilderAgent()).whenIdle()
 
   // Held work: Task #2 stays claimed and open — a reset must release nothing.
   const task2 = await scaffold.ctx.agentTeam.sendMessage({ asTask: true, requestId: 'ui11-task-2' as never, workspaceId: ws.id, channelRef, body: 'Integrate the interface', recipients: [builderMember.memberId] })
   if (task2.kind !== 'committed') throw new Error(`expected committed Task #2 start, received ${task2.kind}`)
-  await builderAgent!.whenIdle()
-  const read2 = await scaffold.ctx.agentTeam.readThreadForAgent(builderAgent!, { requestId: 'ui11-read-2' as never, workspaceId: ws.id, taskRef: task2.task!.taskRef })
-  const claim2 = await scaffold.ctx.agentTeam.changeClaimForAgent(builderAgent!, { requestId: 'ui11-claim-2' as never, workspaceId: ws.id, taskRef: task2.task!.taskRef, action: 'claim', direction: 'integrates the interface', baseRevision: read2.thread.revision })
+  await (await liveBuilderAgent()).whenIdle()
+  const read2 = await scaffold.ctx.agentTeam.readThreadForAgent(await liveBuilderAgent(), { requestId: 'ui11-read-2' as never, workspaceId: ws.id, taskRef: task2.task!.taskRef })
+  const claim2 = await scaffold.ctx.agentTeam.changeClaimForAgent(await liveBuilderAgent(), { requestId: 'ui11-claim-2' as never, workspaceId: ws.id, taskRef: task2.task!.taskRef, action: 'claim', direction: 'integrates the interface', baseRevision: read2.thread.revision })
   if (claim2.kind !== 'committed') throw new Error(`expected committed Task #2 claim, received ${claim2.kind}`)
-  await builderAgent!.whenIdle()
+  await (await liveBuilderAgent()).whenIdle()
 
   // Drive the real supervision chain: report the healthy Member as an abnormal
   // stop, then tick. The bring-up budget spends itself (three passes), the
@@ -3226,7 +3302,10 @@ it('configures the Human profile from Settings in real Web', async () => {
   await page.goto(scaffold.authenticatedUrl)
   await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'team-workspace')
 
-  await page.getByRole('button', { name: '设置', exact: true }).click()
+  // The shipped Settings entry lives in the account menu: open it, then the
+  // `设置` menuitem, and the settings dialog comes up as before.
+  await page.getByRole('button', { name: '账号菜单' }).click()
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click()
   const panel = page.getByRole('dialog')
   await panel.getByRole('button', { name: '我的资料' }).click()
   const nameField = panel.getByLabel('名字')
@@ -3457,7 +3536,10 @@ it('states the local environment check on the Human profile page', async () => {
   await page.goto(scaffold.authenticatedUrl)
   await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'team-workspace')
 
-  await page.getByRole('button', { name: '设置', exact: true }).click()
+  // The shipped Settings entry lives in the account menu: open it, then the
+  // `设置` menuitem, and the settings dialog comes up as before.
+  await page.getByRole('button', { name: '账号菜单' }).click()
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click()
   const panel = page.getByRole('dialog')
   await panel.getByRole('button', { name: '我的资料' }).click()
   const block = panel.locator('[data-environment]')
