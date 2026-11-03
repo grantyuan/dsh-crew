@@ -82,6 +82,10 @@ After a reset the Member is privately noticed to re-orient from its private memo
 
 A watch is durable ledger state (`team/member-watch-started` / `team/member-watch-stopped`, request-idempotent), so it survives a restart and keeps sampling. While it stands, the Host samples the watched Member on the leader's cadence and posts a Team Assistant notice into the leader's own Channel — an ordinary Inbox Message.
 
+A watch stands only while both endpoints are enabled Members: suspending, archiving, or removing either one retires the watch in that lifecycle write's own projection step — a release, not a second durable operation.
+
+The leader's `list` is the read that tells it the watch is gone, and a resumed or recovered Member does not resurrect a retired watch: re-watching is the leader's own new call.
+
 A notice fires on three events only: the Member changes supervision state (`healthy`, `settling`, `stopped`), one state outlasts the stall threshold, or the set of Tasks it holds changes.
 
 Each notice reports the evidence supervision reads — state, presence, failure diagnostic, context tokens against the route window, completed conversation turns across the whole rollover lineage, and the Tasks the Member is running — so "stopped for five minutes" arrives once, not once per pass. The watch is read-only in effect: it never resets, interrupts, or messages the watched Member, and it grants no authority the leader did not already hold. `status` samples one watched Member immediately; `list` shows every watch the leader holds.

@@ -6770,6 +6770,8 @@ export default class AgentTeam extends TypertRemoteService {
     }
     this.memberBySessionId.delete(member.sessionId)
     this.memberRuntime.forgetMember(memberId)
+    this.responseGuard.forgetMember(memberId)
+    this.truncationEscalation.forgetMember(memberId)
     this.clearMemberFailure(memberId, 'activation')
   }
 

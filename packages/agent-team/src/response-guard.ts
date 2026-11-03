@@ -314,6 +314,16 @@ export class ResponseGuardCoordinator {
     }
   }
 
+  /**
+   * One Member's departure retires its in-flight guard state: a re-joining
+   * handle starts clean, and a gone Member leaves no residue keyed by its id.
+   */
+  forgetMember(memberId: AgentTeamMemberId): void {
+    this.consecutiveFaults.delete(memberId)
+    this.lastRound.delete(memberId)
+    this.lastStopReminder.delete(memberId)
+  }
+
   dispose(): void {
     this.consecutiveFaults.clear()
     this.lastRound.clear()

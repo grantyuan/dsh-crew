@@ -3489,6 +3489,50 @@ describe('AgentTeam leader Member watch', () => {
     replay.validate()
   })
 
+  it('retires the standing watch when the watched Member is suspended, archived, or removed', async () => {
+    const test = await harness()
+    const { ledger, leader, target } = await designWatch(test)
+    const placed = (await ledger.watchMember({ requestId: requestId('watch-suspend'), workspaceId: alpha,
+      memberId: target.member.memberId, actor: leader })).value
+    expect(ledger.activeWatches()).toEqual([placed.watch])
+    // Suspension is the same departure from the enabled set starting a watch
+    // refused: the standing instruction retires with it, projection-side.
+    await ledger.suspendMember({ requestId: requestId('suspend-watched'), memberId: target.member.memberId, actor: agentTeamHumanActor() })
+    expect(ledger.activeWatches()).toEqual([])
+    // The Leader's own listing is the read that tells it; the retired ref is
+    // not a watch anyone can cancel a second time.
+    expect(ledger.watchesForLeader(leader.memberId, alpha)).toEqual([])
+    await expect(ledger.unwatchMember({ requestId: requestId('stop-retired'), workspaceId: alpha,
+      watchRef: placed.watch.watchRef, actor: leader })).rejects.toThrow(/unknown Member watch/)
+    // Resume does not resurrect: re-watching is the Leader's own call.
+    await ledger.resumeMember({ requestId: requestId('resume-watched'), memberId: target.member.memberId, actor: agentTeamHumanActor() })
+    expect(ledger.activeWatches()).toEqual([])
+    const reopened = (await ledger.watchMember({ requestId: requestId('watch-archive'), workspaceId: alpha,
+      memberId: target.member.memberId, actor: leader })).value
+    await ledger.archiveMember({ requestId: requestId('archive-watched'), memberId: target.member.memberId, actor: agentTeamHumanActor() })
+    expect(ledger.activeWatches()).toEqual([])
+    await ledger.removeMember({ requestId: requestId('remove-watched'), memberId: target.member.memberId, actor: agentTeamHumanActor() })
+    expect(ledger.activeWatches()).toEqual([])
+    const replay = replayLedger(test)
+    expect(replay.activeWatches()).toEqual([])
+    replay.validate()
+  })
+
+  it("retires every watch naming the Leader that left, on either side of the pair", async () => {
+    const test = await harness()
+    const { ledger, leader, target } = await designWatch(test)
+    await ledger.watchMember({ requestId: requestId('watch-leader-gone'), workspaceId: alpha,
+      memberId: target.member.memberId, actor: leader })
+    expect(ledger.activeWatches()).toHaveLength(1)
+    // Nobody is left to hear the reports: the Leader's own departure retires
+    // the watches it placed, exactly like the target's.
+    await ledger.removeMember({ requestId: requestId('remove-leader'), memberId: leader.memberId, actor: agentTeamHumanActor() })
+    expect(ledger.activeWatches()).toEqual([])
+    const replay = replayLedger(test)
+    expect(replay.activeWatches()).toEqual([])
+    replay.validate()
+  })
+
   it('refuses a watch from anyone but the Leader, over itself, or over a non-Agent', async () => {
     const test = await harness()
     const { ledger, leader, target } = await designWatch(test)

@@ -4395,6 +4395,7 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/member-suspended' || operation.kind === 'team/member-resumed') {
       target.members.set(operation.data.member.memberId, operation.data.member)
+      if (operation.kind === 'team/member-suspended') this.retireWatchesFor(target, operation.data.member.memberId)
       return
     }
     if (operation.kind === 'team/member-session-restarted') {
@@ -4492,14 +4493,18 @@ export class AgentTeamLedger {
     if (operation.kind === 'team/member-removed') {
       target.members.set(operation.data.member.memberId, operation.data.member)
       for (const membership of target.memberships.values()) membership.delete(operation.data.member.memberId)
+      this.retireWatchesFor(target, operation.data.member.memberId)
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
     }
     if (operation.kind === 'team/member-archived') {
       // Archival keeps Memberships: hidden state, not departure — a future
       // restore returns the Member to its Channels. Visibility filters by
-      // member state instead.
+      // member state instead. The watch is not membership though: an archived
+      // Member leaves the enabled set its watch demanded, so its standing
+      // watches retire here and a restored Member is re-watched explicitly.
       target.members.set(operation.data.member.memberId, operation.data.member)
+      this.retireWatchesFor(target, operation.data.member.memberId)
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
     }
@@ -4595,6 +4600,22 @@ export class AgentTeamLedger {
       return
     }
     assertUnhandledKind(operation)
+  }
+
+  /**
+   * Retire every watch one endpoint can no longer serve: a watch stands only
+   * while both its Leader and its target are enabled Members — starting one
+   * requires it, so losing that state ends it. The release is projection-side,
+   * not a second durable operation: the Leader's own watch listing is the read
+   * that tells it the watch is gone, and the monitor's reconcile pass drops
+   * the retired ref's sampling memory with it.
+   */
+  private retireWatchesFor(target: Projection, memberId: AgentTeamMemberId): void {
+    for (const [watchRef, watch] of [...target.watches]) {
+      if (watch.leaderMemberId !== memberId && watch.memberId !== memberId) continue
+      target.watches.delete(watchRef)
+      target.watchByPair.delete(memberWatchPairKey(watch.leaderMemberId, watch.memberId, watch.workspaceId))
+    }
   }
 
   /**

@@ -44,8 +44,11 @@ export class PressurePolicyCoordinator {
   /**
    * Retry budget per agent for the current provider-overflow sequence.
    * Process-only by design: a restart re-earns one sequence per chain.
+   * Weak-keyed like the lane marker below: Agents are re-created per Member
+   * generation, and a strong key would pin every disposed Agent's object
+   * graph that ever hit an overflow retry.
    */
-  private readonly overflowRetries = new Map<Agent, number>()
+  private readonly overflowRetries = new WeakMap<Agent, number>()
   /**
    * Agents whose current route refuses dsh compaction outright with the
    * `dsh_compaction_refused` marker: the routed proxy owns compression on
@@ -60,7 +63,7 @@ export class PressurePolicyCoordinator {
 
   dispose(): void {
     this.disposed = true
-    this.overflowRetries.clear()
+    // The WeakMap needs no sweep: its entries go with their Agents.
   }
 
   /** A successful assistant response ends any open overflow-recovery sequence. */

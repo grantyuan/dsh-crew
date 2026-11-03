@@ -112,6 +112,15 @@ export class TruncationEscalator {
     }
   }
 
+  /**
+   * A Member leaving the roster retires its episode exactly like a clean stop:
+   * the cooldown latches and the no-leader mark must not sit keyed by a dead
+   * Member's id for the life of the process.
+   */
+  forgetMember(memberId: AgentTeamMemberId): void {
+    this.onCleanStop(memberId)
+  }
+
   /** A clean marker stop closes the Member's episode: the next truncation is a fresh event. */
   onCleanStop(memberId: AgentTeamMemberId): void {
     this.missingLeaderLogged.delete(memberId)
