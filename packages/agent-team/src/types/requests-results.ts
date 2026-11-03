@@ -18,6 +18,7 @@ import type {
   AgentTeamInterruptResolution,
   AgentTeamMemberCapabilities,
   AgentTeamMemberId,
+  AgentTeamMentionRedirect,
   AgentTeamMemberPromptProfile,
   AgentTeamMemberWatch,
   AgentTeamMemberWatchRef,
@@ -884,6 +885,13 @@ export interface AgentTeamSendMessageCommittedResult {
   readonly thread: AgentTeamThread
   readonly attention: readonly AgentTeamThreadAttention[]
   readonly directMarkers: readonly AgentTeamDirectMarker[]
+  /**
+   * Calls the body aimed at Members that have left the team. The Message
+   * still commits; each call was redirected to the Team leader (or, without
+   * one, to an enabled Member), and the author is told so it does not wait on
+   * a departed name.
+   */
+  readonly redirectedMentions?: readonly AgentTeamMentionRedirect[]
 }
 
 export type AgentTeamSendMessageResult =
@@ -905,6 +913,8 @@ export interface AgentTeamReplyCommittedResult {
    * author is told so it can ask the Human to invite them.
    */
   readonly undeliveredMentions?: readonly AgentTeamMemberId[]
+  /** Calls the body aimed at departed Members, with the live receivers. */
+  readonly redirectedMentions?: readonly AgentTeamMentionRedirect[]
 }
 
 export type AgentTeamReplyResult =

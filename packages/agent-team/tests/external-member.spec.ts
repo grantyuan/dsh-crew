@@ -144,6 +144,34 @@ describe('external member ledger semantics', () => {
     expect(inbox.totalDirectCount).toBe(1)
   })
 
+  it('redirects an external call naming a departed Member to the Team leader', async () => {
+    const { ledger } = await openLedger()
+    const channelRef = await seedTeam(ledger)
+    await addExternalMember(ledger, [channelRef])
+    await ledger.addMember({ requestId: requestId('member-manager'), workspaceId: alpha, handle: 'manager',
+      description: 'Manager work', presetId: 'team-member', channelRefs: [channelRef], actor: human,
+      member: { ...agentMember('member:agent-manager' as AgentTeamMemberId, 'manager'), leader: true } })
+    await ledger.addMember({ requestId: requestId('member-architect'), workspaceId: alpha, handle: 'architect',
+      description: 'Architecture work', presetId: 'team-member', channelRefs: [channelRef], actor: human,
+      member: agentMember('member:agent-architect' as AgentTeamMemberId, 'architect') })
+    await ledger.removeMember({ requestId: requestId('architect-departed'), memberId: 'member:agent-architect' as AgentTeamMemberId, actor: human })
+
+    // The reported shape: an external harness posts a review request naming a
+    // Member that already left. The call must not sit unread — the leader
+    // receives it as a direct mention, exactly as a live addressee would.
+    const sent = (await ledger.sendMessage({ requestId: requestId('external-call'), workspaceId: alpha, channelRef,
+      body: '@architect 请审查；没有负责人就转给 manager', asTask: false, actor: visitor })).value
+    if (sent.kind !== 'committed') throw new Error('external call must commit')
+    expect(sent.redirectedMentions).toEqual([expect.objectContaining({ memberId: 'member:agent-architect' as AgentTeamMemberId,
+      handle: 'architect', deliveredToMemberId: 'member:agent-manager' as AgentTeamMemberId, deliveredToHandle: 'manager' })])
+    expect(sent.directMarkers).toEqual([expect.objectContaining({ memberId: 'member:agent-manager' as AgentTeamMemberId })])
+    expect(ledger.inbox(memberActor('member:agent-manager', 'manager'), { workspaceId: alpha })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1 })
+    // The scout was not addressed and stays out of anyone's unread; only the
+    // leader holds the direct marker, so the wake goes to exactly one session.
+    expect(ledger.inbox(scout, { workspaceId: alpha }).totalDirectCount).toBe(0)
+    ledger.validate()
+  })
+
   it('runs the read → token → write loop and rejects a premature reply', async () => {
     const { ledger } = await openLedger()
     const channelRef = await seedTeam(ledger)

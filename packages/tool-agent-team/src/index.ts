@@ -430,7 +430,7 @@ function adviceLines(advice: ContextAdviceView): string[] {
 
 const teamMessage = markAgentTeamPreset(defineTool({
   name: 'team_message',
-  description: 'Start a top-level Thread, reply to an existing Thread, or send a direct message (DM). Read the Thread first: a reply needs the current next-write token from a fully drained team_thread read (or your own last committed mutation), and unread work rejects before staleness is even checked — and a mention only delivers its Message and restores Attention, never the Thread\'s earlier facts, so entering a Thread whose facts have left your context means reading back through it first. start defaults to a taskless Thread; pass asTask true to create a Task in the same send, and parentTaskRef (still with asTask true) to file that Task as a sub-task of an open Task in the same Channel. A top-level start may mention related Agents directly; in replies, only a Human can invite a Member the Thread has never carried. When you dispatch to a Member configured for a fresh context per task, the Host asks the model whether your Message continues that Member\'s recent work — but only while your Workspace has a designated Team Leader: a continuation is delivered into its live Session unread, while a new task renews the Member first so your Message lands in a clean context. Without a leader only the unambiguous seams renew (the Member\'s own claim, a Human atomic start, the Member\'s next dispatch after it finished normally), and every other dispatch rides into its live Session. Mention by writing `@Handle` in body — the `@` is required, matching ignores case, and each named Member is delivered to and renders as a mention chip; `@all` reaches every Member of the Channel. Naming a Member this Thread has never carried still commits, delivers nothing to that Member, and reports them under undeliveredMentions: ask the Human to invite them, or reach them with a dm. dm sends a private direct message to one enabled Agent Member in your Workspace: use it for quick clarifications and status syncs — never for task work, decisions, or anything that needs team visibility or traceability (use a Thread); if a DM exchange with the same Member exceeds about 3 exchanges, move it to a Thread, because every DM costs the recipient a full agent turn.',
+  description: 'Start a top-level Thread, reply to an existing Thread, or send a direct message (DM). Read the Thread first: a reply needs the current next-write token from a fully drained team_thread read (or your own last committed mutation), and unread work rejects before staleness is even checked — and a mention only delivers its Message and restores Attention, never the Thread\'s earlier facts, so entering a Thread whose facts have left your context means reading back through it first. start defaults to a taskless Thread; pass asTask true to create a Task in the same send, and parentTaskRef (still with asTask true) to file that Task as a sub-task of an open Task in the same Channel. A top-level start may mention related Agents directly; in replies, only a Human can invite a Member the Thread has never carried. When you dispatch to a Member configured for a fresh context per task, the Host asks the model whether your Message continues that Member\'s recent work — but only while your Workspace has a designated Team Leader: a continuation is delivered into its live Session unread, while a new task renews the Member first so your Message lands in a clean context. Without a leader only the unambiguous seams renew (the Member\'s own claim, a Human atomic start, the Member\'s next dispatch after it finished normally), and every other dispatch rides into its live Session. Mention by writing `@Handle` in body — the `@` is required, matching ignores case, and each named Member is delivered to and renders as a mention chip; `@all` reaches every Member of the Channel. Naming a Member this Thread has never carried still commits, delivers nothing to that Member, and reports them under undeliveredMentions: ask the Human to invite them, or reach them with a dm. Naming a Member that has left the team never goes silent: the call is redirected to the Team leader — or, without one, to an enabled Channel Member — and reported under redirectedMentions, so follow up with the receiver instead of the departed name. dm sends a private direct message to one enabled Agent Member in your Workspace: use it for quick clarifications and status syncs — never for task work, decisions, or anything that needs team visibility or traceability (use a Thread); if a DM exchange with the same Member exceeds about 3 exchanges, move it to a Thread, because every DM costs the recipient a full agent turn.',
   parameters: {
     action: { type: 'string', required: true, enum: ['start', 'reply', 'dm'] },
     channelRef: { type: 'string', description: "Full branded Channel ref exactly as returned by Team tools, including the 'channel:' prefix. An unambiguous abbreviation of the first 6+ UUID hex characters also resolves." },
@@ -450,6 +450,7 @@ const teamMessage = markAgentTeamPreset(defineTool({
       expectedRevision: { type: 'number' }, messageRef: { type: 'string' }, memberIds: { type: 'array', items: { type: 'string' } }, unreadCount: { type: 'number' }, directCount: { type: 'number' },
       recipientMemberId: { type: 'string' }, recipientHandle: { type: 'string' }, delivered: { type: 'boolean' }, deliveryNote: { type: 'string' }, occurredAt: { type: 'string' },
       undeliveredMentions: { type: 'array', items: { type: 'string' } },
+      redirectedMentions: { type: 'array', items: { type: 'string' } },
     } },
     render: (_args, value) => {
       if (value.kind === 'dm-sent') {
@@ -467,6 +468,9 @@ const teamMessage = markAgentTeamPreset(defineTool({
           ...(value.occurredAt === undefined ? [] : [`Committed at ${formatTeamTimestamp(value.occurredAt)}`]),
           ...(value.undeliveredMentions === undefined || value.undeliveredMentions.length === 0 ? [] : [
             `Mention not delivered — ${value.undeliveredMentions.join(', ')} never took part in this Thread, so nothing reached them. Only a Human can invite a Member: reach them with a dm, or ask the Human.`,
+          ]),
+          ...(value.redirectedMentions === undefined || value.redirectedMentions.length === 0 ? [] : [
+            `Mention redirected — ${value.redirectedMentions.join(', ')} has left the team, and the call went to the receiving Member instead. Follow up with the receiver; do not wait on the departed name.`,
           ]),
           nextWriteLine(value.revision),
         ].join('\n') }]
@@ -531,10 +535,12 @@ function messageOutcome(result: Awaited<ReturnType<AgentTeam['sendMessageForAgen
     // A start always delivers to the Members it names — they begin following the
     // new Thread — so only a reply can report names the Thread has never carried.
     const undelivered = 'undeliveredMentions' in result ? result.undeliveredMentions : undefined
+    const redirected = 'redirectedMentions' in result ? result.redirectedMentions : undefined
     return { kind: result.kind, action, threadRef: result.thread.threadRef,
       ...(result.task === undefined ? {} : { taskRef: result.task.taskRef }),
       revision: result.thread.revision, messageRef: result.message.messageRef, occurredAt: result.receipt.occurredAt,
-      ...(undelivered === undefined || undelivered.length === 0 ? {} : { undeliveredMentions: [...undelivered] }) }
+      ...(undelivered === undefined || undelivered.length === 0 ? {} : { undeliveredMentions: [...undelivered] }),
+      ...(redirected === undefined || redirected.length === 0 ? {} : { redirectedMentions: redirected.map(redirect => `@${redirect.handle} → @${redirect.deliveredToHandle}`) }) }
   }
   if (result.kind === 'member_not_following') return { kind: result.kind, memberIds: [...result.memberIds],
     ...(result.taskRef === undefined ? {} : { taskRef: result.taskRef }), ...(result.threadRef === undefined ? {} : { threadRef: result.threadRef, revision: result.revision }) }

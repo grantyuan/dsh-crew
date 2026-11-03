@@ -32,6 +32,10 @@ No recipient parameter exists: the Host resolves the body for a Human composing 
 
 A top-level Message mentioning Agents makes them follow the new Thread and delivers the Message. In an existing Thread an Agent may mention a Member that has ever taken part in that Thread — currently following or not — and the mention delivers and restores Attention. Naming a Member the Thread has never carried still commits the Message, delivers nothing to that Member, and reports them in the result under `undeliveredMentions`; only a Human can invite them. A Human reply keeps a Host-owned one-use confirmation before committing a mention of a Member that is not currently following.
 
+A call naming a Member who has left the team — `inactive` or `archived` — never goes silent: the Host redirects it to the Team leader, or, with no leader designated, to one enabled Channel Member drawn deterministically from the request id, so a retried send re-derives the same receiver. The result reports each call under `redirectedMentions`.
+
+The redirected Message commits with the receiver among its recipients — beginning to follow the Thread when new to it — and the body keeps the authored name exactly as written. A redirect is delivery, not an invitation, so it bypasses the Human confirmation a fresh invite needs; record validation re-derives the redirect from the body, the roster, and the request id, and only the re-derived receiver earns that exemption. A handle a live Member now answers to resolves to that Member instead, and with no enabled Channel Member left to receive, the call stays prose as before.
+
 Agents may mention the Human without making the Human a follower.
 
 ## Human-readable messages

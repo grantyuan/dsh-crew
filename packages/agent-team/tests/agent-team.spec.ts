@@ -20,7 +20,7 @@ import AgentTeam, { AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID,
 import { AgentTeamLedger, agentTeamAssistantActor, agentTeamHumanActor, isThreadReadSnapshot, MAX_PENDING_INTERRUPTS } from '../src/ledger.ts'
 import { agentTeamDomainSpec } from '../src/spec.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
-import type { AgentTeamAgentMember, AgentTeamChannelRef, AgentTeamContextCheckpointRef, AgentTeamMemberActor, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadReadData, AgentTeamThreadReadOperation, AgentTeamThreadReadReceipt, AgentTeamThreadReadResult, AgentTeamThreadRef } from '../src/types.ts'
+import type { AgentTeamAgentMember, AgentTeamChannelRef, AgentTeamContextCheckpointRef, AgentTeamMemberActor, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadReadData, AgentTeamThreadReadOperation, AgentTeamThreadReadReceipt, AgentTeamThreadReadResult, AgentTeamThreadRef } from '../src/types.ts'
 
 interface TeamHarness {
   readonly ctx: Context
@@ -638,6 +638,171 @@ describe('AgentTeam durable Thread Attention ledger', () => {
       items: [expect.objectContaining({ task: expect.objectContaining({ taskRef: sent.task.taskRef }), directCount: 1 })] })
     ledger.validate()
     expect(replayLedger(test).inbox(actor, { workspaceId: alpha })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1 })
+  })
+
+  it('redirects a call naming a departed Member to the designated Team leader', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+
+    const sent = committed((await ledger.sendMessage({ requestId: requestId('call'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@ghost 请审查', asTask: false, actor: coderActor })).value)
+    expect(sent.redirectedMentions).toEqual([expect.objectContaining({ memberId: ghost.member.memberId, handle: 'ghost',
+      deliveredToMemberId: manager.member.memberId, deliveredToHandle: 'manager' })])
+    // The body keeps the authored name — the redirect is a delivery fact, not
+    // a rewrite — and the call wakes the leader as a direct mention.
+    expect(sent.message.body).toBe('@ghost 请审查')
+    expect(sent.directMarkers).toEqual([expect.objectContaining({ memberId: manager.member.memberId, messageRef: sent.message.messageRef })])
+    expect(ledger.inbox(manager.actor, { workspaceId: alpha })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1 })
+    ledger.validate()
+    const cold = replayLedger(test)
+    cold.validate()
+    expect(cold.inbox(manager.actor, { workspaceId: alpha })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1 })
+  })
+
+  it('draws a deterministic enabled delegate when the team has no leader', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    const reviewer = await addLedgerMember(ledger, channel.channel.channelRef, 'member:reviewer')
+    const { member: coder, actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+    const pool = [manager.member.memberId, reviewer.member.memberId]
+
+    const drawn = committed((await ledger.sendMessage({ requestId: requestId('draw'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@ghost review this', asTask: false, actor: coderActor })).value)
+    expect(drawn.redirectedMentions?.[0]?.deliveredToMemberId).toEqual(expect.any(String))
+    expect(pool).toContain(drawn.redirectedMentions![0]!.deliveredToMemberId)
+    // The draw hashes the request id, so a retry re-derives the same delegate
+    // and the collision check sees the identical recipient list.
+    const retried = await ledger.sendMessage({ requestId: requestId('draw'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@ghost review this', asTask: false, actor: coderActor })
+    expect(retried.committed).toBe(false)
+    expect(committed(retried.value).redirectedMentions).toEqual(drawn.redirectedMentions)
+    // A suspended Member leaves the draw: with the other one parked, the call
+    // goes to whoever remains enabled, every time.
+    await ledger.suspendMember({ requestId: requestId('park-manager'), memberId: manager.member.memberId, actor: agentTeamHumanActor() })
+    for (const nonce of ['one', 'two', 'three', 'four']) {
+      const parked = committed((await ledger.sendMessage({ requestId: requestId(`draw-${nonce}`), workspaceId: alpha, channelRef: channel.channel.channelRef,
+        body: '@ghost review this', asTask: false, actor: coderActor })).value)
+      expect(parked.redirectedMentions![0]!.deliveredToMemberId).toBe(reviewer.member.memberId)
+    }
+    ledger.validate()
+  })
+
+  it('spreads the leaderless draw across the enabled pool', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    const reviewer = await addLedgerMember(ledger, channel.channel.channelRef, 'member:reviewer')
+    const { actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+    const seen = new Set<AgentTeamMemberId>()
+    for (let nonce = 0; nonce < 24; nonce += 1) {
+      const sent = committed((await ledger.sendMessage({ requestId: requestId(`spread-${nonce}`), workspaceId: alpha, channelRef: channel.channel.channelRef,
+        body: '@ghost 请审查', asTask: false, actor: coderActor })).value)
+      seen.add(sent.redirectedMentions![0]!.deliveredToMemberId)
+    }
+    expect([...seen].sort()).toEqual([manager.member.memberId, reviewer.member.memberId].sort())
+    ledger.validate()
+  })
+
+  it('delivers a departed-Member call in a reply without the Human invitation gate', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+
+    const started = withTask(committed((await ledger.sendMessage({ requestId: requestId('anchor'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: 'Release checklist', asTask: true, actor: coderActor })).value))
+    // The leader never took part in this Thread: a fresh invite would be
+    // Human-gated, but the redirect is delivery, so it lands directly.
+    const replied = committed((await ledger.reply({ requestId: requestId('ping'), workspaceId: alpha, taskRef: started.task.taskRef,
+      body: '@ghost 请审查', baseRevision: started.thread.revision, actor: coderActor })).value)
+    expect(replied.redirectedMentions).toEqual([expect.objectContaining({ memberId: ghost.member.memberId, deliveredToMemberId: manager.member.memberId })])
+    expect(replied.undeliveredMentions).toBeUndefined()
+    expect(replied.directMarkers).toEqual([expect.objectContaining({ memberId: manager.member.memberId, messageRef: replied.message.messageRef })])
+    expect(replied.attention).toEqual(expect.arrayContaining([expect.objectContaining({ memberId: manager.member.memberId })]))
+    // The same shape answers a Human sender: no confirmation round-trip for a
+    // redirect, so the reply commits on the first write.
+    const humanReply = (await ledger.reply({ requestId: requestId('human-ping'), workspaceId: alpha, taskRef: started.task.taskRef,
+      body: '@ghost 请审查', baseRevision: replied.thread.revision, actor: agentTeamHumanActor() })).value
+    expect(humanReply.kind).toBe('committed')
+    ledger.validate()
+  })
+
+  it('resolves a reused handle to its live holder and leaves other names as prose', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+    // Removal frees the handle for reuse: the live holder answers the name, and
+    // the departed one draws no redirect.
+    const successor = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost-2', 'Ghost work', 'ghost')
+    const reused = committed((await ledger.sendMessage({ requestId: requestId('reused'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@ghost 请审查', asTask: false, actor: coderActor })).value)
+    expect(reused.redirectedMentions).toBeUndefined()
+    expect(reused.directMarkers).toEqual([expect.objectContaining({ memberId: successor.member.memberId, messageRef: reused.message.messageRef })])
+    // Unknown names and code-spelled names stay prose exactly as before.
+    const unknown = committed((await ledger.sendMessage({ requestId: requestId('unknown'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@nowobody 请审查', asTask: false, actor: coderActor })).value)
+    expect(unknown.redirectedMentions).toBeUndefined()
+    expect(unknown.directMarkers).toEqual([])
+    const quoted = committed((await ledger.sendMessage({ requestId: requestId('quoted'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '提过 `@ghost` 一句，不算呼叫', asTask: false, actor: coderActor })).value)
+    expect(quoted.redirectedMentions).toBeUndefined()
+    expect(quoted.directMarkers).toEqual([])
+    ledger.validate()
+  })
+
+  it('redirects a call to an archived Member and keeps prose when nobody is left', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.archiveMember({ requestId: requestId('archive-ghost'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+    const archived = committed((await ledger.sendMessage({ requestId: requestId('call-archived'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@ghost 请审查', asTask: false, actor: coderActor })).value)
+    expect(archived.redirectedMentions).toEqual([expect.objectContaining({ memberId: ghost.member.memberId, deliveredToMemberId: manager.member.memberId })])
+    expect(archived.directMarkers).toEqual([expect.objectContaining({ memberId: manager.member.memberId, messageRef: archived.message.messageRef })])
+    // With no enabled Member left besides the author, the call stays prose —
+    // the redirect never parks work on the Human or the sender.
+    const solo = await harness()
+    const soloChannel = await solo.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'solo', description: 'Solo work' })
+    const soloLedger = replayLedger(solo)
+    const soloAuthor = await addLedgerMember(soloLedger, soloChannel.channel.channelRef, 'member:lone')
+    const soloGhost = await addLedgerMember(soloLedger, soloChannel.channel.channelRef, 'member:gone')
+    await soloLedger.removeMember({ requestId: requestId('solo-depart'), memberId: soloGhost.member.memberId, actor: agentTeamHumanActor() })
+    const prose = committed((await soloLedger.sendMessage({ requestId: requestId('solo-call'), workspaceId: alpha, channelRef: soloChannel.channel.channelRef,
+      body: '@gone 请审查', asTask: false, actor: soloAuthor.actor })).value)
+    expect(prose.redirectedMentions).toBeUndefined()
+    expect(prose.directMarkers).toEqual([])
+    ledger.validate()
+    soloLedger.validate()
   })
 
   it('serves the Human Inbox with row previews and whole-unread totals', async () => {

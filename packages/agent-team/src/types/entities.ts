@@ -465,6 +465,22 @@ export interface AgentTeamThreadAttentionKey {
   readonly threadRef: AgentTeamThreadRef
 }
 
+/**
+ * One call a Message body aimed at a departed Member (`inactive`/`archived`),
+ * recorded with the live Member that received the call instead. Durable on the
+ * Message operation so retries and result derivation report the same facts.
+ */
+export interface AgentTeamMentionRedirect {
+  /** The departed Member the body named. */
+  readonly memberId: AgentTeamMemberId
+  /** The departed Member's handle, as the canonical spelling the scan matched. */
+  readonly handle: string
+  /** The live Member the call was redirected to. */
+  readonly deliveredToMemberId: AgentTeamMemberId
+  /** The receiving Member's handle. */
+  readonly deliveredToHandle: string
+}
+
 /** Sparse direct-priority marker for one structured Message mention. */
 export interface AgentTeamDirectMarker {
   readonly memberId: AgentTeamMemberId

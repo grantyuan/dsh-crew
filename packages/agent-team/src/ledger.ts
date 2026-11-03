@@ -96,6 +96,7 @@ import type {
   AgentTeamMessageRow,
   AgentTeamTopicRow,
   AgentTeamMessageRef,
+  AgentTeamMentionRedirect,
   AgentTeamMessageSentOperation,
   AgentTeamMessageEditedOperation,
   AgentTeamMessageRecalledOperation,
@@ -172,7 +173,7 @@ import type {
 } from './types.ts'
 import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX } from './spec.ts'
 import { formatTeamTimestamp } from './time-format.ts'
-import { resolveBodyMentions } from './mentions.ts'
+import { resolveBodyMentions, scanBodyHandles } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
 
 /** Stable Human Member identity shared by every replay of one dshHome Team. */
@@ -593,6 +594,21 @@ function emptyProjection(): Projection {
  */
 function memberWatchPairKey(leaderMemberId: AgentTeamMemberId, memberId: AgentTeamMemberId, workspaceId: WorkspaceId): string {
   return `${leaderMemberId}\u0000${memberId}\u0000${workspaceId}`
+}
+
+/**
+ * FNV-1a over one string, as an unsigned 32-bit digest. The ledger must never
+ * draw on ambient randomness — every committed fact has to re-derive
+ * identically on retry and replay — so pseudo-random picks (the departed-
+ * mention delegate) hash a stable input instead.
+ */
+function fnv1a(value: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return hash >>> 0
 }
 
 /** Exhaustiveness guard for the closed operation union: adding a kind must update every dispatch. */
@@ -1637,7 +1653,8 @@ export class AgentTeamLedger {
       // Recipients are resolved before the request-id lookup: the stored
       // operation carries the merged set, so a retry has to re-derive the same
       // list for the collision check to prove it is the same request.
-      const recipients = this.mergeBodyMentions(actor.memberId, channel.channelRef, body, this.normalizeRecipients(request.actor, request.recipients))
+      const redirects = this.redirectedMentions(actor.memberId, channel, body, request.requestId)
+      const recipients = this.mergeMentionRecipients(this.mergeBodyMentions(actor.memberId, channel.channelRef, body, this.normalizeRecipients(request.actor, request.recipients)), redirects)
       const parentTaskRef = this.resolveParentTaskRef(request, channel.channelRef)
       const existing = this.state.byRequest.get(request.requestId)
       if (existing !== undefined) {
@@ -1670,7 +1687,8 @@ export class AgentTeamLedger {
       const operation: AgentTeamMessageSentOperation = Object.freeze({
         ...base, kind: 'team/message-sent',
         data: Object.freeze({ workspaceId: request.workspaceId, mentions: recipients, message,
-          ...(task === undefined ? {} : { task }), thread, inbox }),
+          ...(task === undefined ? {} : { task }), thread, inbox,
+          ...(redirects.length === 0 ? {} : { redirectedMentions: redirects }) }),
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
@@ -1685,11 +1703,13 @@ export class AgentTeamLedger {
       const body = request.body.trim()
       if (body === '') throw new Error('message body must not be empty')
       const channel = this.requireChannel(request.workspaceId, channelRef)
-      const recipients = this.mergeBodyMentions(actor.memberId, channelRef, body, this.normalizeRecipients(actor, request.recipients))
+      const redirects = this.redirectedMentions(actor.memberId, channel, body, request.requestId)
+      const recipients = this.mergeMentionRecipients(this.mergeBodyMentions(actor.memberId, channelRef, body, this.normalizeRecipients(actor, request.recipients)), redirects)
+      const redirectTargets = new Set(redirects.map(redirect => redirect.deliveredToMemberId))
       const existing = this.state.byRequest.get(request.requestId)
       if (existing !== undefined) {
         this.assertSameReply(existing, request, recipients)
-        return this.resolved(this.replyResult(existing, this.undeliverableRecipients(actor, thread.threadRef, recipients)))
+        return this.resolved(this.replyResult(existing, this.undeliverableRecipients(actor, thread.threadRef, recipients, redirectTargets)))
       }
       this.assertMentionTargets(channel, recipients)
       const deferred = this.deferredThreadWrite(actor.memberId, task, thread, request.baseRevision)
@@ -1698,13 +1718,16 @@ export class AgentTeamLedger {
       // An Agent cannot invite into an existing Thread, so a body mention the
       // Thread has never carried is dropped and reported back rather than
       // failing the send. The Human keeps the confirmation step, which is what
-      // actually grants the invitation.
-      const undelivered = this.undeliverableRecipients(actor, thread.threadRef, recipients)
+      // actually grants the invitation. A redirect is delivery, not an
+      // invitation: the departed Member's call reaches its receiver without
+      // that gate, so the receiver is exempt here and still gains Attention.
+      const undelivered = this.undeliverableRecipients(actor, thread.threadRef, recipients, redirectTargets)
       const delivered = undelivered.length === 0 ? recipients : recipients.filter(memberId => !undelivered.includes(memberId))
       const unfollowedAgents = delivered.filter(memberId => this.state.members.has(memberId) && !this.isFollowing(thread.threadRef, memberId))
+      const invited = unfollowedAgents.filter(memberId => redirectTargets.has(memberId) === false)
       // A Member that once took part in this Thread is delivered to directly:
       // re-joining a Thread it already belongs to is not an invitation.
-      if (unfollowedAgents.length > 0 && actor.kind === 'human' && request.confirmationToken === undefined) {
+      if (invited.length > 0 && actor.kind === 'human' && request.confirmationToken === undefined) {
         return this.resolved(this.issueConfirmation(request.actor, request.workspaceId, channelRef, body, delivered, task, thread))
       }
       if (request.confirmationToken !== undefined) {
@@ -1733,7 +1756,8 @@ export class AgentTeamLedger {
       const operation: AgentTeamThreadRepliedOperation = Object.freeze({
         ...base, kind: 'team/thread-replied',
         data: Object.freeze({ workspaceId: request.workspaceId, baseRevision: request.baseRevision,
-          mentions: delivered, message, ...(task === undefined ? {} : { task }), thread: nextThread, inbox }),
+          mentions: delivered, message, ...(task === undefined ? {} : { task }), thread: nextThread, inbox,
+          ...(redirects.length === 0 ? {} : { redirectedMentions: redirects }) }),
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
@@ -3907,6 +3931,7 @@ export class AgentTeamLedger {
       }
       this.addRef(refs, message.messageRef)
       this.validateMentions(operation.data.mentions, message, projection)
+      this.validateMentionRedirects(operation, projection)
       this.validateInboxDelta(operation.data.inbox, projection, refs, [thread.threadRef], [message])
       this.validateMessageInbox(operation, projection)
       return
@@ -4246,9 +4271,13 @@ export class AgentTeamLedger {
     const { message, mentions } = operation.data
     const mentionedAgents = mentions.filter(memberId => projection.members.has(memberId))
     // Top-level mentions are open to every actor; only a Member reply may not
-    // pull an unfollowed Member into an existing Thread.
+    // pull an unfollowed Member into an existing Thread. A redirect receiver
+    // is exempt — the departed Member's call is delivery, not an invitation —
+    // and the exemption is paid for by the re-derived redirect record.
+    const redirectTargets = new Set((operation.data.redirectedMentions ?? []).map(redirect => redirect.deliveredToMemberId))
     if (operation.actor.kind === 'member' && operation.kind === 'team/thread-replied'
-      && mentionedAgents.some(memberId => !this.everParticipatedFrom(projection, message.threadRef, memberId))) {
+      && mentionedAgents.some(memberId => !redirectTargets.has(memberId)
+        && !this.everParticipatedFrom(projection, message.threadRef, memberId))) {
       throw new Error('invalid Agent mention projection')
     }
     const expected = this.messageInboxExpectation(operation, projection, true)
@@ -4309,6 +4338,25 @@ export class AgentTeamLedger {
     return member !== undefined && member.state !== 'inactive' && member.state !== 'archived'
       && channelWorkspaceId !== undefined && this.participatesInFrom(projection, memberId, channelWorkspaceId)
       && this.isChannelMemberFrom(projection, channelRef, memberId)
+  }
+
+  /**
+   * The stored redirect facts must be exactly what the same scan re-derives
+   * against the pre-operation projection. The exemption this record earns in
+   * `validateMessageInbox` (a Member reply pulling a fresh receiver into the
+   * Thread) is only legal when a real departed-name call in the body pays for
+   * it, so the ledger re-derives rather than trusting the annotation.
+   */
+  private validateMentionRedirects(
+    operation: AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation,
+    projection: Projection,
+  ): void {
+    const channel = projection.channels.get(operation.data.message.channelRef)
+    if (channel === undefined) throw new Error('invalid Message mention redirect')
+    const expected = this.redirectedMentionsFrom(projection, operation.actor.memberId, channel,
+      operation.data.message.body, operation.requestId)
+    const stored = operation.data.redirectedMentions ?? []
+    if (!isDeepStrictEqual(stored, expected)) throw new Error('invalid Message mention redirect')
   }
 
   private apply(operation: AgentTeamOperation): void {
@@ -5290,10 +5338,12 @@ export class AgentTeamLedger {
 
   /** Commit projections shared by the Message-sent and Thread-replied results. */
   private committedMessageResult(operation: AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation, undelivered: readonly AgentTeamMemberId[] = []) {
+    const redirected = operation.data.redirectedMentions ?? []
     return { kind: 'committed' as const, receipt: this.receipt(operation), message: operation.data.message,
       ...(operation.data.task === undefined ? {} : { task: operation.data.task }), thread: operation.data.thread, attention: operation.data.inbox.attention.set,
       directMarkers: operation.data.inbox.directMarkers.added,
-      ...(undelivered.length === 0 ? {} : { undeliveredMentions: undelivered }) }
+      ...(undelivered.length === 0 ? {} : { undeliveredMentions: undelivered }),
+      ...(redirected.length === 0 ? {} : { redirectedMentions: redirected }) }
   }
 
   private threadAnchor(threadRef: AgentTeamThreadRef): AgentTeamMessage {
@@ -5643,10 +5693,15 @@ export class AgentTeamLedger {
    * literal, so that yield only ever covers data predating the reservation.
    */
   private mentionCandidatesFor(channelRef: AgentTeamChannelRef): readonly AgentTeamBodyMentionCandidate[] {
+    return this.mentionCandidatesFrom(this.state, channelRef)
+  }
+
+  /** The candidate projection over one caller-supplied projection — replay validation re-derives through it. */
+  private mentionCandidatesFrom(projection: Projection, channelRef: AgentTeamChannelRef): readonly AgentTeamBodyMentionCandidate[] {
     const candidates: AgentTeamBodyMentionCandidate[] = [{ memberId: AGENT_TEAM_HUMAN_MEMBER_ID, handle: this.humanHandle }]
-    for (const member of this.state.members.values()) {
+    for (const member of projection.members.values()) {
       if (member.state === 'inactive' || member.state === 'archived') continue
-      if (!this.isChannelMember(channelRef, member.memberId)) continue
+      if (!this.isChannelMemberFrom(projection, channelRef, member.memberId)) continue
       candidates.push({ memberId: member.memberId, handle: member.handle })
     }
     if (this.humanHandle.normalize('NFKC').trim().toLowerCase() !== AGENT_TEAM_HUMAN_HANDLE
@@ -5681,6 +5736,68 @@ export class AgentTeamLedger {
   }
 
   /**
+   * Calls a body aims at departed Members (`inactive`/`archived`): the live
+   * candidate scan never resolves them, so the call would sit as prose and
+   * wake nobody. Each such call is redirected to the Team leader — or, when
+   * no enabled leader sits in the Channel, to one enabled Channel Member
+   * drawn by request-id hash, because a retry re-derives the merged
+   * recipients for the collision check and must draw the same delegate. The
+   * Human is never a delegate, a departed Member is never addressed, and a
+   * handle a live Member now answers to resolves to that Member instead.
+   * Without any enabled Channel Member left the call stays prose, as before.
+   * Every input — roster, memberships, body scan, and the request id stored
+   * on the operation — is ledger state or pure, so record validation
+   * re-derives the identical list against its own projection.
+   */
+  private redirectedMentions(
+    sender: AgentTeamMemberId,
+    channel: AgentTeamChannel,
+    body: string,
+    requestId: AgentTeamRequestId,
+  ): readonly AgentTeamMentionRedirect[] {
+    return this.redirectedMentionsFrom(this.state, sender, channel, body, requestId)
+  }
+
+  private redirectedMentionsFrom(
+    projection: Projection,
+    sender: AgentTeamMemberId,
+    channel: AgentTeamChannel,
+    body: string,
+    requestId: AgentTeamRequestId,
+  ): readonly AgentTeamMentionRedirect[] {
+    const normalize = (handle: string): string => handle.normalize('NFKC').trim().toLowerCase()
+    const liveHandles = new Set(scanBodyHandles(body,
+      this.mentionCandidatesFrom(projection, channel.channelRef).map(candidate => candidate.handle)).map(match => normalize(match.handle)))
+    const called = [...projection.members.values()].filter(member =>
+      (member.state === 'inactive' || member.state === 'archived')
+      && member.memberId !== sender
+      && this.participatesInFrom(projection, member.memberId, channel.workspaceId)
+      && liveHandles.has(normalize(member.handle)) === false
+      && scanBodyHandles(body, [member.handle]).length > 0)
+    if (called.length === 0) return Object.freeze([])
+    const pool = [...(projection.memberships.get(channel.channelRef) ?? new Set<AgentTeamMemberId>())]
+      .filter(memberId => memberId !== sender && memberId !== AGENT_TEAM_HUMAN_MEMBER_ID
+        && projection.members.get(memberId)?.state === 'enabled')
+      .sort()
+    const leaders = pool.filter(memberId => projection.members.get(memberId)?.leader === true)
+    const delegates = leaders.length > 0 ? leaders : pool
+    if (delegates.length === 0) return Object.freeze([])
+    const deliveredTo = delegates[fnv1a(requestId) % delegates.length]!
+    return Object.freeze(called.map(member => Object.freeze({
+      memberId: member.memberId, handle: member.handle,
+      deliveredToMemberId: deliveredTo, deliveredToHandle: projection.members.get(deliveredTo)!.handle,
+    })))
+  }
+
+  /** The recipient set a send commits with: the live mentions plus every redirect receiver. */
+  private mergeMentionRecipients(
+    mentions: readonly AgentTeamMemberId[],
+    redirects: readonly AgentTeamMentionRedirect[],
+  ): readonly AgentTeamMemberId[] {
+    return Object.freeze([...new Set([...mentions, ...redirects.map(redirect => redirect.deliveredToMemberId)])].sort())
+  }
+
+  /**
    * Whether one Member has ever held Attention on one Thread. Committed Inbox
    * deltas append a follow/unfollow observation, and the live index covers the
    * Thread-creating Message whose initial Attention is never observed — so the
@@ -5701,15 +5818,18 @@ export class AgentTeamLedger {
    * body named that the Thread has never carried. The send still commits — a
    * text mention must never fail the write — and the author is told through the
    * result, because inviting a Member into an existing Thread stays a Human
-   * decision.
+   * decision. Redirect receivers are exempt: the departed Member's call must
+   * land even though its receiver may be new to the Thread.
    */
   private undeliverableRecipients(
     actor: AgentTeamHumanActor | AgentTeamMemberActor,
     threadRef: AgentTeamThreadRef,
     recipients: readonly AgentTeamMemberId[],
+    exempt: ReadonlySet<AgentTeamMemberId> = new Set(),
   ): readonly AgentTeamMemberId[] {
     if (actor.kind !== 'member') return Object.freeze([])
-    return Object.freeze(recipients.filter(memberId => this.state.members.has(memberId) && !this.everParticipated(threadRef, memberId)))
+    return Object.freeze(recipients.filter(memberId => !exempt.has(memberId)
+      && this.state.members.has(memberId) && !this.everParticipated(threadRef, memberId)))
   }
 
   private normalizeDirection(direction: string): string {

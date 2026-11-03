@@ -16,6 +16,7 @@ import type {
   AgentTeamClaimsReleasedActivity,
   AgentTeamInboxDelta,
   AgentTeamMemberId,
+  AgentTeamMentionRedirect,
   AgentTeamMessage,
   AgentTeamStoredMessage,
   AgentTeamStoredThreadReadFact,
@@ -277,6 +278,8 @@ export interface AgentTeamMessageSentOperation extends AgentTeamOperationBase {
     readonly task?: AgentTeamTask
     readonly thread: AgentTeamThread
     readonly inbox: AgentTeamInboxDelta
+    /** Calls the body aimed at departed Members, with the live receivers. */
+    readonly redirectedMentions?: readonly AgentTeamMentionRedirect[]
   }
 }
 
@@ -291,6 +294,8 @@ export interface AgentTeamThreadRepliedOperation extends AgentTeamOperationBase 
     readonly task?: AgentTeamTask
     readonly thread: AgentTeamThread
     readonly inbox: AgentTeamInboxDelta
+    /** Calls the body aimed at departed Members, with the live receivers. */
+    readonly redirectedMentions?: readonly AgentTeamMentionRedirect[]
   }
 }
 
