@@ -322,3 +322,27 @@
   cursor: default;
   opacity: 0.5;
 }
+
+/* Model schedule rows: two minute-precision time fields, the window's route
+   picker, and its remove action — one grid so the picker column tracks the
+   fallback row's flexible width while the time columns stay narrow. */
+.scheduleRow {
+  align-items: end;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 72px 72px minmax(0, 1fr) 32px;
+}
+.scheduleTime {
+  color: var(--dsw-alias-label-secondary);
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+  line-height: 18px;
+  min-width: 0;
+}
+.scheduleInput {
+  width: 100%;
+}
+.scheduleAdd {
+  justify-self: start;
+}

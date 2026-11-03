@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AgentTeamClientMemberStatus, AgentTeamCurateMemberPromptProposal, AgentTeamMemberId, AgentTeamMemberPromptProfile, AgentTeamMemberPromptSectionEntry, AgentTeamMemberPromptView, AgentTeamModelSelection, AgentTeamUpdateMemberRequest } from '@grantyuan/dsh-crew/types'
+import type { AgentTeamClientMemberStatus, AgentTeamCurateMemberPromptProposal, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamMemberPromptProfile, AgentTeamMemberPromptSectionEntry, AgentTeamMemberPromptView, AgentTeamModelScheduleWindow, AgentTeamModelSelection, AgentTeamUpdateMemberRequest } from '@grantyuan/dsh-crew/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TeamModelCatalog, TeamModelEffortOption, TeamModelProviderGroup, TeamSidebarProps } from './slots.ts'
 import { Button, Checkbox, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, Input, Menu, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -289,6 +289,110 @@ export function ModelFallbackPickerField({ fallbacks, onChange, primary, loadMod
       disabled={disabled}
       t={t}
     />}
+  </div>
+}
+
+/** At most this many daily windows one Member schedule may carry (the Host commit rule). */
+export const MODEL_SCHEDULE_WINDOW_MAX = 6
+const scheduleTimePattern = /^([01]\d|2[0-3]):[0-5]\d$/
+
+/**
+ * One schedule window under edit: minute-precision `HH:MM` strings in the
+ * Team zone (UTC+8) plus the route the window demands. A wholly untouched
+ * window is a blank line, not a configuration draft, and drops out of the
+ * submitted schedule.
+ */
+export interface ModelScheduleWindowDraft {
+  readonly start: string
+  readonly end: string
+  readonly selection: AgentTeamModelSelection | undefined
+}
+
+export interface ModelScheduleDraft {
+  readonly enabled: boolean
+  readonly windows: readonly ModelScheduleWindowDraft[]
+}
+
+/** The stored schedule (or absent) as an editable draft. */
+export function scheduleStoredDraft(stored: AgentTeamMemberModelSchedule | undefined): ModelScheduleDraft {
+  if (stored === undefined) return { enabled: false, windows: [] }
+  return { enabled: stored.enabled, windows: stored.windows.map(w => ({ start: w.start, end: w.end, selection: w.selection })) }
+}
+
+/**
+ * Complete, well-formed windows only: an incomplete row (missing bound, bad
+ * format, equal bounds, or no model) never reaches the ledger — the editor
+ * blocks submission while one exists, and the normalization drops it as a
+ * second guard so a stale draft can't smuggle a rejected commit.
+ */
+export function normalizeScheduleDraft(draft: ModelScheduleDraft): AgentTeamMemberModelSchedule {
+  const windows: readonly AgentTeamModelScheduleWindow[] = draft.windows
+    .map(w => ({ start: w.start.trim(), end: w.end.trim(), selection: w.selection }))
+    .filter((w): w is { readonly start: string; readonly end: string; readonly selection: AgentTeamModelSelection } =>
+      scheduleTimePattern.test(w.start) && scheduleTimePattern.test(w.end) && w.start !== w.end && w.selection !== undefined)
+  return { enabled: draft.enabled, windows }
+}
+
+/** True while any touched window is incomplete or the enabled schedule would demand nothing. */
+export function scheduleDraftInvalid(draft: ModelScheduleDraft): boolean {
+  const partial = draft.windows.some(w => {
+    const start = w.start.trim()
+    const end = w.end.trim()
+    if (start === '' && end === '' && w.selection === undefined) return false
+    return !scheduleTimePattern.test(start) || !scheduleTimePattern.test(end) || start === end || w.selection === undefined
+  })
+  return partial || (draft.enabled && normalizeScheduleDraft(draft).windows.length === 0)
+}
+
+/**
+ * The time-interval model schedule editor: the enable switch, one row per
+ * daily window (Team-zone start and end, then the route the window demands
+ * through the shared picker), and the applied-route line that shows what
+ * the schedule currently overrides. The row order is the resolution
+ * priority — the first covering window wins — and a window whose end is at
+ * or before its start wraps past midnight. Every actual switch lands through
+ * the agent's 重置 on the Host; this editor only writes the durable intent.
+ */
+export function ModelScheduleField({ draft, onChange, applied, loadModels, disabled, t }: {
+  readonly draft: ModelScheduleDraft
+  readonly onChange: (next: ModelScheduleDraft) => void
+  /** The route the Host's schedule currently applies, or undefined when following the pin. */
+  readonly applied: AgentTeamModelSelection | undefined
+  readonly loadModels: TeamSidebarProps['loadModels']
+  readonly disabled: boolean
+  readonly t: TeamSidebarProps['t']
+}) {
+  const replaceAt = (index: number, patch: Partial<ModelScheduleWindowDraft>): void => {
+    onChange({ ...draft, windows: draft.windows.map((window, entryIndex) => entryIndex === index ? { ...window, ...patch } : window) })
+  }
+  return <div className={createCss.field}>
+    <span>{t('modelScheduleTitle')}</span>
+    <small className={css.editHint}>{t('modelScheduleHint')}</small>
+    <Checkbox checked={draft.enabled} onChange={next => { onChange({ ...draft, enabled: next }) }} disabled={disabled} label={t('modelScheduleEnable')} />
+    {applied !== undefined && <small className={css.editHint}>{t('modelScheduleApplied', { route: `${applied.provider}/${applied.model}` })}</small>}
+    {draft.windows.map((window, index) => <div key={index} className={createCss.scheduleRow}>
+      <label className={createCss.scheduleTime}>
+        <span>{t('modelScheduleStart')}</span>
+        <Input className={createCss.scheduleInput!} value={window.start} placeholder="09:00" inputMode="numeric" maxLength={5} aria-label={`${t('modelScheduleWindowLabel', { index: index + 1 })} ${t('modelScheduleStart')}`} onChange={event => replaceAt(index, { start: event.target.value })} disabled={disabled} />
+      </label>
+      <label className={createCss.scheduleTime}>
+        <span>{t('modelScheduleEnd')}</span>
+        <Input className={createCss.scheduleInput!} value={window.end} placeholder="18:00" inputMode="numeric" maxLength={5} aria-label={`${t('modelScheduleWindowLabel', { index: index + 1 })} ${t('modelScheduleEnd')}`} onChange={event => replaceAt(index, { end: event.target.value })} disabled={disabled} />
+      </label>
+      <ModelPickerField
+        model={window.selection}
+        fieldLabel={t('modelScheduleWindowLabel', { index: index + 1 })}
+        onModelChange={choice => replaceAt(index, { selection: choice })}
+        loadModels={loadModels}
+        disabled={disabled}
+        t={t}
+      />
+      <button type="button" className={createCss.fallbackAction!} aria-label={t('modelScheduleRemove', { index: index + 1 })} disabled={disabled} onClick={() => { onChange({ ...draft, windows: draft.windows.filter((_, entryIndex) => entryIndex !== index) }) }}>
+        <IconCloseOutlineRegular size={14} />
+      </button>
+    </div>)}
+    {draft.windows.length < MODEL_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '', selection: undefined }] }) }}>{t('modelScheduleAdd')}</Button>}
+    {scheduleDraftInvalid(draft) && <p className={createCss.error} role="alert">{t('modelScheduleInvalidRule')}</p>}
   </div>
 }
 
@@ -923,6 +1027,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
   const [promptEcho, setPromptEcho] = useState<{ readonly prompt: AgentTeamMemberPromptProfile | undefined }>()
   const [policy, setPolicy] = useState<'continue' | 'fresh'>(status.member.contextStartPolicy ?? 'continue')
   const [windowText, setWindowText] = useState(status.member.contextWindow === undefined ? '' : String(status.member.contextWindow))
+  const [schedule, setSchedule] = useState<ModelScheduleDraft>(() => scheduleStoredDraft(status.member.modelSchedule))
   const { saving, error, pendingRequest, save } = useEditDialogSave({
     save: updateMember,
     onCommitted,
@@ -931,15 +1036,22 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
   const storedLeader = status.member.leader === true
   const parsedWindow = parseContextWindow(windowText)
   const windowInvalid = Number.isNaN(parsedWindow)
+  const scheduleInvalid = scheduleDraftInvalid(schedule)
+  const schedulePayload = normalizeScheduleDraft(schedule)
+  const scheduleChanged = JSON.stringify(schedulePayload) !== JSON.stringify(status.member.modelSchedule ?? { enabled: false, windows: [] })
+  // A stored schedule must always be echoed (absent-clears); an absent one
+  // is only sent once the draft actually differs from nothing.
+  const scheduleSend = status.member.modelSchedule !== undefined || scheduleChanged
   const dirty = handle.trim() !== status.member.handle || description.trim() !== status.member.description
     || !sameModel(model, status.member.model) || leader !== storedLeader
     || policy !== (status.member.contextStartPolicy ?? 'continue') || parsedWindow !== status.member.contextWindow
     || JSON.stringify(fallbacks) !== JSON.stringify(status.member.modelFallbacks ?? [])
+    || scheduleChanged
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const normalizedHandle = handle.trim()
     const normalizedDescription = description.trim()
-    if (saving || !dirty || normalizedHandle.length === 0 || windowInvalid) return
+    if (saving || !dirty || normalizedHandle.length === 0 || windowInvalid || scheduleInvalid) return
     const payload = {
       memberId,
       handle: normalizedHandle,
@@ -948,6 +1060,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       // The editor owns the backup list: an emptied list clears the pin
       // (absent-clears, like `model`), a non-empty one rides in order.
       ...(fallbacks.length === 0 ? {} : { modelFallbacks: fallbacks }),
+      ...(scheduleSend ? { modelSchedule: schedulePayload } : {}),
       // The editor owns no capabilities UI, but an absent field would clear a
       // Remote-written override; echo the stored intent through the edit.
       ...(status.member.capabilities === undefined ? {} : { capabilities: status.member.capabilities }),
@@ -975,6 +1088,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       && (pendingRequest.current.contextStartPolicy ?? 'continue') === policy
       && pendingRequest.current.contextWindow === parsedWindow
       && (pendingRequest.current.leader ?? false) === leader
+      && JSON.stringify(pendingRequest.current.modelSchedule ?? null) === JSON.stringify(scheduleSend ? schedulePayload : null)
     const request: AgentTeamUpdateMemberRequest = samePending ? pendingRequest.current! : {
       requestId: mintRequestId(),
       ...payload,
@@ -990,7 +1104,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       description={`@${status.member.handle}`}
       closeLabel={t('close')}
       contentClassName={createCss.dialogContent!}
-      footer={<><Button variant="outline" disabled={saving} onClick={onClose}>{t('cancel')}</Button><Button type="submit" form="team-agent-edit-form" variant="primary" disabled={saving || !dirty || handle.trim().length === 0 || windowInvalid}>{saving ? t('editSaving') : t('editSave')}</Button></>}
+      footer={<><Button variant="outline" disabled={saving} onClick={onClose}>{t('cancel')}</Button><Button type="submit" form="team-agent-edit-form" variant="primary" disabled={saving || !dirty || handle.trim().length === 0 || windowInvalid || scheduleInvalid}>{saving ? t('editSaving') : t('editSave')}</Button></>}
     >
       <form id="team-agent-edit-form" className={createCss.form} onSubmit={event => { void submit(event) }}>
         <label className={createCss.field}>
@@ -1003,6 +1117,14 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
         </label>
         <ModelPickerField model={model} onModelChange={choice => { pendingRequest.current = undefined; setModel(choice) }} loadModels={loadModels} disabled={saving} t={t} />
         <ModelFallbackPickerField fallbacks={fallbacks} onChange={next => { pendingRequest.current = undefined; setFallbacks(next) }} primary={model} loadModels={loadModels} disabled={saving} t={t} />
+        <ModelScheduleField
+          draft={schedule}
+          onChange={next => { pendingRequest.current = undefined; setSchedule(next) }}
+          applied={status.member.scheduledModel}
+          loadModels={loadModels}
+          disabled={saving}
+          t={t}
+        />
         <ContextPickerField
           policy={policy}
           onPolicyChange={next => { pendingRequest.current = undefined; setPolicy(next) }}
