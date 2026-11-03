@@ -13,8 +13,13 @@
  * @module @grantyuan/dsh-crew/time-format
  */
 
-/** The fixed Team coordination offset from UTC, in minutes. */
-const TEAM_ZONE_OFFSET_MINUTES = 8 * 60
+/**
+ * The fixed Team coordination offset from UTC, in minutes. Exported because
+ * the model-schedule monitor resolves a Member's windows against wall-clock
+ * time through this same zone rule — schedule times are Team-zone times,
+ * exactly like the timestamps the Members already read.
+ */
+export const TEAM_ZONE_OFFSET_MINUTES = 8 * 60
 
 /** Rendered offset text, e.g. `+08:00`. */
 const OFFSET_TEXT = '+08:00'

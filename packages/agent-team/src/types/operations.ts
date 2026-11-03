@@ -179,6 +179,22 @@ export interface AgentTeamMemberUpdatedOperation extends AgentTeamOperationBase 
   readonly data: { readonly member: AgentTeamAgentMember }
 }
 
+/**
+ * Durable move of one Member's schedule-applied route: the Host's
+ * model-schedule monitor commits it when the effective route of the
+ * Member's `modelSchedule` changes (a window boundary crossed, the schedule
+ * edited or disabled). `member` carries the snapshot with the new
+ * `scheduledModel`; an absent `scheduledModel` in that snapshot means the
+ * Member fell back to its pinned model because no window covers (or the
+ * schedule is off). The Human actor rides it because Host automations act
+ * under delegated Human authority (like the context renewal and the
+ * auto-prune commit) — the Client never sends it.
+ */
+export interface AgentTeamMemberModelScheduledOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/member-model-scheduled'
+  readonly data: { readonly member: AgentTeamAgentMember }
+}
+
 /** Durable addition of one Agent Member to one Channel. */
 export interface AgentTeamChannelMemberAddedOperation extends AgentTeamOperationBase {
   readonly kind: 'team/channel-member-added'
@@ -571,6 +587,7 @@ export type AgentTeamOperation =
   | AgentTeamMemberSessionRolledOverOperation
   | AgentTeamChannelUpdatedOperation
   | AgentTeamMemberUpdatedOperation
+  | AgentTeamMemberModelScheduledOperation
   | AgentTeamChannelMemberAddedOperation
   | AgentTeamChannelMemberRemovedOperation
   | AgentTeamMemberWorkspaceJoinedOperation

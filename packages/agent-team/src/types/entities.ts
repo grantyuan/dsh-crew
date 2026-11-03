@@ -142,6 +142,36 @@ export interface AgentTeamModelSelection {
 }
 
 /**
+ * One daily time window of a Member's model schedule. `start` and `end` are
+ * wall-clock times (`HH:MM`) in the fixed Team coordination zone (UTC+8),
+ * `start` inclusive and `end` exclusive; a window whose `end` is at or before
+ * its `start` (except the forbidden equal case) wraps past midnight.
+ */
+export interface AgentTeamModelScheduleWindow {
+  /** Team-zone wall-clock start `HH:MM` (inclusive). */
+  readonly start: string
+  /** Team-zone wall-clock end `HH:MM` (exclusive; wraps past midnight when ≤ start). */
+  readonly end: string
+  /** The route this window demands while it is the covering window. */
+  readonly selection: AgentTeamModelSelection
+}
+
+/**
+ * Durable time-interval model-routing intent of one Member: when enabled,
+ * the Host's model-schedule monitor keeps the Member's live route on the
+ * first covering window's selection, and every actual change of the
+ * effective route is applied through a context reset (a fresh Session that
+ * activates on the new route). Hours no window covers follow the Member's
+ * pinned model (and the Host default) as before. Windows are evaluated in
+ * order — the first cover wins; overlapping windows are allowed and never
+ * silently merged.
+ */
+export interface AgentTeamMemberModelSchedule {
+  readonly enabled: boolean
+  readonly windows: readonly AgentTeamModelScheduleWindow[]
+}
+
+/**
  * Durable capability intent of one Member, carried verbatim on the Member
  * entity through every lifecycle operation. Pure intent: names are not
  * validated against any known-tool list at commit time, so a Harness upgrade
@@ -206,6 +236,20 @@ export interface AgentTeamAgentMember {
   readonly presetId: string
   /** Absent inherits the Host default model selection at every activation. */
   readonly model?: AgentTeamModelSelection | undefined
+  /**
+   * Durable time-interval routing intent; see AgentTeamMemberModelSchedule.
+   * Members written before the schedule existed omit the field.
+   */
+  readonly modelSchedule?: AgentTeamMemberModelSchedule | undefined
+  /**
+   * Route currently applied by the model schedule — never Human-authored,
+   * written only by the `team/member-model-scheduled` operation the Host
+   * monitor commits. While present it outranks the pinned `model` at
+   * activation; the operation clears it (absent again) when the covering
+   * window ends or the schedule is disabled. Members written before the
+   * schedule existed omit the field.
+   */
+  readonly scheduledModel?: AgentTeamModelSelection | undefined
   /**
    * Ordered backup routes the Host fails over to when this Member's live route
    * keeps failing (three consecutive rate-limit/network errors move the

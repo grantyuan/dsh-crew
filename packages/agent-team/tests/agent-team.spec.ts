@@ -3628,3 +3628,100 @@ describe('AgentTeam leader Member watch', () => {
     replayLedger(test).validate()
   })
 })
+
+describe('AgentTeam Member model schedule', () => {
+  const deepseek = { provider: 'deepseek', model: 'deepseek-flash' }
+  const qwen = { provider: 'qwen', model: 'qwen3.8-flash' }
+
+  it('stores a schedule through addMember, edits it absent-clears, and keeps the applied route across plain edits', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const added = await ledger.addMember({
+      requestId: requestId('add-scheduled'), actor: agentTeamHumanActor(), workspaceId: alpha,
+      handle: 'worker', description: 'Day-shift Agent', presetId: 'team-member', channelRefs: [],
+      member: {
+        memberId: 'member:scheduled' as never, sessionId: SessionId('session:scheduled'), workspaceId: alpha,
+        handle: 'worker', description: 'Day-shift Agent', presetId: 'team-member', privateMemoryPath: '/tmp/scheduled', state: 'enabled',
+        modelSchedule: { enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek }, { start: '18:00', end: '23:00', selection: qwen }] },
+      } as AgentTeamAgentMember,
+    })
+    expect(added.value.member.modelSchedule).toEqual({ enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek }, { start: '18:00', end: '23:00', selection: qwen }] })
+    const base = { handle: 'worker', description: 'Day-shift Agent', actor: agentTeamHumanActor() }
+    // A schedule edit echoes intent; omitting the field clears it (absent-clears, like `model`).
+    const retuned = await ledger.updateMember({ ...base, requestId: requestId('schedule-retune'), memberId: 'member:scheduled' as never, modelSchedule: { enabled: false, windows: [{ start: '22:00', end: '06:00', selection: deepseek }] } })
+    expect(retuned.value.member.modelSchedule).toEqual({ enabled: false, windows: [{ start: '22:00', end: '06:00', selection: deepseek }] })
+    // The applied route is monitor-owned: a plain Human edit carries it unchanged.
+    const applied = await ledger.scheduleMemberModel({ requestId: requestId('apply-qwen'), memberId: 'member:scheduled' as never, selection: qwen, actor: agentTeamHumanActor() })
+    expect(applied.value.member.scheduledModel).toEqual(qwen)
+    await ledger.updateMember({ ...base, requestId: requestId('plain-edit'), memberId: 'member:scheduled' as never })
+    expect(ledger.getMember('member:scheduled' as never)?.scheduledModel).toEqual(qwen)
+    const cleared = await ledger.updateMember({ ...base, requestId: requestId('schedule-clear'), memberId: 'member:scheduled' as never })
+    expect(cleared.value.member.modelSchedule).toBeUndefined()
+    expect(cleared.value.member.scheduledModel).toEqual(qwen)
+    const replay = replayLedger(test)
+    expect(replay.getMember('member:scheduled' as never)?.modelSchedule).toBeUndefined()
+    expect(replay.getMember('member:scheduled' as never)?.scheduledModel).toEqual(qwen)
+    replay.validate()
+  })
+
+  it('rejects malformed schedules at the commit gate', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:strict', 'strict')
+    const base = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    const windowOf = (start: string, end: string) => ({ start, end, selection: deepseek })
+    await expect(ledger.updateMember({ ...base, requestId: requestId('bad-time'), modelSchedule: { enabled: true, windows: [windowOf('9:00', '18:00')] } })).rejects.toThrow(/HH:MM/)
+    await expect(ledger.updateMember({ ...base, requestId: requestId('degenerate'), modelSchedule: { enabled: true, windows: [windowOf('09:00', '09:00')] } })).rejects.toThrow(/must not equal/)
+    await expect(ledger.updateMember({ ...base, requestId: requestId('too-many'), modelSchedule: { enabled: true, windows: Array.from({ length: 7 }, (_unused, i) => windowOf(`${String(i).padStart(2, '0')}:00`, `${String(i).padStart(2, '0')}:30`)) } })).rejects.toThrow(/at most 6/)
+  })
+
+  it('collides a retried schedule edit carrying different intent', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:collide', 'collide')
+    const edit = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    const day = { enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek }] }
+    const night = { enabled: true, windows: [{ start: '18:00', end: '23:00', selection: qwen }] }
+    await ledger.updateMember({ ...edit, requestId: requestId('edit-once'), modelSchedule: day })
+    await ledger.updateMember({ ...edit, requestId: requestId('edit-once'), modelSchedule: day }) // idempotent replay
+    await expect(ledger.updateMember({ ...edit, requestId: requestId('edit-once'), modelSchedule: night })).rejects.toThrow(/reused with a different/)
+  })
+
+  it('lands the applied route as an auditable operation with idempotent retries and cold convergence', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:shifted', 'shifted')
+    const first = await ledger.scheduleMemberModel({ requestId: requestId('shift-qwen'), memberId: member.memberId, selection: qwen, actor: agentTeamHumanActor() })
+    expect(first.value.member.scheduledModel).toEqual(qwen)
+    const retry = await ledger.scheduleMemberModel({ requestId: requestId('shift-qwen'), memberId: member.memberId, selection: qwen, actor: agentTeamHumanActor() })
+    expect(retry.committed).toBe(false)
+    expect(retry.value.member.scheduledModel).toEqual(qwen)
+    await expect(ledger.scheduleMemberModel({ requestId: requestId('shift-qwen'), memberId: member.memberId, selection: deepseek, actor: agentTeamHumanActor() })).rejects.toThrow(/reused with a different/)
+    const operations = [...(test.facility.get('agent_team')!.table('operations') as unknown as Map<string, AgentTeamOperation>).entries()].map(([, operation]) => operation).filter(operation => operation.kind === 'team/member-model-scheduled')
+    expect(operations).toHaveLength(1)
+    // The switch names no Inbox or Thread: it moves a routing fact, not a Team conversation.
+    expect(ledger.changeScopesOf(operations[0]!)).toEqual([{ kind: 'workspace', workspaceId: alpha }])
+    const cleared = await ledger.scheduleMemberModel({ requestId: requestId('shift-back'), memberId: member.memberId, actor: agentTeamHumanActor() })
+    expect(cleared.value.member.scheduledModel).toBeUndefined()
+    // A suspended Member carries no live route to move.
+    await ledger.suspendMember({ requestId: requestId('suspend-shifted'), memberId: member.memberId, actor: agentTeamHumanActor() })
+    await expect(ledger.scheduleMemberModel({ requestId: requestId('shift-suspended'), memberId: member.memberId, selection: qwen, actor: agentTeamHumanActor() })).rejects.toThrow(/only enabled Members/)
+    const replay = replayLedger(test)
+    replay.validate()
+    expect(replay.getMember(member.memberId)?.scheduledModel).toBeUndefined()
+  })
+
+  it('fails replay when a schedule operation smuggles another field into its snapshot', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:sneaky', 'sneaky')
+    await ledger.scheduleMemberModel({ requestId: requestId('sneak-apply'), memberId: member.memberId, selection: qwen, actor: agentTeamHumanActor() })
+    const records = [...(test.facility.get('agent_team')!.table('operations') as unknown as Map<string, AgentTeamOperation>).entries()]
+    await test.fiber.dispose()
+    cleanups.pop()
+    const tampered = records.map(([key, operation]) => operation.kind !== 'team/member-model-scheduled'
+      ? [key, operation] as [string, unknown]
+      : [key, { ...operation, data: { member: { ...operation.data.member, handle: 'renamed-by-the-monitor' } } }] as [string, unknown])
+    await expect(harness(storedPool(tampered))).rejects.toThrow(/invalid Member schedule update/)
+  })
+})

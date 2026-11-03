@@ -18,6 +18,7 @@ import type {
   AgentTeamInterruptResolution,
   AgentTeamMemberCapabilities,
   AgentTeamMemberId,
+  AgentTeamMemberModelSchedule,
   AgentTeamMentionRedirect,
   AgentTeamMemberPromptProfile,
   AgentTeamMemberWatch,
@@ -76,6 +77,8 @@ export interface AgentTeamAddMemberRequest {
   readonly model?: AgentTeamModelSelection
   /** Ordered backup routes for automatic failover; absent or empty disables it. */
   readonly modelFallbacks?: readonly AgentTeamModelSelection[]
+  /** Time-interval model-routing intent; see AgentTeamMemberModelSchedule. Absent means no schedule. */
+  readonly modelSchedule?: AgentTeamMemberModelSchedule
   /** Durable capability intent; see AgentTeamMemberCapabilities. */
   readonly capabilities?: AgentTeamMemberCapabilities
   /** Durable prompt-shaping intent; see AgentTeamMemberPromptProfile. */
@@ -151,6 +154,13 @@ export interface AgentTeamUpdateMemberRequest {
   readonly model?: AgentTeamModelSelection
   /** Absent clears the backup-route list back to no failover, matching `model`. */
   readonly modelFallbacks?: readonly AgentTeamModelSelection[]
+  /**
+   * Absent clears the time-interval schedule back to no routing intent,
+   * matching `model`. Editing the schedule never switches the live route by
+   * itself: the model-schedule monitor applies every effective-route change
+   * through a context reset on its next pass.
+   */
+  readonly modelSchedule?: AgentTeamMemberModelSchedule
   /** Absent clears any capability override, matching `model`. */
   readonly capabilities?: AgentTeamMemberCapabilities
   /** Absent clears any prompt-profile override, matching `model`. */

@@ -64,6 +64,9 @@ import type {
   AgentTeamMemberInterrupt,
   AgentTeamMemberInterruptRecordedOperation,
   AgentTeamMemberInterruptResolvedOperation,
+  AgentTeamMemberModelSchedule,
+  AgentTeamMemberModelScheduledOperation,
+  AgentTeamModelScheduleWindow,
   AgentTeamMemberPromptProfile,
   AgentTeamMemberRemovedOperation,
   AgentTeamMemberResumedOperation,
@@ -171,7 +174,7 @@ import type {
   AgentTeamView,
   AgentTeamViewRequest,
 } from './types.ts'
-import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX } from './spec.ts'
+import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX, MEMBER_MODEL_SCHEDULE_WINDOW_MAX, MODEL_SCHEDULE_TIME_PATTERN } from './spec.ts'
 import { formatTeamTimestamp } from './time-format.ts'
 import { resolveBodyMentions, scanBodyHandles } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
@@ -255,6 +258,21 @@ export interface AgentTeamAuthorizedRenewMemberSessionRequest {
   readonly memberId: AgentTeamMemberId
   /** The freshly minted Session the Member transitions onto. */
   readonly sessionId: SessionId
+  readonly actor: AgentTeamHumanActor
+}
+
+/**
+ * Host-authorized intent to move one Member's schedule-applied route: the
+ * model-schedule monitor commits it when the effective route derived from
+ * the Member's `modelSchedule` changes. Absent `selection` clears the
+ * applied route back to the Member's pinned model. Never a Client request —
+ * the Human Remote for schedule edits is `updateMember` carrying the intent.
+ */
+export interface AgentTeamAuthorizedScheduleMemberModelRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly memberId: AgentTeamMemberId
+  /** The route to apply; absent clears `scheduledModel` back to inheritance. */
+  readonly selection?: AgentTeamModelSelection
   readonly actor: AgentTeamHumanActor
 }
 
@@ -756,6 +774,21 @@ function freezePromptProfile(prompt: AgentTeamMemberPromptProfile | undefined): 
   }
 }
 
+/** Deep-freeze a Member model schedule overlay; absent stays absent. */
+function freezeModelSchedule(schedule: AgentTeamMemberModelSchedule | undefined): { modelSchedule?: AgentTeamMemberModelSchedule } {
+  if (schedule === undefined) return {}
+  return {
+    modelSchedule: Object.freeze({
+      enabled: schedule.enabled,
+      windows: Object.freeze(schedule.windows.map(window => Object.freeze({
+        start: window.start,
+        end: window.end,
+        selection: Object.freeze({ ...window.selection }),
+      }))),
+    }),
+  }
+}
+
 /** The custom role paragraph is bounded in UTF-8 bytes, so CJK prose costs what it ships. */
 const MEMBER_PROMPT_MAX_BYTES = 8192
 
@@ -961,18 +994,20 @@ export class AgentTeamLedger {
       for (const channelRef of channelRefs) this.requireActiveChannel(request.workspaceId, channelRef)
       this.assertHandleAvailable(request.workspaceId, handle)
       this.assertModelSelection(request.member.model)
+      this.assertModelSchedule(request.member.modelSchedule)
       this.assertCapabilities(request.member.capabilities)
       this.assertContextControl(request.member.contextStartPolicy, request.member.contextWindow)
       this.assertPromptProfile(request.member.prompt)
       // The request's raw prompt must not ride the identity spread: a blank
       // paragraph normalizes to an absent field, and the profile spread below
       // cannot remove a key the identity spread already planted.
-      const { prompt: _requestPrompt, ...requestMemberWithoutPrompt } = request.member
+      const { prompt: _requestPrompt, modelSchedule: _requestSchedule, ...requestMemberWithoutPrompt } = request.member
       this.assertModelFallbacks(request.member.modelFallbacks, request.member.model)
       const member = Object.freeze({
         ...requestMemberWithoutPrompt, handle, description, presetId, state: 'enabled' as const,
         ...(request.member.model === undefined ? {} : { model: Object.freeze({ ...request.member.model }) }),
         ...(request.member.modelFallbacks === undefined || request.member.modelFallbacks.length === 0 ? {} : { modelFallbacks: Object.freeze(request.member.modelFallbacks.map(fallback => Object.freeze({ ...fallback }))) }),
+        ...freezeModelSchedule(request.member.modelSchedule),
         ...freezeCapabilities(request.member.capabilities),
         ...freezePromptProfile(normalizePromptProfile(request.member.prompt)),
         ...(request.member.contextStartPolicy === undefined ? {} : { contextStartPolicy: request.member.contextStartPolicy }),
@@ -1006,17 +1041,22 @@ export class AgentTeamLedger {
       if (handle !== prior.handle) for (const workspaceId of this.workspacesOf(prior.memberId)) this.assertHandleAvailable(workspaceId, handle, prior.memberId)
       this.assertModelSelection(request.model)
       this.assertModelFallbacks(request.modelFallbacks, request.model)
+      this.assertModelSchedule(request.modelSchedule)
       this.assertCapabilities(request.capabilities)
       this.assertContextControl(request.contextStartPolicy, request.contextWindow)
       this.assertPromptProfile(request.prompt)
       // An absent model or capabilities field must CLEAR any override
       // (inherit the Host default / full standard capability surface);
       // spreading `prior` verbatim would silently keep the pinned value.
-      const { model: _priorModel, modelFallbacks: _priorFallbacks, capabilities: _priorCapabilities, prompt: _priorPrompt, contextStartPolicy: _priorPolicy, contextWindow: _priorWindow, ...priorWithoutOverlays } = prior
+      // `scheduledModel` deliberately stays on the identity spread: a Human
+      // edit never moves the schedule-applied route — the monitor owns that
+      // field, and its next pass reconciles it against the edited intent.
+      const { model: _priorModel, modelFallbacks: _priorFallbacks, modelSchedule: _priorSchedule, capabilities: _priorCapabilities, prompt: _priorPrompt, contextStartPolicy: _priorPolicy, contextWindow: _priorWindow, ...priorWithoutOverlays } = prior
       const member = Object.freeze({
         ...priorWithoutOverlays, handle, description,
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
         ...(request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? {} : { modelFallbacks: Object.freeze(request.modelFallbacks.map(fallback => Object.freeze({ ...fallback }))) }),
+        ...freezeModelSchedule(request.modelSchedule),
         ...freezeCapabilities(request.capabilities),
         ...freezePromptProfile(normalizePromptProfile(request.prompt)),
         ...(request.contextStartPolicy === undefined ? {} : { contextStartPolicy: request.contextStartPolicy }),
@@ -1025,6 +1065,42 @@ export class AgentTeamLedger {
       })
       const operation: AgentTeamMemberUpdatedOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/member-updated',
+        data: Object.freeze({ member }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.memberResult(operation))
+    })
+  }
+
+  /**
+   * Move one Member's schedule-applied route. The model-schedule monitor
+   * commits this when the effective route of the Member's `modelSchedule`
+   * changes — at a window boundary, on a schedule edit the monitor notices,
+   * or when the covering window lapses and the Member falls back to its
+   * pinned model. This write only records the durable routing fact; the Host
+   * applies it to the live Session through the context-renewal path (the
+   * same reset the Human menu uses), so every route switch starts a fresh
+   * generation activating on the new route.
+   */
+  scheduleMemberModel(request: AgentTeamAuthorizedScheduleMemberModelRequest): Promise<AgentTeamLedgerResult<AgentTeamDurableMemberResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameMemberModelScheduled(existing, request)
+        return this.resolved(this.memberResult(existing))
+      }
+      this.assertHumanActor(request.actor)
+      const prior = this.requireMember(request.memberId)
+      if (prior.state !== 'enabled') throw new Error(`Agent Member '${prior.handle}' is ${prior.state}; only enabled Members carry a schedule route`)
+      if (request.selection !== undefined) this.assertModelSelection(request.selection)
+      const { scheduledModel: _priorScheduled, ...priorWithoutScheduled } = prior
+      const member = Object.freeze({
+        ...priorWithoutScheduled,
+        ...(request.selection === undefined ? {} : { scheduledModel: Object.freeze({ ...request.selection }) }),
+      })
+      const operation: AgentTeamMemberModelScheduledOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/member-model-scheduled',
         data: Object.freeze({ member }),
       })
       await this.table.put(operation.operationId, operation)
@@ -1407,6 +1483,7 @@ export class AgentTeamLedger {
       case 'team/member-session-renewed':
       case 'team/member-session-rolled-over':
       case 'team/member-updated':
+      case 'team/member-model-scheduled':
       case 'team/member-archived':
       case 'team/member-removed':
         return [operation.data.member.workspaceId]
@@ -3397,6 +3474,7 @@ export class AgentTeamLedger {
       case 'team/member-session-renewed':
       case 'team/member-session-rolled-over':
       case 'team/member-updated':
+      case 'team/member-model-scheduled':
       case 'team/member-removed':
         return this.memberWorkspaceScopes(operation.data.member.memberId)
       case 'team/member-interrupt-recorded':
@@ -3548,6 +3626,7 @@ export class AgentTeamLedger {
       case 'team/member-session-renewed':
       case 'team/member-session-rolled-over':
       case 'team/member-updated':
+      case 'team/member-model-scheduled':
       case 'team/channel-member-added':
       case 'team/thread-read':
       case 'team/dm-sent':
@@ -3758,6 +3837,18 @@ export class AgentTeamLedger {
       // A stored rename that now collides fails replay loudly rather than
       // silently forking the @ namespace, so the operator renames first.
       if (normalized === this.humanHandle.normalize('NFKC').trim().toLowerCase()) throw new Error('invalid Member update handle')
+      return
+    }
+    if (operation.kind === 'team/member-model-scheduled') {
+      assertHuman()
+      const prior = projection.members.get(operation.data.member.memberId)
+      if (prior === undefined || prior.state !== 'enabled' || operation.data.member.state !== prior.state) throw new Error('invalid Member schedule update')
+      // The schedule operation moves exactly one field. Everything else in
+      // the snapshot must equal the prior Member, so a ledger can never
+      // smuggle a Human edit (handle, pin, prompt…) inside a monitor write.
+      const { scheduledModel: _priorScheduled, ...priorRest } = prior
+      const { scheduledModel: _nextScheduled, ...nextRest } = operation.data.member
+      if (!isDeepStrictEqual(priorRest, nextRest)) throw new Error('invalid Member schedule update')
       return
     }
     if (operation.kind === 'team/channel-member-added') {
@@ -4451,6 +4542,10 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/channel-updated') {
       target.channels.set(operation.data.channel.channelRef, operation.data.channel)
+      return
+    }
+    if (operation.kind === 'team/member-model-scheduled') {
+      target.members.set(operation.data.member.memberId, operation.data.member)
       return
     }
     if (operation.kind === 'team/member-updated') {
@@ -5920,6 +6015,29 @@ export class AgentTeamLedger {
   }
 
   /**
+   * Schedule commit rule: `HH:MM` window bounds in the Team zone, a bounded
+   * ordered window list, and a non-degenerate window — `start` equals `end`
+   * would be both always-covering and never-covering depending on reading,
+   * so the Human must express an all-day window as two half-open windows.
+   * Route strings follow the same pure-intent rule as `model` and fallbacks:
+   * non-blank names only, catalog existence is asserted at the Remote edge
+   * (`assertModelRoute`) and re-derived at activation, never persisted.
+   */
+  private assertModelSchedule(schedule: AgentTeamUpdateMemberRequest['modelSchedule']): void {
+    if (schedule === undefined) return
+    if (schedule.windows.length > MEMBER_MODEL_SCHEDULE_WINDOW_MAX) {
+      throw new Error(`a Member model schedule may carry at most ${MEMBER_MODEL_SCHEDULE_WINDOW_MAX} windows`)
+    }
+    for (const window of schedule.windows) {
+      if (!MODEL_SCHEDULE_TIME_PATTERN.test(window.start) || !MODEL_SCHEDULE_TIME_PATTERN.test(window.end)) {
+        throw new Error('member model schedule window bounds must be HH:MM times')
+      }
+      if (window.start === window.end) throw new Error('a member model schedule window start must not equal its end')
+      this.assertModelSelection(window.selection)
+    }
+  }
+
+  /**
    * Capability allow-list entries are exact identifiers (skill names,
    * reserved tool names); only whitespace-only values are rejected. Unknown
    * names are intent, not errors — committing must stay replayable across
@@ -5988,6 +6106,7 @@ export class AgentTeamLedger {
       || operation.data.member.workspaceId !== request.workspaceId || operation.data.member.handle !== request.handle.trim()
       || operation.data.member.description !== request.description.trim() || operation.data.member.presetId !== request.presetId.trim()
       || !isDeepStrictEqual(operation.data.member.model ?? undefined, request.member.model ?? undefined)
+      || !isDeepStrictEqual(operation.data.member.modelSchedule ?? undefined, request.member.modelSchedule ?? undefined)
       || !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.member.capabilities ?? undefined)
       || !isDeepStrictEqual(operation.data.member.prompt ?? undefined, normalizePromptProfile(request.member.prompt))
       || (operation.data.member.contextStartPolicy ?? undefined) !== (request.member.contextStartPolicy ?? undefined)
@@ -6043,11 +6162,23 @@ export class AgentTeamLedger {
       || operation.data.member.memberId !== request.memberId || operation.data.member.handle !== request.handle.trim()
       || operation.data.member.description !== request.description.trim()
       || !isDeepStrictEqual(operation.data.member.model ?? undefined, request.model ?? undefined)
+      // Empty and absent list the same stored shape (the assembly drops an
+      // empty fallback list), so the collision check normalizes both to
+      // undefined before comparing. The schedule is echoed whole: an empty
+      // window list is a distinct stored shape from an absent schedule.
+      || !isDeepStrictEqual(operation.data.member.modelFallbacks ?? undefined, (request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? undefined : request.modelFallbacks))
+      || !isDeepStrictEqual(operation.data.member.modelSchedule ?? undefined, request.modelSchedule ?? undefined)
       || !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.capabilities ?? undefined)
       || !isDeepStrictEqual(operation.data.member.prompt ?? undefined, normalizePromptProfile(request.prompt))
       || (operation.data.member.contextStartPolicy ?? undefined) !== (request.contextStartPolicy ?? undefined)
       || (operation.data.member.contextWindow ?? undefined) !== (request.contextWindow ?? undefined)
       || (operation.data.member.leader ?? undefined) !== (request.leader ?? undefined)) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameMemberModelScheduled(operation: AgentTeamOperation, request: AgentTeamAuthorizedScheduleMemberModelRequest): asserts operation is AgentTeamMemberModelScheduledOperation {
+    if (operation.kind !== 'team/member-model-scheduled' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.member.memberId !== request.memberId
+      || !isDeepStrictEqual(operation.data.member.scheduledModel ?? undefined, request.selection ?? undefined)) this.throwRequestCollision(request.requestId)
   }
 
   private assertSameChannelJoin(operation: AgentTeamOperation, request: AgentTeamAuthorizedJoinChannelRequest): asserts operation is AgentTeamChannelMemberAddedOperation {
@@ -6310,7 +6441,7 @@ export class AgentTeamLedger {
     return Object.freeze({ receipt: this.receipt(operation), channel: operation.data.channel })
   }
 
-  private memberResult(operation: AgentTeamMemberAddedOperation | AgentTeamMemberSuspendedOperation | AgentTeamMemberResumedOperation | AgentTeamMemberSessionRestartedOperation | AgentTeamMemberSessionRenewedOperation | AgentTeamMemberSessionRolledOverOperation | AgentTeamMemberUpdatedOperation): AgentTeamDurableMemberResult {
+  private memberResult(operation: AgentTeamMemberAddedOperation | AgentTeamMemberSuspendedOperation | AgentTeamMemberResumedOperation | AgentTeamMemberSessionRestartedOperation | AgentTeamMemberSessionRenewedOperation | AgentTeamMemberSessionRolledOverOperation | AgentTeamMemberUpdatedOperation | AgentTeamMemberModelScheduledOperation): AgentTeamDurableMemberResult {
     return Object.freeze({ receipt: this.receipt(operation), member: operation.data.member })
   }
 

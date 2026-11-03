@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { AgentTeamMemberCapabilities, AgentTeamModelSelection } from './types.ts'
+import type { AgentTeamMemberCapabilities, AgentTeamMemberModelSchedule, AgentTeamModelScheduleWindow, AgentTeamModelSelection } from './types.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -47,6 +47,15 @@ const attachmentIdSchema = z.string().min(1).transform(value => value as AgentTe
 export const MEMBER_CONTEXT_WINDOW_FLOOR = 8192
 /** Ordered backup routes one Member may pin at most. */
 export const MEMBER_MODEL_FALLBACK_MAX = 4
+/** Daily time windows one Member's model schedule may carry at most. */
+export const MEMBER_MODEL_SCHEDULE_WINDOW_MAX = 6
+/**
+ * Half-open wall-clock time in the Team coordination zone (UTC+8): a
+ * schedule window stamps `HH:MM` on a 24-hour day with no date component.
+ * Exported because the ledger commit rule measures windows with the same
+ * pattern the replay schema accepts.
+ */
+export const MODEL_SCHEDULE_TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 
 const actorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('human'), memberId: memberIdSchema, handle: z.string().min(1) }).strict(),
@@ -71,6 +80,24 @@ const modelSelectionSchema = z.object({
   model,
   ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
 }))
+
+// One daily time window of a Member's model schedule. Shape rules only —
+// start/end ordering is deliberately NOT checked: a window whose end is at
+// or before its start wraps past midnight (the equal case is rejected by the
+// ledger commit, not the replay schema, so ledgers stay readable). The
+// route inside rides the same pure-intent rule as `model`: provider/model
+// strings are not validated against the live catalog at replay — a catalog
+// change must never make an old ledger unreplayable.
+const modelScheduleWindowSchema = z.object({
+  start: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
+  end: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
+  selection: modelSelectionSchema,
+}).strict().transform(({ start, end, selection }): AgentTeamModelScheduleWindow => ({ start, end, selection }))
+
+const memberModelScheduleSchema = z.object({
+  enabled: z.boolean(),
+  windows: z.array(modelScheduleWindowSchema).max(MEMBER_MODEL_SCHEDULE_WINDOW_MAX),
+}).strict().transform(({ enabled, windows }): AgentTeamMemberModelSchedule => ({ enabled, windows }))
 
 // Pure intent: allow-list entries are plain strings. They are never
 // validated against a known-name set here — committing must survive Harness
@@ -110,6 +137,10 @@ const memberSchema = z.object({
   model: modelSelectionSchema.optional(),
   // Ledgers written before route failover existed omit the field.
   modelFallbacks: z.array(modelSelectionSchema).max(MEMBER_MODEL_FALLBACK_MAX).optional(),
+  // Ledgers written before the time-interval schedule existed omit the field.
+  modelSchedule: memberModelScheduleSchema.optional(),
+  // Host-applied schedule route; written only by team/member-model-scheduled.
+  scheduledModel: modelSelectionSchema.optional(),
   // Ledgers written before member capabilities existed omit the field.
   capabilities: memberCapabilitiesSchema.optional(),
   // Ledgers written before the leader designation existed omit the field.
@@ -439,6 +470,12 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-updated'),
+    data: z.object({ member: memberSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/member-model-scheduled'),
     data: z.object({ member: memberSchema }).strict(),
   }).strict(),
   z.object({

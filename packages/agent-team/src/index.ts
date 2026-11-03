@@ -57,6 +57,7 @@ import { CompletionLiaison, INTERRUPT_PUSH_SUMMARY, liaisonFeedbackText, liaison
 import { TruncationEscalator, truncationEscalationText, type TruncationLeader } from './truncation-escalation.ts'
 import { MemberWatchMonitor, memberWatchNoticeText, type MemberWatchNotice, type MemberWatchSample, type MemberWatchTask } from './member-watch.ts'
 import { clearRouteStreak, modelFailoverNoticeText, noteRouteFailure, routeKeyOf, settlePromotion, supervisionExhaustedNoticeText, type RouteFailureState } from './model-failover.ts'
+import { ModelScheduleMonitor, modelScheduleSwitchNoticeText, sameScheduleRoute, type ModelScheduleBoundary } from './model-schedule.ts'
 import { BackgroundJobRegistry, backgroundJobNoticeText, type BackgroundJob, type BackgroundJobStartInput } from './background-jobs.ts'
 import { StoredSessionReadError, StoredSessionReader, sessionFailureOf } from './stored-session-reader.ts'
 import { doctorAnalysisPrompt, humanTranscriptEntriesOf, renderFailureTranscript, type TranscriptEvent } from './failure-transcript.ts'
@@ -925,6 +926,22 @@ export default class AgentTeam extends TypertRemoteService {
     log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
   })
   /**
+   * Time-interval model routing: re-derives each scheduled Member's desired
+   * route every pass and lands a change through the shared context-renewal
+   * (reset) path — every switch starts a fresh generation activating on the
+   * new route — with a Team Assistant heads-up ten minutes ahead of a
+   * route-changing boundary so the Member can hand its work over first. The
+   * durable applied route on the Member entity is the idempotence check: a
+   * Host that was down across a boundary converges on the next pass, never
+   * a duplicated switch.
+   */
+  private readonly modelScheduleMonitor = new ModelScheduleMonitor({
+    members: () => this.ledger?.listMembers() ?? [],
+    applySwitch: async (member, desired) => this.applyScheduledSwitch(member, desired),
+    remind: async (member, boundary) => { await this.announceModelScheduleSwitch(member, boundary) },
+    log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
+  })
+  /**
    * Members' background jobs: long-running commands the Host spawns for a
    * Member and watches. The registry is process-local by design (the durable
    * record of a job's life is the Messages it produces, like the heartbeat
@@ -1349,6 +1366,7 @@ export default class AgentTeam extends TypertRemoteService {
       this.completionLiaison.dispose()
       this.truncationEscalation.dispose()
       this.memberWatch.dispose()
+      this.modelScheduleMonitor.dispose()
       this.backgroundJobs.dispose()
       this.contextManagement.dispose()
       this.pressurePolicy.dispose()
@@ -1415,6 +1433,10 @@ export default class AgentTeam extends TypertRemoteService {
     // Standing watches restore with the roster, so their first pass samples a
     // settled Team instead of an activating one.
     this.memberWatch.start()
+    // The model-schedule pass rides the same restore gate: a pass before the
+    // roster settled would reset a Member that is still activating and read a
+    // cold applied route as a missed boundary.
+    this.modelScheduleMonitor.start()
     // The gateway rides the same restore gate: it serves only after the roster
     // is settled, and its listener closes with the Host.
     await this.reconcileExternalApi()
@@ -2090,6 +2112,7 @@ export default class AgentTeam extends TypertRemoteService {
     return this.enqueueLifecycle(async () => {
       const workspace = this.requireWorkspace(request.workspaceId)
       await this.assertModelRoute(request.model)
+      for (const window of request.modelSchedule?.windows ?? []) await this.assertModelRoute(window.selection)
       const memberId = `member:${randomUUID()}` as AgentTeamMemberId
       const member: AgentTeamAgentMember = Object.freeze({
         memberId,
@@ -2099,6 +2122,7 @@ export default class AgentTeam extends TypertRemoteService {
         description: request.description,
         presetId: request.presetId,
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
+        ...(request.modelSchedule === undefined ? {} : { modelSchedule: Object.freeze({ ...request.modelSchedule, windows: Object.freeze(request.modelSchedule.windows.map(w => Object.freeze({ ...w, selection: Object.freeze({ ...w.selection }) }))) }) }),
         ...(request.capabilities === undefined ? {} : { capabilities: Object.freeze(deepCopyCapabilities(request.capabilities)) }),
         ...(request.prompt === undefined ? {} : { prompt: Object.freeze(deepCopyPrompt(request.prompt)) }),
         ...(request.contextStartPolicy === undefined ? {} : { contextStartPolicy: request.contextStartPolicy }),
@@ -2299,7 +2323,7 @@ export default class AgentTeam extends TypertRemoteService {
    * enabled state, running-turn refusal) — this core only refuses a Member
    * with no live generation.
    */
-  private async renewMemberContextNow(memberId: AgentTeamMemberId, requestId: AgentTeamRequestId, resetBy: 'human' | 'supervision' | 'teammate' | 'doctor' | 'policy'): Promise<{ readonly receipt: AgentTeamClearMemberContextResult['receipt']; readonly member: AgentTeamAgentMember }> {
+  private async renewMemberContextNow(memberId: AgentTeamMemberId, requestId: AgentTeamRequestId, resetBy: 'human' | 'supervision' | 'teammate' | 'doctor' | 'policy' | 'schedule'): Promise<{ readonly receipt: AgentTeamClearMemberContextResult['receipt']; readonly member: AgentTeamAgentMember }> {
     const ledger = this.requireLedger()
     const stored = ledger.getMember(memberId)
     if (stored === undefined || stored.state !== 'enabled') throw new Error(`Agent Member '${this.memberLabel(memberId)}' is not enabled; only enabled Members can start from a new context`)
@@ -2352,16 +2376,26 @@ export default class AgentTeam extends TypertRemoteService {
    * arrives immediately. A failed delivery only logs: the renewal itself is
    * already durable when this runs.
    */
-  private notifyMemberContextReset(agent: Agent, member: AgentTeamAgentMember, resetBy: 'human' | 'supervision' | 'teammate' | 'policy'): void {
+  private notifyMemberContextReset(agent: Agent, member: AgentTeamAgentMember, resetBy: 'human' | 'supervision' | 'teammate' | 'policy' | 'schedule'): void {
     const resetSource = resetBy === 'human'
       ? 'the Human'
       : resetBy === 'supervision'
         ? 'team supervision after repeated failures'
         : resetBy === 'teammate'
           ? 'a teammate through team supervision'
-          : 'your fresh-start Task policy'
+          : resetBy === 'schedule'
+            ? 'your Team model schedule'
+            : 'your fresh-start Task policy'
+    // A schedule switch is the one reset whose whole purpose is the new
+    // route, so the notice names the route this generation activates on.
+    const routeLine = resetBy === 'schedule' && member.scheduledModel !== undefined
+      ? `This Session activates on your schedule's new route: ${member.scheduledModel.provider}/${member.scheduledModel.model}.`
+      : resetBy === 'schedule'
+        ? 'This Session activates on your pinned route — the schedule no longer covers this hour.'
+        : undefined
     const text = [
       `Context reset notice: your Session was just reset by ${resetSource}, and you are starting from an empty context.`,
+      ...(routeLine === undefined ? [] : [routeLine]),
       'Your handle, settings, and private memory are unchanged, and durable Team facts (Tasks, Claims, Channels) are unaffected — but you remember nothing from earlier conversation.',
       'Re-orient before continuing any work: your injected memory index names what was in hand, and the recent Team history is durable in the ledger — read the Threads, Tasks, and mentions that concern you through team_view, team_inbox, and team_thread.',
       'If anything stays unclear after reading, ask the teammates concerned — reply in the relevant Thread or send a direct message — instead of guessing.',
@@ -2773,7 +2807,12 @@ export default class AgentTeam extends TypertRemoteService {
         autoPrune: true,
         ...(prior?.autoExecutePrune === undefined ? {} : { autoExecutePrune: prior.autoExecutePrune }),
       },
+      // The absent-clears discipline means this internal edit must echo every
+      // overlay the Member actually carries or silently erase it — the
+      // fallback routes and the model schedule included.
       ...(member.model === undefined ? {} : { model: member.model }),
+      ...(member.modelFallbacks === undefined || member.modelFallbacks.length === 0 ? {} : { modelFallbacks: member.modelFallbacks }),
+      ...(member.modelSchedule === undefined ? {} : { modelSchedule: member.modelSchedule }),
       ...(member.capabilities === undefined ? {} : { capabilities: member.capabilities }),
       ...(member.contextStartPolicy === undefined ? {} : { contextStartPolicy: member.contextStartPolicy }),
       ...(member.contextWindow === undefined ? {} : { contextWindow: member.contextWindow }),
@@ -2877,10 +2916,12 @@ export default class AgentTeam extends TypertRemoteService {
     throw lastError
   }
 
-  /** The effective model route of one Member, or the Host default when unset. */
+  /** The effective model route of one Member, or the Host default when unset. A schedule-applied route outranks the pinned model. */
   private currentModelSelectionOf(memberId: AgentTeamMemberId): AgentTeamModelSelection {
+    const stored = this.ledger?.getMember(memberId)
     return this.handles.get(memberId)?.agent.model.current()
-      ?? this.ledger?.getMember(memberId)?.model
+      ?? stored?.scheduledModel
+      ?? stored?.model
       ?? this.ctx.agentDefaultModel.currentSelection()
   }
 
@@ -3723,14 +3764,19 @@ export default class AgentTeam extends TypertRemoteService {
 
   /**
    * Human edit of one Member's mutable facts. A live model selection is
-   * updated in place: disposing an Agent emits session/disposed, which makes
-   * the Web Client permanently mark the same Session id unavailable even when
-   * Team immediately recreates it.
+   * updated in place — but only the EFFECTIVE route (schedule-applied route
+   * first, pinned model behind it): while a schedule route is applied it owns
+   * the live generation, and a pinned-model edit simply lands at the next
+   * switch. A `modelSchedule` edit never touches the live route here: the
+   * model-schedule monitor reconciles the desired route on its next pass,
+   * because every effective-route change goes through the reset path — not
+   * a silent in-place swap.
    */
   @Remote('updateMember')
   async updateMember(request: AgentTeamUpdateMemberRequest): Promise<AgentTeamMemberResult> {
     return this.enqueueLifecycle(async () => {
       await this.assertModelRoute(request.model)
+      for (const window of request.modelSchedule?.windows ?? []) await this.assertModelRoute(window.selection)
       // A Human edit (a pinned model swap especially) is a manual intervention
       // on the Member's runtime: it ends a supervision-exhausted latch.
       this.supervisionExhausted.delete(request.memberId)
@@ -3739,13 +3785,80 @@ export default class AgentTeam extends TypertRemoteService {
       if (result.committed) this.emitCommitted(result.value.receipt)
       const stored = result.value.member
       const active = this.handles.get(request.memberId)
-      if (active !== undefined && !isDeepStrictEqual(previous?.model ?? undefined, stored.model ?? undefined)) {
-        active.agent.model.select(stored.model ?? this.ctx.agentDefaultModel.currentSelection())
+      const previousEffective = previous?.scheduledModel ?? previous?.model
+      const storedEffective = stored.scheduledModel ?? stored.model
+      if (active !== undefined && !isDeepStrictEqual(previousEffective ?? undefined, storedEffective ?? undefined)) {
+        active.agent.model.select(storedEffective ?? this.ctx.agentDefaultModel.currentSelection())
       }
       const runtimeSwapNeeded = !isDeepStrictEqual(previous?.capabilities ?? undefined, stored.capabilities ?? undefined)
         || !isDeepStrictEqual(previous?.prompt ?? undefined, stored.prompt ?? undefined)
       if (runtimeSwapNeeded) this.scheduleMemberRuntimeApply(stored)
       return Object.freeze({ receipt: result.value.receipt, status: this.memberStatus(stored) })
+    })
+  }
+
+  /**
+   * Land one time-interval model switch: commit the schedule-applied route
+   * when the durable fact still disagrees, then realize the switch through
+   * the shared context-renewal (reset) path, so a fresh generation activates
+   * on the new route — the required "switch happens through 重置" rule, and
+   * the same one the Human menu uses. Resolves true when nothing is left
+   * outstanding for this route (applied and live, or applied and no live
+   * generation for activation to pick up), and false when the Member is
+   * mid-turn and the switch must retry at a later pass. A failed renewal
+   * after the durable commit lands as true with a warning: the ledger is
+   * honest about the route, and reviving the generation is supervision's.
+   */
+  private async applyScheduledSwitch(member: AgentTeamAgentMember, desired: AgentTeamModelSelection | undefined): Promise<boolean> {
+    return this.enqueueLifecycle(async () => {
+      const ledger = this.requireLedger()
+      const stored = ledger.getMember(member.memberId)
+      if (stored === undefined || stored.state !== 'enabled') return true
+      if (!sameScheduleRoute(stored.scheduledModel, desired)) {
+        const result = await ledger.scheduleMemberModel({
+          requestId: randomUUID() as AgentTeamRequestId,
+          memberId: stored.memberId,
+          ...(desired === undefined ? {} : { selection: desired }),
+          actor: agentTeamHumanActor(),
+        })
+        if (!result.committed) return false
+        this.emitCommitted(result.value.receipt)
+      }
+      const active = this.handles.get(stored.memberId)
+      // No live generation: nothing to reset. The next activation (restore,
+      // recover, supervision) reads the applied route off the Member entity.
+      if (active === undefined) return true
+      if (this.runningAgents.has(active.agent.id)) return false
+      try {
+        await this.renewMemberContextNow(stored.memberId, randomUUID() as AgentTeamRequestId, 'schedule')
+        return true
+      } catch (error) {
+        this.ctx.logger.warn(`agent-team: model schedule switch of member '${stored.handle}' did not produce a live context: ${error instanceof Error ? error.message : String(error)}`)
+        return true
+      }
+    })
+  }
+
+  /**
+   * Pre-switch heads-up delivery: the Team Assistant's voice names the
+   * Member in its own oldest Channel of the Workspace, with the Member as
+   * the only explicit recipient — the ordinary Inbox path wakes it into a
+   * preparation turn, exactly like the continuation nudge and the task push.
+   */
+  private async announceModelScheduleSwitch(member: AgentTeamAgentMember, boundary: ModelScheduleBoundary): Promise<void> {
+    const channelRef = this.requireLedger().channelsForMember(member.memberId, member.workspaceId)[0]
+    if (channelRef === undefined) throw new Error(`member '${member.handle}' has no Channel in workspace '${member.workspaceId}'`)
+    await this.sendMessageAs(agentTeamAssistantActor(), {
+      requestId: randomUUID() as AgentTeamRequestId,
+      workspaceId: member.workspaceId,
+      channelRef,
+      body: modelScheduleSwitchNoticeText({
+        memberHandle: member.handle,
+        whenText: formatTeamTimestamp(new Date(boundary.atMs).toISOString()),
+        incoming: boundary.incoming,
+      }),
+      recipients: [member.memberId],
+      asTask: false,
     })
   }
 
@@ -5105,7 +5218,7 @@ export default class AgentTeam extends TypertRemoteService {
     // from the ledger or the Host default would race a concurrent default
     // change or live model edit and split the budget from the real route.
     const selection = this.handles.get(member.memberId)?.agent.model.current()
-      ?? member.model ?? this.ctx.agentDefaultModel.currentSelection()
+      ?? member.scheduledModel ?? member.model ?? this.ctx.agentDefaultModel.currentSelection()
     const meter = agent.ctx.get('tokenMeter')
     const usageTokens = meter?.measure(agent.session)?.totalTokens
     if (usageTokens === undefined) return undefined
@@ -6031,7 +6144,10 @@ export default class AgentTeam extends TypertRemoteService {
       // generation's live route: the fresh generation must re-render the same
       // prompt assembly, not reload the operator default under it (see the
       // transition's carriedSelection).
-      const selection = member.model ?? options?.carriedSelection ?? this.ctx.agentDefaultModel.currentSelection()
+      // A schedule-applied route outranks the pinned model: a reset (or any
+      // activation) lands on the route the schedule demands at that moment,
+      // and clearing the applied route falls back to the pin unchanged.
+      const selection = member.scheduledModel ?? member.model ?? options?.carriedSelection ?? this.ctx.agentDefaultModel.currentSelection()
       const agentOptions = {
         provider: selection.provider,
         model: selection.model,
