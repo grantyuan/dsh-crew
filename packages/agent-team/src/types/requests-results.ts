@@ -1008,7 +1008,8 @@ export interface AgentTeamTasksBatchRequest {
   readonly requestId: AgentTeamRequestId
   readonly workspaceId: WorkspaceId
   readonly taskRefs: readonly AgentTeamTaskRef[]
-  readonly action: 'accept' | 'close'
+  /** Same grammar as the single-Task edit; `reopen` returns a terminal Task to open standing. */
+  readonly action: 'accept' | 'close' | 'reopen'
 }
 
 /** One Task's outcome inside a batch. The ledger refuses one Task without blocking the rest. */

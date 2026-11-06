@@ -102,4 +102,89 @@ describe('Team Tasks surfaces', () => {
     expect(b.view.container.querySelector('[data-team-tasks]')).toBeTruthy()
     await b.runtime.dispose()
   })
+
+  it('lays the board out by derived standing with a count per lane', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1' })
+    b.seedTasks([
+      taskRow('w1', 'task:1', { status: 'todo' }),
+      taskRow('w1', 'task:2', { status: 'in_progress' }),
+      taskRow('w1', 'task:3', { status: 'in_review' }),
+      taskRow('w1', 'task:4', { status: 'done', resolution: 'accepted' }),
+      taskRow('w1', 'task:5', { status: 'closed', resolution: 'closed' }),
+    ])
+    fireEvent.click(await b.view.findByRole('button', { name: '任务' }))
+    // The board renders after the per-Workspace reads answer; wait on a lane
+    // first, then address the lanes by their stable column keys.
+    await b.view.findByRole('region', { name: /待处理/ })
+    const laneFor = (key: string): HTMLElement => {
+      const lane = b.view.container.querySelector(`[data-board-column="${key}"]`)
+      if (lane === null) throw new Error(`missing lane ${key}`)
+      return lane
+    }
+    // Every lane renders — empty ones say so — and each card sits in the lane
+    // its derived standing names, one card per Task. The card's crumb names
+    // its standing, which separates it from its own overflow menu label.
+    expect(within(laneFor('todo')).getByRole('button', { name: /^Task #1 待处理/ })).toBeTruthy()
+    expect(within(laneFor('in_progress')).getByRole('button', { name: /^Task #2 进行中/ })).toBeTruthy()
+    expect(within(laneFor('in_review')).getByRole('button', { name: /^Task #3 待验收/ })).toBeTruthy()
+    expect(within(laneFor('done')).getByRole('button', { name: /^Task #4 已完成/ })).toBeTruthy()
+    expect(within(laneFor('done')).getByRole('button', { name: /^Task #5 已关闭/ })).toBeTruthy()
+    for (const key of ['todo', 'in_progress', 'in_review', 'done']) {
+      expect(within(laneFor(key)).queryByText('暂无任务')).toBeNull()
+    }
+    await b.runtime.dispose()
+  })
+
+  it('drops an open card onto the finished lane to accept it through the Host batch', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1' })
+    b.seedTasks([taskRow('w1', 'task:1', { status: 'in_review' })])
+    fireEvent.click(await b.view.findByRole('button', { name: '任务' }))
+    const card = await b.view.findByRole('button', { name: /Ship the rollout/ })
+    fireEvent.dragStart(card)
+    const doneLane = await b.view.findByRole('region', { name: '已完成 0' })
+    fireEvent.dragOver(doneLane, { dataTransfer: { dropEffect: 'move' } })
+    fireEvent.drop(doneLane, { dataTransfer: { dropEffect: 'move' } })
+    await waitFor(() => expect(b.changeTasks).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'w1', taskRefs: ['task:1'], action: 'accept' })))
+    // The batch note line names the single committed move.
+    expect(await b.view.findByRole('status')).toBeTruthy()
+    await b.runtime.dispose()
+  })
+
+  it('drops a finished card back out to reopen it', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1' })
+    b.seedTasks([taskRow('w1', 'task:1', { status: 'done', resolution: 'accepted' })])
+    fireEvent.click(await b.view.findByRole('button', { name: '任务' }))
+    const card = await b.view.findByRole('button', { name: /Ship the rollout/ })
+    fireEvent.dragStart(card)
+    const todoLane = await b.view.findByRole('region', { name: '待处理 0' })
+    fireEvent.dragOver(todoLane, { dataTransfer: { dropEffect: 'move' } })
+    fireEvent.drop(todoLane, { dataTransfer: { dropEffect: 'move' } })
+    await waitFor(() => expect(b.changeTasks).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'w1', taskRefs: ['task:1'], action: 'reopen' })))
+    await b.runtime.dispose()
+  })
+
+  it('drops a to-do card onto In progress to open the assignment request, which posts into the Task Thread', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', seededMessages: [{ body: 'Thread opener', occurredAt: '2026-09-13T04:00:00.000Z' }], seedTaskRef: 'task:1', seedThreadRef: 'thread:1' })
+    b.seedTasks([taskRow('w1', 'task:1', { status: 'todo' })])
+    fireEvent.click(await b.view.findByRole('button', { name: '任务' }))
+    const card = await b.view.findByRole('button', { name: /Ship the rollout/ })
+    fireEvent.dragStart(card)
+    const lane = await b.view.findByRole('region', { name: '进行中 0' })
+    fireEvent.dragOver(lane, { dataTransfer: { dropEffect: 'move' } })
+    fireEvent.drop(lane, { dataTransfer: { dropEffect: 'move' } })
+    // The dialog opens; the claim stays the Member's own commitment, so the
+    // request names them in the Task's Thread instead of moving the lane.
+    const dialog = await b.view.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: '选择成员' }))
+    fireEvent.click(await within(document.body).findByRole('menuitem', { name: 'builder' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '发送指派请求' }))
+    await waitFor(() => expect(b.readThread).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'w1', threadRef: 'thread:1' })))
+    await waitFor(() => expect(b.reply).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'w1', taskRef: 'task:1', body: expect.stringContaining('@builder') })))
+    expect(await b.view.findByText('已向 builder 发出认领请求')).toBeTruthy()
+    await b.runtime.dispose()
+  })
 })

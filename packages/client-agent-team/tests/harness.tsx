@@ -601,11 +601,16 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     ok: true as const,
     value: { humanMemberId: 'member:human', tasks: taskRows.filter(entry => entry.workspaceId === workspaceId).map(entry => entry.row) },
   }))
-  const changeTasks = vi.fn(async (request: { workspaceId: string; taskRefs: readonly string[]; action: 'accept' | 'close' }) => {
+  const changeTasks = vi.fn(async (request: { workspaceId: string; taskRefs: readonly string[]; action: 'accept' | 'close' | 'reopen' }) => {
     const outcomes = request.taskRefs.map(taskRef => {
       const entry = taskRows.find(candidate => candidate.workspaceId === request.workspaceId && candidate.row.taskRef === taskRef)
       if (entry === undefined) return { kind: 'failed' as const, taskRef, reason: `unknown Task ref '${taskRef}'` }
-      entry.row = { ...entry.row, status: request.action === 'accept' ? 'done' : 'closed', resolution: request.action === 'accept' ? 'accepted' : 'closed' }
+      // The board's reopen returns a terminal row to open standing — the
+      // ledger re-derives the lane from the surviving Claims, and the double
+      // projects that as a todo row the way an unclaimed reopen reads.
+      entry.row = request.action === 'reopen'
+        ? { ...entry.row, status: 'todo', resolution: 'open' }
+        : { ...entry.row, status: request.action === 'accept' ? 'done' : 'closed', resolution: request.action === 'accept' ? 'accepted' : 'closed' }
       return { kind: 'committed' as const, taskRef, receipt: {}, task: {}, thread: {}, activity: {} }
     })
     wakeAll()

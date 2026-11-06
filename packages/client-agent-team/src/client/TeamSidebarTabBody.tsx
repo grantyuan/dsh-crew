@@ -49,7 +49,7 @@ export function TeamSidebarTabBody(props: TeamSidebarTabBodyProps) {
     case TEAM_INBOX_KIND:
       return <TeamInboxPage key={tab.id} useWorkspaces={useWorkspaces} loadInbox={pages.loadInbox} subscribeChanges={pages.subscribeChanges} readThread={pages.readThread} selectWorkspace={pages.selectWorkspace} selectThread={pages.selectThread} humanName={humanName} {...humanAvatarProps} t={t} />
     case TEAM_TASKS_KIND:
-      return <TeamTasksPage key={tab.id} useWorkspaces={useWorkspaces} loadTasks={pages.loadTasks} subscribeChanges={pages.subscribeChanges} selectWorkspace={pages.selectWorkspace} selectThread={pages.selectThread} changeTasks={pages.changeTasks} humanName={humanName} {...humanAvatarProps} t={t} />
+      return <TeamTasksPage key={tab.id} useWorkspaces={useWorkspaces} loadTasks={pages.loadTasks} subscribeChanges={pages.subscribeChanges} selectWorkspace={pages.selectWorkspace} selectThread={pages.selectThread} changeTasks={pages.changeTasks} loadMembers={pages.loadMembers} readThread={pages.readThread} reply={pages.reply} humanName={humanName} {...humanAvatarProps} t={t} />
     case TEAM_MESSAGES_KIND:
       return <TeamMessageCenterPage key={tab.id} useWorkspaces={useWorkspaces} loadMessageCenter={pages.loadMessageCenter} loadChannels={pages.loadChannels} readThread={pages.readThread} reply={pages.reply} subscribeChanges={pages.subscribeChanges} selectWorkspace={pages.selectWorkspace} selectThread={pages.selectThread} humanName={humanName} {...humanAvatarProps} t={t} />
     case TEAM_SESSION_HISTORY_KIND: {

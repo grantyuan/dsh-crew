@@ -2130,7 +2130,9 @@ export class AgentTeamLedger {
         }
         try {
           const { task, thread } = this.threadForActor(request.actor, request.workspaceId, taskRef)
-          if ((request.action === 'accept' && task.resolution !== 'open') || (request.action === 'close' && task.resolution === 'closed')) {
+          if ((request.action === 'accept' && task.resolution !== 'open')
+            || (request.action === 'close' && task.resolution === 'closed')
+            || (request.action === 'reopen' && task.resolution === 'open')) {
             outcomes.push(Object.freeze({ kind: 'already_resolved', taskRef, task }))
             continue
           }
