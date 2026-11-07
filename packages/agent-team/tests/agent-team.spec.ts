@@ -3790,4 +3790,40 @@ describe('AgentTeam Member model schedule', () => {
     expect(assistantMessages()).toBe(afterFirstPass)
     replayLedger(test).validate()
   })
+
+  it('keeps Claims owned by the Member across a reset: the fresh session finishes them by identity, never a session id', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-claim-reset'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const { member, actor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:claim-holder', 'holder')
+    const started = withTask(committed((await ledger.sendMessage({ requestId: requestId('claim-reset-start'), workspaceId: alpha, channelRef: channel.channel.channelRef, body: 'Claim reset check', asTask: true, actor })).value))
+    const read = (await ledger.readThread({ requestId: requestId('read-claim'), workspaceId: alpha, taskRef: started.task.taskRef, actor })).value
+    const claimed = committed((await ledger.changeClaim({ requestId: requestId('claim'), workspaceId: alpha, taskRef: started.task.taskRef,
+      action: 'claim', direction: 'build it', baseRevision: read.thread.revision, actor })).value)
+    expect(claimed.claim).toMatchObject({ owner: member.memberId, state: 'active' })
+    const card = () => ledger.tasksForWorkspace({ workspaceId: alpha }).tasks.find(row => row.taskRef === started.task.taskRef)
+    expect(card()).toMatchObject({ status: 'in_progress' })
+    // The reset (the same renewal the model-schedule switch lands through)
+    // moves ONLY the sessionId: identity, handle, and the Claim survive, so
+    // the board card stays owned by the Member — never orphaned to a stale
+    // session id, never released by the switch.
+    const renewed = await ledger.renewMemberSession({ requestId: requestId('reset-holder'), workspaceId: alpha, memberId: member.memberId,
+      sessionId: SessionId(`session:reset-${crypto.randomUUID()}`), actor: agentTeamHumanActor() })
+    expect(renewed.committed).toBe(true)
+    expect(renewed.value.member.sessionId).not.toBe(member.sessionId)
+    expect(renewed.value.member.handle).toBe(member.handle)
+    expect(card()).toMatchObject({ status: 'in_progress' })
+    // The fresh generation resolves to the same Member through its live
+    // binding, so its done lands on the SAME claim ref, matched by owner
+    // identity — the card leaves In progress through the Member's own finish.
+    const freshActor: AgentTeamMemberActor = { kind: 'member', memberId: member.memberId, handle: member.handle }
+    const readFresh = (await ledger.readThread({ requestId: requestId('read-fresh'), workspaceId: alpha, taskRef: started.task.taskRef, actor: freshActor })).value
+    const done = committed((await ledger.changeClaim({ requestId: requestId('done-fresh'), workspaceId: alpha, taskRef: started.task.taskRef,
+      action: 'done', claimRef: claimed.claim.claimRef, baseRevision: readFresh.thread.revision, actor: freshActor })).value)
+    expect(done.claim).toMatchObject({ claimRef: claimed.claim.claimRef, owner: member.memberId, state: 'done' })
+    expect(card()).toMatchObject({ status: 'in_review' })
+    const owners = card()!.claimOwners.map(owner => owner.memberId)
+    expect(owners).toEqual([member.memberId])
+    replayLedger(test).validate()
+  })
 })
