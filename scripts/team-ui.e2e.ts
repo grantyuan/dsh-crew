@@ -2605,46 +2605,84 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.locator('button[class*="tasksCard"]').click()
   await page.locator('[data-team-tasks]').waitFor()
   await expect.poll(async () => await page.locator('button[class*="tasksCard"]').getAttribute('aria-current')).toBe('page')
-  // The parent leads its group: its standing word, then the progress count the
-  // page derives from the rows under it — 0 of 1 done while the split step still
-  // waits — and the child renders indented under it, one row per Task, both open.
+  // The board lays the Tasks out by derived standing: one card per Task in the
+  // lane its Claims derive. The parent leads with its standing word and the
+  // progress count over its sub-tree — 0 of 1 done while the split step still
+  // waits — and the child sits flat in the to-do lane (the board is flat by
+  // design; the parent's chip carries the tree).
   const tasksParentRow = page.locator('[data-team-tasks] button').filter({ hasText: '叠放校验：谁在这个 Task 上' })
   await expect.poll(async () => await tasksParentRow.count()).toBe(1)
   expect(await tasksParentRow.textContent()).toContain('进行中')
   expect(await tasksParentRow.textContent()).toContain('子任务 0/1')
+  expect(await tasksParentRow.evaluate(row => row.closest('[data-board-column="in_progress"]') !== null)).toBe(true)
   const tasksChildRow = page.locator('[data-team-tasks] button').filter({ hasText: '叠放校验：拆分出的第一步' })
   await expect.poll(async () => await tasksChildRow.count()).toBe(1)
-  // Indentation lives on the tree's branch container now, so the child row is
-  // asserted by its ancestor branch rather than a row-level class.
-  expect(await tasksChildRow.evaluate(row => row.closest('[class*="branch"]') !== null)).toBe(true)
   expect(await tasksChildRow.textContent()).toContain('待处理')
-  // Finished work stands in its own section behind the open work — the journey's
-  // first Task ended closed, so the section is populated here, not assumed.
+  expect(await tasksChildRow.evaluate(row => row.closest('[data-board-column="todo"]') !== null)).toBe(true)
+  // Finished work stands in its own lane behind the open work — the journey's
+  // first Task ended closed, so the lane is populated here, not assumed.
   await page.getByRole('heading', { name: '已完成' }).waitFor()
   expect(await page.locator('[data-team-tasks] button').filter({ hasText: '已关闭' }).count()).toBeGreaterThanOrEqual(1)
+  // Dragging is the fast path for a lane move, and every move is the one Host
+  // write it names: a to-do card dropped on 已完成 resolves the Task (early
+  // acceptance is a direct batch commit), and dropping the finished card back
+  // out reopens it. The board updates from the Host projection after each.
+  const dragCardToLane = async (card: ReturnType<typeof page.locator>, laneKey: string): Promise<void> => {
+    // dispatchEvent builds the DragEvent itself — a DataTransfer instance
+    // cannot cross the Playwright boundary — and the board tracks the drag
+    // in component state. Drag events must bubble (the default is false) to
+    // reach the delegated React handlers, and the lane only accepts the drop
+    // once the drag state has committed: poll the lane's own highlight and
+    // re-send a dragover until it answers, so the drop never races the render.
+    const lane = page.locator(`[data-board-column="${laneKey}"]`)
+    const dragInit = { bubbles: true, cancelable: true }
+    await card.dispatchEvent('dragstart', dragInit)
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await lane.dispatchEvent('dragover', dragInit)
+      if ((await lane.getAttribute('class') ?? '').includes('dropReady')) break
+      await page.waitForTimeout(100)
+    }
+    expect((await lane.getAttribute('class') ?? '')).toContain('dropReady')
+    await lane.dispatchEvent('drop', dragInit)
+  }
+  await dragCardToLane(tasksChildRow, 'done')
+  await page.getByRole('status').filter({ hasText: '已提交 1 项' }).waitFor()
+  const draggedChild = page.locator('[data-board-column="done"] button').filter({ hasText: '叠放校验：拆分出的第一步' })
+  await expect.poll(async () => await draggedChild.count()).toBe(1)
+  await dragCardToLane(draggedChild, 'todo')
+  await expect.poll(async () => await page.locator('[data-board-column="todo"] button').filter({ hasText: '叠放校验：拆分出的第一步' }).count()).toBe(1)
+  // Dropping a to-do card on 进行中 is the third legal move: the assignment
+  // request. The dialog asks — the claim stays the Member's own commitment —
+  // and cancelling leaves the card standing where it was.
+  await dragCardToLane(page.locator('[data-board-column="todo"] button').filter({ hasText: '叠放校验：拆分出的第一步' }), 'in_progress')
+  await page.getByRole('dialog').waitFor()
+  await page.getByRole('button', { name: '取消' }).click()
+  await expect.poll(async () => await page.locator('[data-board-column="todo"] button').filter({ hasText: '叠放校验：拆分出的第一步' }).count()).toBe(1)
   await settleLayout(page)
   await page.screenshot({ path: join(UI10_SHOTS, 'tasks-page-desktop.png'), fullPage: true })
-  // Opening a row navigates to the Task's Thread; viewing acknowledges nothing,
-  // and Back remembers the Tasks list it was entered from — it reads
+  // Opening a card navigates to the Task's Thread; viewing acknowledges nothing,
+  // and Back remembers the Tasks board it was entered from — it reads
   // 「返回任务列表」 and lands back on this page.
   await tasksParentRow.click()
   await page.locator('[data-team-thread]').waitFor()
   await page.getByRole('button', { name: '返回任务列表' }).click()
   await page.locator('[data-team-tasks]').waitFor()
   // Batch acceptance: the multi-select bar resolves several open Tasks through
-  // one Host call. Ticking a row is the intent — no Thread reads demanded — and
-  // the committed rows move to the done section while the note names the count.
+  // one Host call. Ticking a card is the intent — no Thread reads demanded —
+  // and the committed cards move to the done lane while the note names the count.
   await page.locator('button[class*="tasksCard"]').click()
   await page.locator('[data-team-tasks]').waitFor()
-  const batchParentShell = page.locator('[data-team-tasks] [class*="rowShell"]').filter({ hasText: '叠放校验：谁在这个 Task 上' })
-  const batchChildShell = page.locator('[data-team-tasks] [class*="rowShell"]').filter({ hasText: '叠放校验：拆分出的第一步' })
+  const batchParentShell = page.locator('[data-team-tasks] [class*="cardShell"]').filter({ hasText: '叠放校验：谁在这个 Task 上' })
+  const batchChildShell = page.locator('[data-team-tasks] [class*="cardShell"]').filter({ hasText: '叠放校验：拆分出的第一步' })
   await batchParentShell.getByRole('checkbox').check()
   await batchChildShell.getByRole('checkbox').check()
   const batchBar = page.getByRole('toolbar', { name: '已选 2 项' })
   await batchBar.waitFor()
   await batchBar.getByRole('button', { name: '验收所选' }).click()
-  await expect.poll(async () => await batchParentShell.count()).toBe(0)
-  await expect.poll(async () => await batchChildShell.count()).toBe(0)
+  // The committed cards leave their open lanes and stand in the done lane;
+  // the board never unmounts a card, so the move reads on the lane, not the shell.
+  await expect.poll(async () => await page.locator('[data-board-column="done"] button').filter({ hasText: '叠放校验：谁在这个 Task 上' }).count()).toBe(1)
+  await expect.poll(async () => await page.locator('[data-board-column="done"] button').filter({ hasText: '叠放校验：拆分出的第一步' }).count()).toBe(1)
   await page.getByRole('status').filter({ hasText: '已提交 2 项' }).waitFor()
   // The done section carries both: the parent with its now-complete progress
   // count, the child standing where it landed.

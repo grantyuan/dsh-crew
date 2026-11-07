@@ -3323,6 +3323,27 @@ describe('AgentTeam Task list and sub-task ledger', () => {
     replayLedger(test).validate()
   })
 
+  it('reopens a batch of terminal Tasks without demanding Thread reads', async () => {
+    const test = await harness()
+    const channelRef = await engineeringChannel(test)
+    const ledger = replayLedger(test)
+    const { actor } = await addLedgerMember(ledger, channelRef)
+    const first = await startTask(ledger, channelRef, actor, 'reopen-1', 'First')
+    const second = await startTask(ledger, channelRef, actor, 'reopen-2', 'Second')
+    await ledger.changeTasks({ requestId: requestId('accept-for-reopen'), workspaceId: alpha,
+      taskRefs: [first.task.taskRef, second.task.taskRef], action: 'accept', actor: agentTeamHumanActor() })
+    const reopened = await ledger.changeTasks({ requestId: requestId('batch-reopen'), workspaceId: alpha,
+      taskRefs: [first.task.taskRef, second.task.taskRef], action: 'reopen', actor: agentTeamHumanActor() })
+    expect(reopened.committed).toBe(true)
+    expect(reopened.value.outcomes.map(outcome => outcome.kind)).toEqual(['committed', 'committed'])
+    expect(ledger.tasksForWorkspace({ workspaceId: alpha }).tasks.map(row => row.status)).toEqual(['todo', 'todo'])
+    // Reopening open standing is the batch's already-resolved arm, not a refusal.
+    const idempotent = await ledger.changeTasks({ requestId: requestId('batch-reopen-open'), workspaceId: alpha,
+      taskRefs: [first.task.taskRef], action: 'reopen', actor: agentTeamHumanActor() })
+    expect(idempotent.value.outcomes.map(outcome => outcome.kind)).toEqual(['already_resolved'])
+    replayLedger(test).validate()
+  })
+
   it('reports refused Tasks in the batch without blocking the rest', async () => {
     const test = await harness()
     const channelRef = await engineeringChannel(test)
@@ -3723,5 +3744,50 @@ describe('AgentTeam Member model schedule', () => {
       ? [key, operation] as [string, unknown]
       : [key, { ...operation, data: { member: { ...operation.data.member, handle: 'renamed-by-the-monitor' } } }] as [string, unknown])
     await expect(harness(storedPool(tampered))).rejects.toThrow(/invalid Member schedule update/)
+  })
+
+  it('wires the live Host: the monitor lands route changes on the ledger and posts one heads-up per boundary', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-schedule'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    // The Member must stand in the HOST's projection (the test's replay
+    // ledger shares the table, not the memory), so it joins through the
+    // Remote; the harness has no model adapter and the activation fails —
+    // the durable enabled Member stands regardless, with no live handle.
+    try {
+      await test.ctx.agentTeam.addMember({ requestId: requestId('add-wired'), workspaceId: alpha, handle: 'wired', description: 'Wired Agent', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    } catch {
+      // Activation without a live adapter is expected here.
+    }
+    const host = test.ctx.agentTeam as unknown as {
+      applyScheduledSwitch: (member: AgentTeamAgentMember, desired: unknown) => Promise<boolean>
+      modelScheduleMonitor: { runPass: (now: number) => Promise<void> }
+    }
+    const stored = () => replayLedger(test).listMembers().find(entry => entry.handle === 'wired')!
+    const scheduleOperations = () => [...(test.facility.get('agent_team')!.table('operations') as unknown as Map<string, AgentTeamOperation>).entries()].map(([, operation]) => operation)
+      .filter((operation: AgentTeamOperation) => operation.kind === 'team/member-model-scheduled').length
+    expect(await host.applyScheduledSwitch(stored(), qwen)).toBe(true)
+    expect(stored().scheduledModel).toEqual(qwen)
+    const afterSwitch = scheduleOperations()
+    // The full-day window demands the route already applied: a pass moves nothing.
+    await test.ctx.agentTeam.updateMember({ requestId: requestId('wire-schedule'), memberId: stored().memberId, handle: 'wired', description: 'Wired Agent', modelSchedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', selection: qwen }] } })
+    await host.modelScheduleMonitor.runPass(Date.UTC(2026, 10, 3, 4, 0, 0))
+    expect(scheduleOperations()).toBe(afterSwitch)
+    // Disabling the schedule demands the pinned route back: the next pass clears the applied route.
+    await test.ctx.agentTeam.updateMember({ requestId: requestId('wire-schedule-off'), memberId: stored().memberId, handle: 'wired', description: 'Wired Agent', modelSchedule: { enabled: false, windows: [{ start: '00:00', end: '23:59', selection: qwen }] } })
+    await host.modelScheduleMonitor.runPass(Date.UTC(2026, 10, 3, 4, 0, 0) + 30_000)
+    expect(scheduleOperations()).toBe(afterSwitch + 1)
+    expect(stored().scheduledModel).toBeUndefined()
+    // Ten minutes ahead of a route-changing boundary the Assistant posts one
+    // heads-up into the Member's Channel — once, not once per pass.
+    await test.ctx.agentTeam.updateMember({ requestId: requestId('wire-schedule-remind'), memberId: stored().memberId, handle: 'wired', description: 'Wired Agent', modelSchedule: { enabled: true, windows: [{ start: '09:00', end: '18:00', selection: qwen }] } })
+    const beforeBoundary = Date.UTC(2026, 10, 3, 0, 52, 0) // 08:52 Team time
+    await host.modelScheduleMonitor.runPass(beforeBoundary)
+    const assistantMessages = () => [...(test.facility.get('agent_team')!.table('operations') as unknown as Map<string, AgentTeamOperation>).entries()].map(([, operation]) => operation)
+      .filter((operation: AgentTeamOperation) => operation.kind === 'team/message-sent').length
+    const afterFirstPass = assistantMessages()
+    expect(afterFirstPass).toBeGreaterThanOrEqual(1)
+    await host.modelScheduleMonitor.runPass(beforeBoundary + 30_000)
+    expect(assistantMessages()).toBe(afterFirstPass)
+    replayLedger(test).validate()
   })
 })
