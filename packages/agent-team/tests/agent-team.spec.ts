@@ -3982,3 +3982,33 @@ describe('AgentTeam capability ratings', () => {
     expect(ledger.completedWorkSince(member.memberId, ledger.position()).finished).toBe(0)
   })
 })
+
+describe('AgentTeam question analysis records', () => {
+  it('records an analysis for a Human question and refuses strangers, with cold convergence', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-q'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const { actor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:q-worker', 'q-worker')
+    const sent = committed((await ledger.sendMessage({ requestId: requestId('q-send-1'), workspaceId: alpha, channelRef: channel.channel.channelRef, body: '发布方案该如何选择?', asTask: false, actor: agentTeamHumanActor() })).value)
+    const analysis = await ledger.recordQuestionAnalysis({ requestId: requestId('q-analyze'), workspaceId: alpha,
+      threadRef: sent.thread.threadRef, messageRef: sent.message.messageRef, digest: '发布方案的选择',
+      similar: [], conflict: false, actor: agentTeamHumanActor() })
+    expect(analysis.committed).toBe(true)
+    expect(ledger.questionAnalyses(alpha)).toHaveLength(1)
+    expect(ledger.humanTopLevelMessages(alpha)).toHaveLength(1)
+    // A retried identical analysis resolves; a stranger message is refused.
+    const retry = await ledger.recordQuestionAnalysis({ requestId: requestId('q-analyze'), workspaceId: alpha,
+      threadRef: sent.thread.threadRef, messageRef: sent.message.messageRef, digest: '发布方案的选择', similar: [], conflict: false, actor: agentTeamHumanActor() })
+    expect(retry.committed).toBe(false)
+    // A member-actor stranger is refused at the Human-authority fence first.
+    await expect(ledger.recordQuestionAnalysis({ requestId: requestId('q-analyze-agent'), workspaceId: alpha,
+      threadRef: sent.thread.threadRef, messageRef: sent.message.messageRef, digest: 'x', similar: [], conflict: false,
+      actor })).rejects.toThrow(/Human authority/)
+    // The retry-collision assert fires on changed payload with the same requestId.
+    await expect(ledger.recordQuestionAnalysis({ requestId: requestId('q-analyze'), workspaceId: alpha,
+      threadRef: sent.thread.threadRef, messageRef: sent.message.messageRef, digest: 'changed', similar: [], conflict: true, actor: agentTeamHumanActor() })).rejects.toThrow(/reused with a different/)
+    const cold = replayLedger(test)
+    expect(cold.questionAnalyses(alpha)).toHaveLength(1)
+    cold.validate()
+  })
+})

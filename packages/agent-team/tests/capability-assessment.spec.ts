@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { CapabilityAssessor, capabilityAssessmentText, CAPABILITY_ASSESSMENT_COOLDOWN_MS } from '../src/capability-assessment.ts'
-import type { AgentTeamMemberId } from '../src/types.ts'
+import type { AgentTeamMemberId, AgentTeamTaskRef } from '../src/types.ts'
+import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 
-const alpha = 'workspace:alpha'
+const alpha = 'workspace:alpha' as WorkspaceId
 const id = (value: string): AgentTeamMemberId => value as AgentTeamMemberId
 
 const leader = { memberId: id('member:lead'), handle: 'lead' }
@@ -24,7 +25,7 @@ function harness(options: {
     workspaces: () => [{ workspaceId: alpha, leader }],
     assessmentEnabled: () => enabled,
     membersToAssess: () => members.filter(member => member.memberId !== leader.memberId),
-    completedSince: () => ({ finished: work, taskRefs: work > 0 ? ['task:1' as never] : [] }),
+    completedSince: () => ({ finished: work, taskRefs: work > 0 ? ['task:1' as AgentTeamTaskRef] : [] }),
     position: () => position,
     notify: async (notifiedLeader, targets) => { notices.push({ leader: notifiedLeader, targets }) },
     log: message => { logs.push(message) },
@@ -58,7 +59,7 @@ describe('CapabilityAssessor passes', () => {
   it('writes the assessment ask with the evidence and the decision that stays the Leader\'s', () => {
     const text = capabilityAssessmentText({
       leaderHandle: 'lead',
-      targets: [{ memberId: id('member:worker'), handle: 'worker', currentScore: 5, finished: 3, taskRefs: ['task:1', 'task:2'] }],
+      targets: [{ memberId: id('member:worker'), handle: 'worker', currentScore: 5, finished: 3, taskRefs: ['task:1' as AgentTeamTaskRef, 'task:2' as AgentTeamTaskRef] }],
     })
     expect(text).toContain('@lead')
     expect(text).toContain('@worker finished 3 work item(s) (task:1, task:2) — currently 5/10')

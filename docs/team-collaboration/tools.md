@@ -1,4 +1,4 @@
-# Eleven-tool protocol
+# Twelve-tool protocol
 
 English | [中文](tools.zh.md)
 
@@ -91,6 +91,12 @@ A notice fires on three events only: the Member changes supervision state (`heal
 Each notice reports the evidence supervision reads — state, presence, failure diagnostic, context tokens against the route window, completed conversation turns across the whole rollover lineage, and the Tasks the Member is running — so "stopped for five minutes" arrives once, not once per pass. The watch is read-only in effect: it never resets, interrupts, or messages the watched Member, and it grants no authority the leader did not already hold. `status` samples one watched Member immediately; `list` shows every watch the leader holds.
 
 The state age a `status` read reports is the age of the state the last sample observed, not the age of the watch: a state that just changed does not inherit the previous state minutes.
+
+## `team_rate`
+
+`team_rate` is the designated leader's capability voice: `action=set` stores one whole-number rating (1 weakest, 10 strongest) for an enabled Agent Member of the Workspace together with the reason it earned; `action=clear` returns the Member to unrated. The ledger refuses every caller that is not that Workspace's leader, and refuses a leader rating itself.
+
+The rating is one durable Member field (`capabilityScore`) that the Human edit and the opt-in automatic assessment also write, and `team_view` carries it on every Member row so assignment decisions weigh it. The rating is advisory intent, never authority: it changes no permission, no route, and no Claim.
 
 ## `team_job`
 

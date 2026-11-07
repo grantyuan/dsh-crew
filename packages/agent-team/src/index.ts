@@ -54,6 +54,7 @@ import { buildRelevanceJudge, CONTEXT_RELEVANCE_THRESHOLD, DISPATCH_HISTORY_MESS
 import { MemberSupervisor, supervisionResetNotice, SUPERVISION_FAILURE_WINDOW_MS, SUPERVISION_HUNG_MS, SUPERVISION_MAX_CONSECUTIVE_FAILURES, SUPERVISION_MAX_RESTART_ATTEMPTS, SUPERVISION_WINDOW_FAILURES, type MemberSupervisionState, type SupervisionTrigger } from './supervisor.ts'
 import { CONTINUATION_NUDGE_MARKER, TaskContinuationWatcher, continuationNudgeText, type ContinuationLeader, type ContinuationTask } from './continuation-watcher.ts'
 import { sanitizeQuotedText, unaddressedSendNoticeText } from './mentions.ts'
+import { buildQuestionAnalysisMessages, looksLikeQuestion, parseQuestionAnalysis, QUESTION_ANALYSIS_MAX_TOKENS, QUESTION_ANALYSIS_TIMEOUT_MS } from './question-memory.ts'
 import { CompletionLiaison, INTERRUPT_PUSH_SUMMARY, liaisonFeedbackText, liaisonReportCheckText, liaisonResumePushText, liaisonTaskPushText, type LiaisonInterrupt, type LiaisonLeader } from './completion-liaison.ts'
 import { TruncationEscalator, truncationEscalationText, type TruncationLeader } from './truncation-escalation.ts'
 import { MemberWatchMonitor, memberWatchNoticeText, type MemberWatchNotice, type MemberWatchSample, type MemberWatchTask } from './member-watch.ts'
@@ -146,6 +147,9 @@ import type {
   AgentTeamMemberPromptSectionEntry,
   AgentTeamMemberPromptView,
   AgentTeamMemberPromptViewRequest,
+  AgentTeamMessageRef,
+  AgentTeamQuestionAnalysisRecord,
+  AgentTeamQuestionAnalysesRequest,
   AgentTeamMemberSessionsRequest,
   AgentTeamMemberSessionSummary,
   AgentTeamMemberSessionTranscriptRequest,
@@ -1625,6 +1629,18 @@ export default class AgentTeam extends TypertRemoteService {
     return this.members()
       .filter(status => request.workspaceId === undefined || ledger.participatesIn(status.member.memberId, request.workspaceId))
       .map(({ member: { privateMemoryPath: _privateMemoryPath, ...member }, ...status }) => Object.freeze({ ...status, member: Object.freeze(member), workspaceIds: ledger.workspacesOf(member.memberId) }))
+  }
+
+  /**
+   * Human read of the question memory: the recorded semantic analyses of the
+   * Workspace's Human questions, newest first — the audit surface the
+   * intent asks and importance raises point back into.
+   */
+  @Remote('questionAnalyses')
+  questionAnalyses(request: AgentTeamQuestionAnalysesRequest): readonly AgentTeamQuestionAnalysisRecord[] {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    return this.requireLedger().questionAnalyses(request.workspaceId, request.limit ?? 50)
   }
 
   /**
@@ -4089,7 +4105,14 @@ export default class AgentTeam extends TypertRemoteService {
   /** Human top-level Thread start; asTask attaches an optional Task overlay. */
   @Remote('sendMessage')
   async sendMessage(request: AgentTeamSendMessageRequest): Promise<AgentTeamSendMessageResult> {
-    return this.sendMessageAs(this.humanCall(request.workspaceId), request)
+    const outcome = await this.sendMessageAs(this.humanCall(request.workspaceId), request)
+    // The question-memory lane: a Human top-level send that reads as a
+    // question is compared against the Human's own past questions out of
+    // band — never inside the send's own queue, never blocking the reply.
+    if (outcome.kind === 'committed' && looksLikeQuestion(outcome.message.body)) {
+      void this.runQuestionAnalysis(request.workspaceId, outcome.message.messageRef, outcome.message.threadRef, outcome.message.body)
+    }
+    return outcome
   }
 
   /**
@@ -6069,9 +6092,112 @@ export default class AgentTeam extends TypertRemoteService {
     return outcome
   }
 
+  /** In-flight question analyses, so a burst of sends never stacks the same comparison. */
+  private readonly pendingQuestionAnalyses = new Set<AgentTeamMessageRef>()
+
+  /**
+   * The question-memory lane. One bounded model call places the Human's new
+   * question against their own past top-level messages (no tools, no
+   * session identity — the digest seam); the comparison lands as the durable
+   * `team/question-analyzed` operation, a conflict earns the Human an intent
+   * ask in the Team Assistant's voice, and a repeat earns the Leader an
+   * importance-raise pointer (whose text invites the Leader to record a
+   * long-term concern in their own memory — the memory stays the Member's).
+   * Every failure logs; the send itself is already durable when this runs.
+   */
+  private async runQuestionAnalysis(workspaceId: WorkspaceId, messageRef: AgentTeamMessageRef, threadRef: AgentTeamThreadRef, body: string): Promise<void> {
+    if (this.pendingQuestionAnalyses.has(messageRef)) return
+    this.pendingQuestionAnalyses.add(messageRef)
+    try {
+      const ledger = this.requireLedger()
+      const past = ledger.humanTopLevelMessages(workspaceId).filter(entry => entry.messageRef !== messageRef)
+      if (past.length === 0) return
+      const llm = this.ctx.get('llm')
+      if (llm === undefined) return
+      const selection = this.digestModelSelection(workspaceId)
+      const signal = AbortSignal.timeout(QUESTION_ANALYSIS_TIMEOUT_MS)
+      const { system, messages } = buildQuestionAnalysisMessages({
+        question: body,
+        past: past.slice(0, 30).map((entry, index) => ({ index, occurredAt: entry.occurredAt, excerpt: entry.excerpt })),
+      })
+      const assembler = new BlockAssembler()
+      for await (const chunk of llm.stream({
+        provider: selection.provider, model: selection.model,
+        messages: [...messages], system,
+        maxTokens: QUESTION_ANALYSIS_MAX_TOKENS, signal,
+      })) assembler.push(chunk)
+      const finish = assembler.finish
+      if (finish.kind === 'error' || finish.kind === 'aborted') throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+      if (finish.kind === 'max-tokens') throw new Error('question analysis reply was truncated at the token cap')
+      const text = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('')
+      const parsed = parseQuestionAnalysis(text, past.length)
+      const similar = parsed.repeats.concat(parsed.conflicts).map(index => {
+        const entry = past[index]!
+        return { messageRef: entry.messageRef, digest: parsed.digest }
+      })
+      const actor = agentTeamHumanActor()
+      const result = await ledger.recordQuestionAnalysis({
+        requestId: randomUUID() as AgentTeamRequestId, workspaceId, threadRef, messageRef,
+        digest: parsed.digest, similar, conflict: parsed.conflicts.length > 0, actor,
+      })
+      if (result.committed) this.emitCommitted(result.value.receipt)
+      if (parsed.conflicts.length > 0) {
+        const conflicts = parsed.conflicts.map(index => past[index]!)
+        await this.announceQuestionConflict({ workspaceId, threadRef, digest: parsed.digest, past: conflicts })
+      } else if (parsed.repeats.length > 0) {
+        const repeats = parsed.repeats.map(index => past[index]!)
+        await this.announceQuestionRecurrence({ workspaceId, threadRef, digest: parsed.digest, past: repeats })
+      }
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: question analysis for message '${messageRef}' failed: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      this.pendingQuestionAnalyses.delete(messageRef)
+    }
+  }
+
+  /** Intent ask on a conflicting question: the Team Assistant asks the Human which intent stands. */
+  private async announceQuestionConflict(input: { readonly workspaceId: WorkspaceId; readonly threadRef: AgentTeamThreadRef; readonly digest: string; readonly past: readonly { readonly threadRef: AgentTeamThreadRef; readonly excerpt: string }[] }): Promise<void> {
+    const ledger = this.requireLedger()
+    const channelRef = ledger.threadChannelRef(input.threadRef)
+    if (channelRef === undefined) throw new Error(`thread '${input.threadRef}' has no Channel for the intent ask`)
+    const pastLines = input.past.map(entry => `- ${sanitizeQuotedText(entry.excerpt.slice(0, 160))} — ${entry.threadRef}`).join('\n')
+    await this.sendMessageAs(agentTeamAssistantActor(), {
+      requestId: randomUUID() as AgentTeamRequestId,
+      workspaceId: input.workspaceId,
+      channelRef,
+      body: [
+        `@${this.humanHandle()} Question intent check: your question — "${sanitizeQuotedText(input.digest)}" (${input.threadRef}) — may conflict with what you asked or decided earlier:`,
+        pastLines,
+        'Please confirm this round\'s intent: does the new question replace the earlier one, or should the earlier decision stand? The Team will follow your reply.',
+      ].join('\n'),
+      asTask: false,
+    })
+  }
+
+  /** Importance raise on a repeated question: the Team Leader is pointed at the recurrence. */
+  private async announceQuestionRecurrence(input: { readonly workspaceId: WorkspaceId; readonly threadRef: AgentTeamThreadRef; readonly digest: string; readonly past: readonly { readonly threadRef: AgentTeamThreadRef; readonly excerpt: string }[] }): Promise<void> {
+    const leader = this.designatedLeaderOf(input.workspaceId)
+    if (leader === undefined) return
+    const ledger = this.requireLedger()
+    const channelRef = ledger.channelsForMember(leader.memberId, input.workspaceId)[0]
+    if (channelRef === undefined) throw new Error(`leader '${leader.handle}' has no Channel for the recurrence notice`)
+    const pastLines = input.past.map(entry => `- ${sanitizeQuotedText(entry.excerpt.slice(0, 160))} — ${entry.threadRef}`).join('\n')
+    await this.sendMessageAs(agentTeamAssistantActor(), {
+      requestId: randomUUID() as AgentTeamRequestId,
+      workspaceId: input.workspaceId,
+      channelRef,
+      body: [
+        `@${leader.handle} Recurring user question — treat as raised priority: the Human asked again about "${sanitizeQuotedText(input.digest)}" (${input.threadRef}), similar to:`,
+        pastLines,
+        'Check the new Thread first when routing work, and if this is a long-term concern of the Human, record it in your private memory so future generations keep the priority.',
+      ].join('\n'),
+      recipients: [leader.memberId],
+      asTask: false,
+    })
+  }
+
   /** The enabled designated Leader of one Workspace, or undefined (the monitors' shared lookup). */
-  private designatedLeaderOf(workspaceId: WorkspaceId): { readonly memberId: AgentTeamMemberId; readonly handle: string } | undefined {
-    const ledger = this.ledger
+  private designatedLeaderOf(workspaceId: WorkspaceId): { readonly memberId: AgentTeamMemberId; readonly handle: string } | undefined {    const ledger = this.ledger
     if (ledger === undefined) return undefined
     const leader = ledger.listMembers().find(member =>
       member.state === 'enabled' && member.leader === true && ledger.workspacesOf(member.memberId).includes(workspaceId))

@@ -491,6 +491,19 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
   z.object({
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/question-analyzed'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      threadRef: threadRefSchema,
+      messageRef: messageRefSchema,
+      digest: z.string().min(1).max(200),
+      similar: z.array(z.object({ messageRef: messageRefSchema, threadRef: threadRefSchema, digest: z.string().min(1).max(200) }).strict()).max(10),
+      conflict: z.boolean(),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/channel-member-added'),
     data: z.object({ workspaceId: workspaceIdSchema, channelRef: channelRefSchema, memberId: memberIdSchema }).strict(),
   }).strict(),

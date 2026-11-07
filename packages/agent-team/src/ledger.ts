@@ -6,6 +6,7 @@ import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type {
   AgentTeamActivity,
   AgentTeamActivityMarker,
+  AgentTeamQuestionAnalysisRecord,
   AgentTeamActivityRef,
   AgentTeamAddMemberRequest,
   AgentTeamAttachmentId,
@@ -67,6 +68,7 @@ import type {
   AgentTeamMemberModelSchedule,
   AgentTeamMemberModelScheduledOperation,
   AgentTeamMemberCapabilityChangedOperation,
+  AgentTeamQuestionAnalyzedOperation,
   AgentTeamModelScheduleWindow,
   AgentTeamMemberPromptProfile,
   AgentTeamMemberRemovedOperation,
@@ -275,6 +277,25 @@ export interface AgentTeamAuthorizedScheduleMemberModelRequest {
   /** The route to apply; absent clears `scheduledModel` back to inheritance. */
   readonly selection?: AgentTeamModelSelection
   readonly actor: AgentTeamHumanActor
+}
+
+/**
+ * Host-authorized record of one semantic question analysis: the delegated
+ * Human actor commits what the bounded model comparison found about one
+ * Human top-level question against the Human's own past questions. `similar`
+ * names past Messages that asked the same thing again; `conflict` marks a
+ * contradiction or a reopened decision.
+ */
+export interface AgentTeamAuthorizedRecordQuestionAnalysisRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly threadRef: AgentTeamThreadRef
+  readonly messageRef: AgentTeamMessageRef
+  readonly digest: string
+  readonly similar: readonly { readonly messageRef: AgentTeamMessageRef; readonly digest: string }[]
+  readonly conflict: boolean
+  /** The delegated Human actor commits the analysis; a member-actor stranger is refused at the fence. */
+  readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
 }
 
 /**
@@ -599,6 +620,8 @@ interface Projection {
   readonly watches: Map<AgentTeamMemberWatchRef, AgentTeamMemberWatch>
   /** One watch per (leader, target, Workspace): the pair index a second start retunes instead of duplicating. */
   readonly watchByPair: Map<string, AgentTeamMemberWatchRef>
+  /** The durable question analyses, keyed by the analyzed Human Message. */
+  readonly questionAnalysesByMessage: Map<AgentTeamMessageRef, AgentTeamQuestionAnalyzedOperation>
 }
 
 /** Minimal replay-time Attention observation; the read projection adds the current Task ref. */
@@ -618,7 +641,7 @@ function emptyProjection(): Projection {
     anchorByThread: new Map(), taskNumberByTask: new Map(), taskCountByChannel: new Map(), attentionThreadsByMember: new Map(),
     threadsByWriter: new Map(),
     directMarkersByMember: new Map(), activityMarkersByMember: new Map(), observationsByThread: new Map(),
-    watches: new Map(), watchByPair: new Map() }
+    watches: new Map(), watchByPair: new Map(), questionAnalysesByMessage: new Map() }
 }
 
 /**
@@ -1178,6 +1201,80 @@ export class AgentTeamLedger {
 
   suspendMember(request: AgentTeamAuthorizedSetMemberStateRequest): Promise<AgentTeamLedgerResult<AgentTeamDurableMemberResult>> {
     return this.setMemberState(request, 'suspended')
+  }
+
+  /**
+   * Record one semantic question analysis. The Host's automation commits it
+   * under the Human actor after the bounded model comparison lands; the
+   * operation is the durable "this question was seen before" fact — the
+   * intent ask on conflict and the importance raise to the Leader ride the
+   * ordinary assistant Messages the Host posts beside it. Replay validates
+   * the analyzed Message against the same projection the write ran on.
+   */
+  recordQuestionAnalysis(request: AgentTeamAuthorizedRecordQuestionAnalysisRequest): Promise<AgentTeamLedgerResult<AgentTeamQuestionAnalysisRecord>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameQuestionAnalyzed(existing, request)
+        return this.resolved(this.questionAnalysisRecord(existing))
+      }
+      this.assertHumanActor(request.actor)
+      const message = this.state.messagesByRef.get(request.messageRef)
+      if (message === undefined || message.channelRef === undefined) throw new Error(`unknown Message '${request.messageRef}' for the question analysis`)
+      if (message.sender !== AGENT_TEAM_HUMAN_MEMBER_ID) throw new Error('question analysis applies to a Human Message only')
+      const channel = this.state.channels.get(message.channelRef)
+      if (channel === undefined || channel.workspaceId !== request.workspaceId) throw new Error(`Message '${request.messageRef}' is not in Workspace '${request.workspaceId}'`)
+      if (message.threadRef !== request.threadRef) throw new Error(`Message '${request.messageRef}' does not live in Thread '${request.threadRef}'`)
+      const similar = request.similar.map(entry => {
+        const past = this.state.messagesByRef.get(entry.messageRef)
+        if (past === undefined || past.sender !== AGENT_TEAM_HUMAN_MEMBER_ID) throw new Error(`similar entry '${entry.messageRef}' is not a past Human Message`)
+        return Object.freeze({ messageRef: entry.messageRef, threadRef: past.threadRef, digest: entry.digest })
+      })
+      const operation: AgentTeamQuestionAnalyzedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/question-analyzed',
+        data: Object.freeze({
+          workspaceId: request.workspaceId, threadRef: message.threadRef, messageRef: request.messageRef,
+          digest: request.digest, similar, conflict: request.conflict,
+        }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.questionAnalysisRecord(operation))
+    })
+  }
+
+  /** The recorded analyses of one Workspace, newest first, bounded. */
+  questionAnalyses(workspaceId: WorkspaceId, limit = 50): readonly AgentTeamQuestionAnalysisRecord[] {
+    return Object.freeze([...this.state.questionAnalysesByMessage.values()]
+      .filter(operation => operation.data.workspaceId === workspaceId)
+      .sort((left, right) => right.sequence - left.sequence)
+      .slice(0, Math.max(1, limit))
+      .map(operation => this.questionAnalysisRecord(operation)))
+  }
+
+  /**
+   * The Human's past top-level Messages of one Workspace, newest first and
+   * bounded — the comparison pool the question analysis reads. Each entry is
+   * one anchor message with a bounded excerpt; the analysis op references
+   * them by messageRef, never by invented identity.
+   */
+  humanTopLevelMessages(workspaceId: WorkspaceId, limit = 30): readonly { readonly messageRef: AgentTeamMessageRef; readonly threadRef: AgentTeamThreadRef; readonly sequence: number; readonly occurredAt: string; readonly excerpt: string }[] {
+    const humanMemberId = this.initialization().data.humanMemberId
+    const entries: { readonly messageRef: AgentTeamMessageRef; readonly threadRef: AgentTeamThreadRef; readonly sequence: number; readonly occurredAt: string; readonly excerpt: string }[] = []
+    for (let index = this.state.orderedFacts.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+      const fact = this.state.orderedFacts[index]!
+      if (fact.kind !== 'message') continue
+      const message = fact.message
+      if (!message.topLevel || message.sender !== humanMemberId || message.recalledAt !== undefined) continue
+      const channel = this.state.channels.get(message.channelRef)
+      if (channel === undefined || channel.workspaceId !== workspaceId || channel.state !== 'active') continue
+      entries.push(Object.freeze({
+        messageRef: message.messageRef, threadRef: message.threadRef, sequence: message.sequence,
+        occurredAt: message.occurredAt ?? '',
+        excerpt: message.body.slice(0, 160),
+      }))
+    }
+    return Object.freeze(entries)
   }
 
   resumeMember(request: AgentTeamAuthorizedSetMemberStateRequest): Promise<AgentTeamLedgerResult<AgentTeamDurableMemberResult>> {
@@ -3564,6 +3661,10 @@ export class AgentTeamLedger {
         return undefined
       case 'team/channel-created':
         return [{ kind: 'workspace', workspaceId: operation.data.workspaceId }]
+      case 'team/question-analyzed':
+        // The analysis is a Workspace-level fact for the Human's question
+        // history; it revises no Thread projection.
+        return [{ kind: 'workspace', workspaceId: operation.data.workspaceId }]
       case 'team/channel-updated':
         // The rename is visible in the sidebar list and any open Channel/Thread header.
         return [{ kind: 'workspace', workspaceId: operation.data.workspaceId }, { kind: 'channel', channelRef: operation.data.channel.channelRef }]
@@ -3730,6 +3831,7 @@ export class AgentTeamLedger {
       case 'team/member-updated':
       case 'team/member-model-scheduled':
       case 'team/member-capability-changed':
+      case 'team/question-analyzed':
       case 'team/channel-member-added':
       case 'team/thread-read':
       case 'team/dm-sent':
@@ -3972,6 +4074,18 @@ export class AgentTeamLedger {
       const { capabilityScore: _nextScore, ...nextRest } = operation.data.member
       if (!isDeepStrictEqual(priorRest, nextRest)) throw new Error('invalid Member capability update')
       if (operation.actor.kind === 'member' && operation.actor.memberId === prior.memberId) throw new Error('invalid Member capability update')
+      return
+    }
+    if (operation.kind === 'team/question-analyzed') {
+      assertHuman()
+      const message = projection.messagesByRef.get(operation.data.messageRef)
+      if (message === undefined || message.sender !== AGENT_TEAM_HUMAN_MEMBER_ID || message.threadRef !== operation.data.threadRef) throw new Error('invalid question analysis')
+      const channel = projection.channels.get(message.channelRef)
+      if (channel === undefined || channel.workspaceId !== operation.data.workspaceId) throw new Error('invalid question analysis')
+      for (const entry of operation.data.similar) {
+        const past = projection.messagesByRef.get(entry.messageRef)
+        if (past === undefined || past.sender !== AGENT_TEAM_HUMAN_MEMBER_ID || past.sequence >= message.sequence) throw new Error('invalid question analysis')
+      }
       return
     }
     if (operation.kind === 'team/channel-member-added') {
@@ -4665,6 +4779,10 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/channel-updated') {
       target.channels.set(operation.data.channel.channelRef, operation.data.channel)
+      return
+    }
+    if (operation.kind === 'team/question-analyzed') {
+      target.questionAnalysesByMessage.set(operation.data.messageRef, operation)
       return
     }
     if (operation.kind === 'team/member-model-scheduled') {
@@ -5672,7 +5790,7 @@ export class AgentTeamLedger {
     return actor
   }
 
-  private assertHumanActor(actor: AgentTeamHumanActor): void {
+  private assertHumanActor(actor: AgentTeamHumanActor | AgentTeamAssistantActor | AgentTeamMemberActor): void {
     const initialization = this.initialization()
     // memberId is the durable Human authority; the handle is display-only.
     if (actor.kind !== 'human' || actor.memberId !== initialization.data.humanMemberId) {
@@ -5758,6 +5876,11 @@ export class AgentTeamLedger {
 
   private channelRefForThread(threadRef: AgentTeamThreadRef): AgentTeamChannelRef | undefined {
     return this.channelRefForThreadFrom(this.state, threadRef)
+  }
+
+  /** The Channel one Thread lives in, for Host-side routing reads. */
+  threadChannelRef(threadRef: AgentTeamThreadRef): AgentTeamChannelRef | undefined {
+    return this.channelRefForThread(threadRef)
   }
 
   private channelRefForThreadFrom(projection: Projection, threadRef: AgentTeamThreadRef): AgentTeamChannelRef | undefined {
@@ -6343,6 +6466,30 @@ export class AgentTeamLedger {
     if (operation.kind !== 'team/member-capability-changed' || !this.sameActor(operation.actor, request.actor)
       || operation.data.member.memberId !== request.memberId
       || !isDeepStrictEqual(operation.data.member.capabilityScore ?? undefined, request.score ?? undefined)) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameQuestionAnalyzed(operation: AgentTeamOperation, request: AgentTeamAuthorizedRecordQuestionAnalysisRequest): asserts operation is AgentTeamQuestionAnalyzedOperation {
+    if (operation.kind !== 'team/question-analyzed' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.messageRef !== request.messageRef
+      || operation.data.threadRef !== request.threadRef || operation.data.digest !== request.digest
+      || operation.data.conflict !== request.conflict
+      || operation.data.similar.length !== request.similar.length
+      || operation.data.similar.some((entry, index) => request.similar[index] === undefined
+        || entry.messageRef !== request.similar[index]!.messageRef || entry.digest !== request.similar[index]!.digest)) {
+      this.throwRequestCollision(request.requestId)
+    }
+  }
+
+  private questionAnalysisRecord(operation: AgentTeamQuestionAnalyzedOperation): AgentTeamQuestionAnalysisRecord {
+    return Object.freeze({
+      receipt: this.receipt(operation),
+      workspaceId: operation.data.workspaceId,
+      threadRef: operation.data.threadRef,
+      messageRef: operation.data.messageRef,
+      digest: operation.data.digest,
+      similar: operation.data.similar,
+      conflict: operation.data.conflict,
+    })
   }
 
   /** The capability rating is a whole 1..10 number; unrated is the absence. */

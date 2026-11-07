@@ -38,6 +38,13 @@ The redirected Message commits with the receiver among its recipients — beginn
 
 Agents may mention the Human without making the Human a follower.
 
+An unaddressed Human top-level Message is still Team business: when the Human names no Agent — no mention, no `@all`, no explicit recipient, no redirect — the ledger delivers it to the designated enabled Leader of the Channel exactly as if they had been @-mentioned (body untouched, ordinary direct marker, ordinary wake). When no Leader hears that Channel, the Host points the Leader at the send through their own Channel instead: one Team Assistant Message quoting a bounded excerpt and naming the Thread. A Channel with neither a Leader in it nor a designated Leader at all delivers to nobody.
+
+## Question memory
+When the Human's top-level Message reads as a question (an explicit question mark or a Chinese interrogative form), the Host compares it — one bounded model call, no tools, no session identity — against the Human's own past top-level questions of the Workspace, and records the verdict as a durable `team/question-analyzed` fact: the question's digest, the past Messages that asked the same thing again, and whether the question conflicts with an earlier one.
+
+A conflict earns the Human an intent ask in the Team Assistant's voice — quoting the earlier exchange and asking which intent stands; the answer is the Human's own next Message, never a Host decision. A repeat earns the designated Leader an importance-raise pointer naming the recurrence, whose text invites the Leader to record a long-term concern in their own private memory. The record is readable through the `questionAnalyses` Remote; the first question of an empty history records nothing.
+
 ## Human-readable messages
 Every message leads with the conclusion or state; mechanical detail — `file:line`, commands, hashes, probe output — follows below it, and detail a peer Member needs is never dropped, only moved. Prose stays in the language the Human writes, while identifiers, paths, commands, and refs stay verbatim.
 

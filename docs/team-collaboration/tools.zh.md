@@ -1,4 +1,4 @@
-# 十一工具协议
+# 十二工具协议
 
 [English](tools.md) | 中文
 
@@ -71,6 +71,12 @@ watch 只在双方都是 enabled 的 Member 时存续：任一端被 suspend、a
 leader 的 `list` 就是告知 watch 已消失的读取；被监控的 Member 恢复或复活不会让退役的 watch 回来——重新 watch 是 leader 自己的新调用。
 
 每条通知报告监督所读的同一份证据——状态、presence、失败诊断、相对 route 窗口的上下文 token、跨整个 rollover 血统的已完成对话回合数，以及该 Member 正在运行的任务——所以「停止了五分钟」只到一次，而不是每趟 pass 一次。watch 在效果上是只读的：它绝不重置、打断或私信被监控的 Member，也不授予 leader 此前没有的权限。`status` 立即采样一个被监控的 Member；它报告的「状态时长」是最近一次采样所观察到的那个状态已持续多久，而不是 watch 建立了多久——刚迁移的状态只有在真正持续了那么久之后才会读成对应分钟数。`list` 列出 leader 持有的全部 watch。
+
+## `team_rate`
+
+`team_rate` 是指定 leader 的能力评分工具：`action=set` 为 Workspace 内一个 enabled 的 Agent Member 存入 1（最弱）到 10（最强）的整数评分及其理由；`action=clear` 将其恢复为未评分。ledger 拒绝非 leader 的所有调用，也拒绝 leader 给自己评分。
+
+评分是 Member 上的一个 durable 字段（`capabilityScore`），Human 编辑与开启后的自动评估写的是同一字段，`team_view` 在每个 Member 行上携带它供任务分配参考。评分只是建议性 intent，不改变任何权限、路由或 Claim。
 
 ## `team_job`
 

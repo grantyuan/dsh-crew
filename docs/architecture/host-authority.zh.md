@@ -34,6 +34,10 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - watcher 的 open 集合止于 `in_review`：Claims 全部完成的任务在等 Human 验收，这不是要提醒已停止 Agent 的工作，因此只剩这类任务的 Workspace 永不触发——Human 任务列表仍将其显示为进行中。
 - 重置按 escalation 恰好公示一次：以 Team Assistant 口吻向该 Member 所在的每个 Channel 发一条结构化重置公示，列明失败原因，声明重置保留了 Member 的身份（handle、设置、私有记忆、Claims）且没有产生任何替补，并带上 `@human` 的请求——若它持续失败，请人工接管（recover、清空上下文，或归档）。
 - 重置以普通的 member-session renewal operation 落账，因此升级中途崩溃只会按正常台账重放，绝不会留下半真半假的 Team 事实；计数器、未结强制链与 exhausted 闩为进程内，重启即重新挣回预算，与压力策略同构。 重置未能治愈的 Member 会闭链进入闩，并在其 Channel 里以一条 durable 的 `@human` 通知宣告让位：闩本身是进程内的，通知才是它的 durable 对应物。
+- 能力评分（`capabilityScore`，1..10，默认未评分）是 Member 上一个 durable 字段，有三个写入者：Human 编辑（`updateMember`，省略保留 / `null` 清除）、指定 Leader 通过 `team_rate` 工具以其自身 member actor 写入（拒绝自评），以及——仅当 Human 为 Leader 开启 `autoCapabilityAssessment` 时——能力评估器（`capability-assessment.ts`）。
+- 评估器观察自上次评估以来完成工作累积的成员（其自身的 Claim 完成，加上 Human 对其未结 Claim 的验收），经普通 assistant mention 请 Leader 用 `team_rate` 复评。评估器本身不写评分；评分始终是 Human 与 Leader 的决定。
+- 问题记忆 lane 在一条读作问题的 Human 顶层消息提交后 out of band 运行：一次有界模型调用（digest seam——无 tools、无会话身份、指定 leader 固定的路由）把它与该 Human 自己的历史顶层问题比较，结论落为 durable 的 `team/question-analyzed` operation。
+- 冲突给 Human 一条 Team Assistant 口吻的意图确认；重复给指定 Leader 一条提升优先级的指引，并邀请其把长期关注写进 Leader 自己的 memory。Host 从不代答意图，也从不写 Member 的 memory。
 - model-schedule monitor（`model-schedule.ts`）负责 Member `modelSchedule` 声明的时间区间路由：每三十秒一趟 pass——与监督共用同一个 restore gate——重新派生命中窗口的路由，并与该 Member 持久化的 `scheduledModel` 比较。变更以 `team/member-model-scheduled` 落账，并经共享的 context-renewal（重置）路径落地，让新 generation 以新路由激活；turn 进行中的 Member 把切换推迟到后续 pass，持久化比较让切换跨重启保持幂等。
 - 在改变路由的边界前十分钟，monitor 以 Team Assistant 的口吻单独向该 Member 发出一条预告，点名即将到来的路由与时刻——普通 Inbox 路径唤醒它，赶在重置清空上下文之前交接工作。预告闩锁与其他 watcher 一致是进程内的；预告是一条普通 ledger Message（Assistant 只能发言，不发 DM）。
 

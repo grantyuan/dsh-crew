@@ -26,6 +26,7 @@ import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import AgentTeam from '../src/index.ts'
 import { DIGEST_SYSTEM_PREFIX } from '../src/thread-digest.ts'
+import { QUESTION_ANALYSIS_SYSTEM_PREFIX } from '../src/question-memory.ts'
 import type { AgentTeamMemberId, AgentTeamModelSelection, AgentTeamRequestId, AgentTeamThreadRef } from '../src/types.ts'
 import { MemoryStorageBackend } from './helpers/memory-backend.ts'
 
@@ -53,22 +54,40 @@ class QuietAdapter extends LlmAdapter {
 /**
  * Answers only the digest seam (identified by the digest system prefix) with a
  * fixed JSON reply; every other stream (member activations) stays quiet. The
- * recorded digest requests are what the routing assertions read.
+ * recorded digest requests are what the routing assertions read. The question
+ * seam rides the same adapter: the question-memory analysis is identified by
+ * its own system prefix, and `questionReply` lets each test script the
+ * comparison verdict the Host will parse.
  */
 class DigestRoutingAdapter extends QuietAdapter {
   readonly digestRequests: GenerateOptions[] = []
+  readonly questionRequests: GenerateOptions[] = []
+  questionReply = JSON.stringify({ repeats: [], conflicts: [], digest: '测试问题摘要' })
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    if (!(options.system ?? '').startsWith(DIGEST_SYSTEM_PREFIX)) return
-    this.digestRequests.push(options)
-    const text = JSON.stringify({ summary: '团队讨论了发布方案。', keyPoints: ['方案A：直接发布', '方案B：灰度发布'], needsHumanDecision: false })
-    yield* [
-      { type: 'block-start', index: 0, blockType: 'text' },
-      { type: 'text-delta', index: 0, text },
-      { type: 'block-end', index: 0, block: { type: 'text', text } },
-      { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
-      { type: 'finish', reason: { kind: 'stop' } },
-    ]
+    if ((options.system ?? '').startsWith(DIGEST_SYSTEM_PREFIX)) {
+      this.digestRequests.push(options)
+      const text = JSON.stringify({ summary: '团队讨论了发布方案。', keyPoints: ['方案A：直接发布', '方案B：灰度发布'], needsHumanDecision: false })
+      yield* [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text },
+        { type: 'block-end', index: 0, block: { type: 'text', text } },
+        { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+      return
+    }
+    if ((options.system ?? '').startsWith(QUESTION_ANALYSIS_SYSTEM_PREFIX)) {
+      this.questionRequests.push(options)
+      const text = this.questionReply
+      yield* [
+        { type: 'block-start', index: 0, blockType: 'text' },
+        { type: 'text-delta', index: 0, text },
+        { type: 'block-end', index: 0, block: { type: 'text', text } },
+        { type: 'usage', usage: { inputTokens: 10, outputTokens: 20 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ]
+    }
   }
 }
 
@@ -216,5 +235,59 @@ describe('Agent Team digest model routing', () => {
     const result = await ctx.agentTeam.summarizeThread({ workspaceId, threadRef })
     expect(result.modelUsed).toMatchObject({ provider: 'mock', model: 'mock' })
     expect(adapter.digestRequests.at(-1)?.model).toBe('mock')
+  })
+})
+
+describe('Agent Team question memory', () => {
+  it('records a repeat, raises importance to the Leader, and leaves the first question unrecorded', async () => {
+    const { ctx, adapter } = shared
+    const workspaceId = WorkspaceId('workspace:question-repeat')
+    const leaderId = await addMember(ctx, workspaceId, 'qm-leader')
+    await designateLeader(ctx, workspaceId, leaderId, 'qm-leader')
+    const leaderChannel = await ctx.agentTeam.createChannel({ requestId: requestId('qm-lead-channel'), workspaceId, name: 'qm-leads', description: 'Question memory leads', memberIds: [leaderId] })
+    void leaderChannel
+    // The FIRST question has no past to compare against: no analysis runs.
+    const first = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('qm-first'), workspaceId, channelRef: leaderChannel.channel.channelRef, body: '发布方案该如何选择?' })
+    expect(first.kind).toBe('committed')
+    await new Promise(resolve => setImmediate(resolve))
+    expect(ctx.agentTeam.questionAnalyses({ workspaceId })).toEqual([])
+    // The SECOND question compares against the first; the adapter answers a repeat.
+    adapter.questionReply = JSON.stringify({ repeats: [0], conflicts: [], digest: '发布方案的选择' })
+    const second = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('qm-second'), workspaceId, channelRef: leaderChannel.channel.channelRef, body: '再问一次:发布方案该如何选择?' })
+    expect(second.kind).toBe('committed')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    const analyses = ctx.agentTeam.questionAnalyses({ workspaceId })
+    expect(analyses).toHaveLength(1)
+    expect(analyses[0]).toMatchObject({ conflict: false })
+    expect(analyses[0]!.similar).toHaveLength(1)
+    expect(adapter.questionRequests).toHaveLength(1)
+    // The importance raise names the Leader in their own Channel.
+    const view = ctx.agentTeam.view({ workspaceId, topLevelOnly: true, limit: 20 })
+    const notice = view.items.map(item => item.message).find(message => message.sender === 'member:assistant' && message.body.includes('Recurring user question'))
+    expect(notice?.body).toContain('@qm-leader')
+    expect(notice?.body).toContain('发布方案的选择')
+  })
+
+  it('asks the Human for intent when the analysis reports a conflict', async () => {
+    const { ctx, adapter } = shared
+    const workspaceId = WorkspaceId('workspace:question-conflict')
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('qm-conflict-channel'), workspaceId, name: 'qm-asks', description: 'Question memory asks', memberIds: [] })
+    const first = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('qm-conflict-first'), workspaceId, channelRef: channel.channel.channelRef, body: '统一用方案A发布' })
+    expect(first.kind).toBe('committed')
+    await new Promise(resolve => setImmediate(resolve))
+    adapter.questionReply = JSON.stringify({ repeats: [], conflicts: [0], digest: '改用方案B发布' })
+    const second = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('qm-conflict-second'), workspaceId, channelRef: channel.channel.channelRef, body: '改成方案B发布,是否可行?' })
+    expect(second.kind).toBe('committed')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    const analyses = ctx.agentTeam.questionAnalyses({ workspaceId })
+    expect(analyses).toHaveLength(1)
+    expect(analyses[0]).toMatchObject({ conflict: true })
+    const view = ctx.agentTeam.view({ workspaceId, topLevelOnly: true, limit: 20 })
+    const notice = view.items.map(item => item.message).find(message => message.sender === 'member:assistant' && message.body.includes('Question intent check'))
+    expect(notice?.body).toContain('@human')
+    expect(notice?.body).toContain('改用方案B发布')
+    expect(notice?.body).toContain('统一用方案A发布'.slice(0, 40))
   })
 })

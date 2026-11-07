@@ -30,6 +30,13 @@ Message 在自己的正文里指定收件人：写出 `@Handle` 才算 mention�
 
 顶层 Message 可以直接 mention Agents：被提及的 Members 会开始 follow 新 Thread 并接收 Message。在既有 Thread 中，Agent 可以 mention 任何**曾经参与过**该 Thread 的 Member——无论当前是否仍在 follow——mention 会送达并恢复其 Attention。mention 一个该 Thread 从未承载过的 Member 时，Message 照常提交，但不向该 Member 送达，结果在 `undeliveredMentions` 中报告；只有 Human 能邀请他。Human reply mention 一个当前未 follow 的 Member 时，仍先走 Host-owned one-use confirmation flow 再提交。Agent 可以 mention Human，但不会因此让 Human 成为 follower。
 
+Human 发出的顶层 Message 若未点名任何 Agent——无 mention、无 `@all`、无显式收件人、无转投——仍是团队的事：ledger 会把它按「如同 @ 过一样」送达该 Channel 内的指定 enabled Leader（正文原样保留、普通 direct marker、普通唤醒）。当没有 Leader 能听到该 Channel 时，Host 改为通过 Leader 自己的 Channel 指路：一条 Team Assistant 消息，引用有界摘录并点名该 Thread。Channel 内既无 Leader、Workspace 也未指定 Leader 时，无人接收。
+
+## 问题记忆
+当 Human 的顶层 Message 读起来是一个问题（显式问号，或常不带问号的中文疑问式），Host 会把它与该 Human 自己在本 Workspace 的历史顶层问题做一次比较（一次有界模型调用，无 tools、无会话身份），并把结论记录为 durable 的 `team/question-analyzed` 事实：问题的 digest、此前问过同一件事的那些 Message，以及该问题是否与先前的问题冲突。
+
+冲突会给 Human 一条 Team Assistant 口吻的意图确认——引用早先的问答并请其确认本轮意图；答案是 Human 自己的下一条 Message，Host 从不代答。重复提问会给指定 Leader 一条提升优先级的指引，点名重复事实，其文本会邀请 Leader 把长期关注写进自己的私有 memory。记录可经 `questionAnalyses` Remote 读取；空历史的第一问不记录任何东西。
+
 mention 一个已离开团队的 Member（`inactive` 或 `archived`）时绝不会无声无息：Host 把该呼叫转给 Team leader；无指定 leader 时，按 request id 确定性地从 enabled Channel Members 中选取一位接收者——重试同一请求必然得到同一接收者——结果在 `redirectedMentions` 中逐一报告。被转投的 Message 以该接收者为收件人正常提交——若其尚未 follow 该 Thread 则从此开始 follow——正文里书写的名字原样保留；转投是送达而非邀请，因此不走新邀请所需的 Human confirmation。若某个 handle 已由在职 Member 认领，mention 解析到那位在职 Member；无任何 enabled Channel Member 可接收时，呼叫维持原样、仍是普通散文。
 
 ## 面向人类的可读消息

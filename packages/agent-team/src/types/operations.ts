@@ -18,6 +18,7 @@ import type {
   AgentTeamMemberId,
   AgentTeamMentionRedirect,
   AgentTeamMessage,
+  AgentTeamMessageRef,
   AgentTeamStoredMessage,
   AgentTeamStoredThreadReadFact,
   AgentTeamTask,
@@ -207,6 +208,30 @@ export interface AgentTeamMemberModelScheduledOperation extends AgentTeamOperati
 export interface AgentTeamMemberCapabilityChangedOperation extends AgentTeamOperationBase {
   readonly kind: 'team/member-capability-changed'
   readonly data: { readonly member: AgentTeamAgentMember }
+}
+
+/**
+ * Durable record of one semantic question analysis: after the Human posted
+ * a top-level message that reads as a question, the Host compared it with
+ * the Human's own past top-level messages (one bounded model call) and
+ * records what the comparison found. `digest` states the question's subject;
+ * `similar` names the past Messages that asked the same thing again — the
+ * durable importance raise; `conflict` marks that the question contradicts
+ * or reopens an earlier one, which is the trigger for the Host's intent ask.
+ * The operation records an analysis, never a decision: the Human's answer to
+ * an intent ask is their own next Message. Committed under the Human actor
+ * (the delegated automation authority).
+ */
+export interface AgentTeamQuestionAnalyzedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/question-analyzed'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly threadRef: AgentTeamThreadRef
+    readonly messageRef: AgentTeamMessageRef
+    readonly digest: string
+    readonly similar: readonly { readonly messageRef: AgentTeamMessageRef; readonly threadRef: AgentTeamThreadRef; readonly digest: string }[]
+    readonly conflict: boolean
+  }
 }
 
 /** Durable addition of one Agent Member to one Channel. */
@@ -603,6 +628,7 @@ export type AgentTeamOperation =
   | AgentTeamMemberUpdatedOperation
   | AgentTeamMemberModelScheduledOperation
   | AgentTeamMemberCapabilityChangedOperation
+  | AgentTeamQuestionAnalyzedOperation
   | AgentTeamChannelMemberAddedOperation
   | AgentTeamChannelMemberRemovedOperation
   | AgentTeamMemberWorkspaceJoinedOperation

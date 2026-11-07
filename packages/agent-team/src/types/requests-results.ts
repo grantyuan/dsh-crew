@@ -195,6 +195,24 @@ export interface AgentTeamMemberPromptViewRequest {
   readonly memberId: AgentTeamMemberId
 }
 
+/** The durable record of one semantic question analysis, as the Host read returns it. */
+export interface AgentTeamQuestionAnalysisRecord {
+  readonly receipt: AgentTeamOperationReceipt
+  readonly workspaceId: WorkspaceId
+  readonly threadRef: AgentTeamThreadRef
+  readonly messageRef: AgentTeamMessageRef
+  readonly digest: string
+  readonly similar: readonly { readonly messageRef: AgentTeamMessageRef; readonly threadRef: AgentTeamThreadRef; readonly digest: string }[]
+  readonly conflict: boolean
+}
+
+/** Human read of one Workspace's recorded question analyses, newest first. */
+export interface AgentTeamQuestionAnalysesRequest {
+  readonly workspaceId: WorkspaceId
+  /** Bounded read; the default returns the most recent 50. */
+  readonly limit?: number
+}
+
 /**
  * Host view behind the Prompt dialog: the stored prompt profile, the
  * lifecycle facts the dialog renders from, and the stored overrides its
