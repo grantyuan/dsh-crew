@@ -44,7 +44,10 @@
 /* One card: the selection checkbox (open cards only), the row itself — which
    is also the drag handle — and the overflow menu holding the same moves for
    the keyboard. The checkbox sits outside the row button and the menu stops
-   its own clicks, so selecting, opening, and dragging never collide. */
+   its own clicks, so selecting, opening, and dragging never collide. The
+   button and the menu pin to their columns: a terminal card renders no
+   checkbox, and auto-placement would otherwise pull the button into the
+   checkbox's shrink-to-fit column and collapse it to its leading dot. */
 .cardShell {
   align-items: flex-start;
   display: grid;
@@ -52,12 +55,14 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
 .cardShell > button {
+  grid-column: 2;
   min-width: 0;
 }
 .cardDragging {
   opacity: 0.5;
 }
 .cardMenu {
+  grid-column: 3;
   padding-top: 4px;
 }
 

@@ -117,7 +117,7 @@ describe('Team Tasks surfaces', () => {
     // first, then address the lanes by their stable column keys.
     await b.view.findByRole('region', { name: /待处理/ })
     const laneFor = (key: string): HTMLElement => {
-      const lane = b.view.container.querySelector(`[data-board-column="${key}"]`)
+      const lane = b.view.container.querySelector<HTMLElement>(`[data-board-column="${key}"]`)
       if (lane === null) throw new Error(`missing lane ${key}`)
       return lane
     }
