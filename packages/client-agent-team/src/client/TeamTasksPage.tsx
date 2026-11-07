@@ -421,10 +421,13 @@ function TaskCard({ row, showWorkspace, progress, human, dragging, selected, sel
     className={inboxCss.row}
     draggable
     onDragStart={event => {
-      // jsdom fires drag events without a DataTransfer; the page tracks the
-      // drag in state anyway, so the payload is best-effort for real DnD.
-      event.dataTransfer?.setData('text/plain', task.taskRef)
-      if (event.dataTransfer !== undefined) event.dataTransfer.effectAllowed = 'move'
+      // The native dataTransfer is null where a test double never builds one
+      // (jsdom) and a real DragEvent without an init payload; the page tracks
+      // the drag in state anyway, so the payload is best-effort for real DnD.
+      if (event.dataTransfer) {
+        event.dataTransfer.setData('text/plain', task.taskRef)
+        event.dataTransfer.effectAllowed = 'move'
+      }
       onDragStart()
     }}
     onDragEnd={onDragEnd}
@@ -449,7 +452,9 @@ function TaskCard({ row, showWorkspace, progress, human, dragging, selected, sel
       </span>}
       <time className={inboxCss.rowTime} dateTime={task.lastActivityAt} title={formatAbsoluteTime(task.lastActivityAt)}>{formatInboxTime(task.lastActivityAt, t)}</time>
     </span>
-    <span className={inboxCss.rowPreview}>{task.subject}</span>
+    <span className={inboxCss.rowSecond}>
+      <span className={inboxCss.rowPreview}>{task.subject}</span>
+    </span>
   </button>
   return <div className={[taskCss.cardShell, ...(dragging ? [taskCss.cardDragging] : [])].join(' ')}>
     {selectable && <input
