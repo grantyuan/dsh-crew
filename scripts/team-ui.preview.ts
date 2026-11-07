@@ -24,7 +24,7 @@ beforeAll(async () => {
     await cp(join(TEAM_ROOT, 'node_modules', name), join(STAGED_BUNDLE, 'node_modules', ...name.split('/')), { recursive: true, dereference: true })
   }
   scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
-  process.stdout.write(`AGENT_TEAM_PREVIEW_URL=${scaffold.baseUrl}\n`)
+  process.stdout.write(`AGENT_TEAM_PREVIEW_URL=${scaffold.authenticatedUrl}\n`)
 })
 
 afterAll(async () => { await scaffold.close() })

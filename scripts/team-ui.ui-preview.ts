@@ -39,7 +39,7 @@ beforeAll(async () => {
     channelRef: channel.channel.channelRef,
     body: '检查无模型 UI 预览的频道和 Thread 布局',
   })
-  process.stdout.write(`AGENT_TEAM_UI_PREVIEW_URL=${scaffold.baseUrl}\n`)
+  process.stdout.write(`AGENT_TEAM_UI_PREVIEW_URL=${scaffold.authenticatedUrl}\n`)
   process.stdout.write('UI-only preview: fixture state is loaded; model calls are disabled and fail explicitly if triggered.\n')
 })
 
