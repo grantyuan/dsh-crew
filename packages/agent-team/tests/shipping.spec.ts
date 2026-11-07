@@ -33,8 +33,11 @@ async function shippedHarnessName(): Promise<string> {
 // same change) moved the reviewed size up once, with headroom for wording that
 // earns its characters. The 2026-09-15 Thread entry/re-entry rule moved it up
 // again on the operator's instruction, to stop leaving every wording-only
-// improvement squeezed into the last few characters.
-const PERSONA_CHARACTER_BUDGET = 15000
+// improvement squeezed into the last few characters. The 2026-11-07 delegation
+// discipline (decompose implementation work into small-grained sub-tasks and
+// settle each through subagent) moved it up again on the operator's
+// instruction, replacing the old per-bullet delegation sentence.
+const PERSONA_CHARACTER_BUDGET = 15700
 
 // The team-member preset rides the shipped patch as one declarative definition
 // row; these assertions scope to exactly that row, from its `- id:` marker to
@@ -469,6 +472,8 @@ describe('Agent Team Member persona', () => {
       'never a double colon',
       // Work on a Task is announced with a Claimed direction before it starts.
       'Claim a Direction',
+      // Implementation work defaults to small-grained sub-tasks settled through subagent.
+      'small-grained sub-tasks',
       // A decision owed states what needs deciding and the default outcome.
       'what needs deciding and what happens by default',
     ]) {

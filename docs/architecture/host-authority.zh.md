@@ -87,6 +87,7 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - LLM 路由 failover 是建立在 durable pin 之上的 Host runtime 策略：`modelFallbacks` 是 Member 实体上的有序备用路由列表（与 `model` 同为 absent-clears，经 `sameMemberFacts` 在 renewal 与 rollover 中原样保留，至多四条，且不得与主路由重复）。
 - 当 Member 当前路由连续三个回合以服务端侧错误应答（限流、overload、瞬时网络——与 recovery 重试同一族），Host 通过该 session 自己的 durable model selection 提升下一条备用路由，并发出一条点名两条路由的 `@human` 通知；pinned 主路由不变，新的世代或手动编辑即回到主路由。streak 按路由计数且仅存进程内：干净回合清零，新世代从主路由重来，备用耗尽后由 supervision 的既有 remedy 接管。
 - 两项 runtime 能力随 Member 的 preset 组合走，而不进 ledger：后台 job（`team_job`——Host spawn 并看护长命子进程，把脚本回报与进程退出转成普通 Team Message，Host 停止时杀掉活着的子进程）与 subagent 委派（team-member preset 上挂载的 shipped `subagent`／control 工具，锁定到不携带任何 Team 工具的纯工作型 `team-subagent` 子 preset）。两者都是进程内执行；durable 的 Team 事实仍然只经 ledger 进入。
+- Persona 把委派设为实施类工作的默认姿态：Member 先把任务拆成小颗粒子任务，再逐一经 `subagent` 落实（persona 的 delegation discipline 一节），Team 读取、消息、整合与最终验证留在自己的会话内。
 - 对 live Member 编辑 allow-list 或 prompt 画像：durable 编辑在 commit 处立即应答，live 换装在同一 Session 的 turn 边界完成——idle 在编辑自身的队列 body 内生效；running 则交给后台 scheduled apply（与 fresh-start reset／auto-prune sweep 同形），故响应与串行 lifecycle 队列都不被一次轮次（乃至卡死的 Member）拖住。被任何 dispose 移除的 handle（包括队列从未看见的那次）直接跳过换装，存量事实于下次 activation 落地；换装失败只记日志、不上抛。
 - Skills 是 Member 私有的。 preset 不带共享 skill-filesystem row；Host 在每个 Member 的 agent exact scope layer 上（traceable-service 接缝，与 tool restriction 同构）注册一个 filesystem provider，只扫两个 Team 自有 root（排除默认 roots）：插件内置的只读 core skills（`packages/agent-team/core-skills/`，排前——同名内置 skill 跨升级保持稳定）和 Member 可写的 `$DSH_HOME/agent-team/members/<memberId>/skills/`。
 
