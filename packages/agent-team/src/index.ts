@@ -53,11 +53,13 @@ import { assistantPlainText, classifyAssistantResponse, classifyStoppedTurnTail,
 import { buildRelevanceJudge, CONTEXT_RELEVANCE_THRESHOLD, DISPATCH_HISTORY_MESSAGE_LIMIT, parseRelevanceScore, RELEVANCE_JUDGE_MAX_TOKENS, RELEVANCE_JUDGE_TIMEOUT_MS } from './context-relevance.ts'
 import { MemberSupervisor, supervisionResetNotice, SUPERVISION_FAILURE_WINDOW_MS, SUPERVISION_HUNG_MS, SUPERVISION_MAX_CONSECUTIVE_FAILURES, SUPERVISION_MAX_RESTART_ATTEMPTS, SUPERVISION_WINDOW_FAILURES, type MemberSupervisionState, type SupervisionTrigger } from './supervisor.ts'
 import { CONTINUATION_NUDGE_MARKER, TaskContinuationWatcher, continuationNudgeText, type ContinuationLeader, type ContinuationTask } from './continuation-watcher.ts'
+import { sanitizeQuotedText, unaddressedSendNoticeText } from './mentions.ts'
 import { CompletionLiaison, INTERRUPT_PUSH_SUMMARY, liaisonFeedbackText, liaisonReportCheckText, liaisonResumePushText, liaisonTaskPushText, type LiaisonInterrupt, type LiaisonLeader } from './completion-liaison.ts'
 import { TruncationEscalator, truncationEscalationText, type TruncationLeader } from './truncation-escalation.ts'
 import { MemberWatchMonitor, memberWatchNoticeText, type MemberWatchNotice, type MemberWatchSample, type MemberWatchTask } from './member-watch.ts'
 import { clearRouteStreak, modelFailoverNoticeText, noteRouteFailure, routeKeyOf, settlePromotion, supervisionExhaustedNoticeText, type RouteFailureState } from './model-failover.ts'
 import { ModelScheduleMonitor, modelScheduleSwitchNoticeText, sameScheduleRoute, type ModelScheduleBoundary } from './model-schedule.ts'
+import { CapabilityAssessor, capabilityAssessmentText, type CapabilityAssessmentTarget } from './capability-assessment.ts'
 import { BackgroundJobRegistry, backgroundJobNoticeText, type BackgroundJob, type BackgroundJobStartInput } from './background-jobs.ts'
 import { StoredSessionReadError, StoredSessionReader, sessionFailureOf } from './stored-session-reader.ts'
 import { doctorAnalysisPrompt, humanTranscriptEntriesOf, renderFailureTranscript, type TranscriptEvent } from './failure-transcript.ts'
@@ -942,6 +944,34 @@ export default class AgentTeam extends TypertRemoteService {
     log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
   })
   /**
+   * Opt-in automatic capability assessment: when the Human switched it on
+   * for the designated Leader, Members whose finished work accumulated
+   * since the last look are named to the Leader through the ordinary
+   * assistant mention, so the Leader re-rates them with `team_rate`. The
+   * rating itself is never written by this lane.
+   */
+  private readonly capabilityAssessor = new CapabilityAssessor({
+    workspaces: () => {
+      const ledger = this.ledger
+      if (ledger === undefined) return []
+      const workspaceIds = new Set<WorkspaceId>()
+      for (const member of ledger.listMembers()) {
+        if (member.state !== 'enabled') continue
+        for (const workspaceId of ledger.workspacesOf(member.memberId)) workspaceIds.add(workspaceId)
+      }
+      return [...workspaceIds].map(workspaceId => ({ workspaceId, leader: this.designatedLeaderOf(workspaceId) }))
+    },
+    assessmentEnabled: leaderMemberId => this.ledger?.getMember(leaderMemberId)?.autoCapabilityAssessment === true,
+    membersToAssess: (workspaceId, leaderMemberId) => (this.ledger?.listMembers() ?? [])
+      .filter(member => member.state === 'enabled' && member.external !== true && member.memberId !== leaderMemberId
+        && this.ledger?.participatesIn(member.memberId, workspaceId) === true)
+      .map(member => ({ memberId: member.memberId, handle: member.handle, currentScore: member.capabilityScore })),
+    completedSince: (memberId, sinceSequence) => this.requireLedger().completedWorkSince(memberId, sinceSequence),
+    position: () => this.requireLedger().position(),
+    notify: async (leader, targets) => { await this.announceCapabilityAssessment(leader, targets) },
+    log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
+  })
+  /**
    * Members' background jobs: long-running commands the Host spawns for a
    * Member and watches. The registry is process-local by design (the durable
    * record of a job's life is the Messages it produces, like the heartbeat
@@ -1367,6 +1397,7 @@ export default class AgentTeam extends TypertRemoteService {
       this.truncationEscalation.dispose()
       this.memberWatch.dispose()
       this.modelScheduleMonitor.dispose()
+      this.capabilityAssessor.dispose()
       this.backgroundJobs.dispose()
       this.contextManagement.dispose()
       this.pressurePolicy.dispose()
@@ -1437,6 +1468,9 @@ export default class AgentTeam extends TypertRemoteService {
     // roster settled would reset a Member that is still activating and read a
     // cold applied route as a missed boundary.
     this.modelScheduleMonitor.start()
+    // The capability assessor reads finished work off the ledger tail; a pass
+    // before the roster settled would read restoring Members as evidence-free.
+    this.capabilityAssessor.start()
     // The gateway rides the same restore gate: it serves only after the roster
     // is settled, and its listener closes with the Host.
     await this.reconcileExternalApi()
@@ -4935,6 +4969,18 @@ export default class AgentTeam extends TypertRemoteService {
     return result.value
   }
 
+  /**
+   * The Leader's `team_rate` write: one durable capability-rating move under
+   * the Leader's own member actor (the ledger refuses self-rating and
+   * non-Leaders). Answers with the stored Member so the tool names the score.
+   */
+  async rateMemberForAgent(agent: Agent, request: { readonly requestId: AgentTeamRequestId; readonly workspaceId: WorkspaceId; readonly memberId: AgentTeamMemberId; readonly score?: number }): Promise<AgentTeamDurableMemberResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const result = await this.requireLedger().changeMemberCapability({ ...request, actor })
+    if (result.committed) this.emitCommitted(result.value.receipt)
+    return result.value
+  }
+
   /** Cancel one of the caller's own watches; the ledger rejects any other leader's. */
   async unwatchMemberForAgent(agent: Agent, request: AgentTeamUnwatchMemberRequest): Promise<AgentTeamUnwatchMemberResult> {
     const actor = this.memberCall(agent, request.workspaceId)
@@ -6011,7 +6057,70 @@ export default class AgentTeam extends TypertRemoteService {
       // opted-in Member the task starts; the switch-off default never does.
       for (const marker of outcome.directMarkers) this.scheduleAutoPruneSweep(marker.memberId)
     }
+    // A Human top-level send that named nobody lands out of band when the
+    // designated Leader sits outside this Channel: the ledger's implicit
+    // delivery only reaches Leaders who can hear the Channel, so the Host
+    // points the Leader at the send through their own Channel instead — the
+    // ordinary assistant voice, fire-and-forget, never blocking the reply.
+    if (actor.kind === 'human' && outcome.kind === 'committed' && outcome.directMarkers.every(marker => marker.memberId === AGENT_TEAM_HUMAN_MEMBER_ID || this.ledger?.getMember(marker.memberId) === undefined)) {
+      const leader = this.designatedLeaderOf(request.workspaceId)
+      if (leader !== undefined) void this.announceUnaddressedSend({ workspaceId: request.workspaceId, leader, body: outcome.message.body, threadRef: outcome.message.threadRef })
+    }
     return outcome
+  }
+
+  /** The enabled designated Leader of one Workspace, or undefined (the monitors' shared lookup). */
+  private designatedLeaderOf(workspaceId: WorkspaceId): { readonly memberId: AgentTeamMemberId; readonly handle: string } | undefined {
+    const ledger = this.ledger
+    if (ledger === undefined) return undefined
+    const leader = ledger.listMembers().find(member =>
+      member.state === 'enabled' && member.leader === true && ledger.workspacesOf(member.memberId).includes(workspaceId))
+    return leader === undefined ? undefined : { memberId: leader.memberId, handle: leader.handle }
+  }
+
+  /**
+   * Assessment delivery: the Team Assistant's voice names the Leader in the
+   * Leader's oldest Channel of the assessed Workspace, with the Leader as
+   * the only explicit recipient — the ordinary Inbox path wakes them into
+   * the re-rating turn.
+   */
+  private async announceCapabilityAssessment(leader: { readonly memberId: AgentTeamMemberId; readonly handle: string }, targets: readonly CapabilityAssessmentTarget[]): Promise<void> {
+    const ledger = this.requireLedger()
+    const workspaceId = ledger.getMember(targets[0]!.memberId)?.workspaceId
+    if (workspaceId === undefined) throw new Error('capability assessment has no Workspace to post into')
+    const channelRef = ledger.channelsForMember(leader.memberId, workspaceId)[0]
+    if (channelRef === undefined) throw new Error(`leader '${leader.handle}' has no Channel in workspace '${workspaceId}'`)
+    await this.sendMessageAs(agentTeamAssistantActor(), {
+      requestId: randomUUID() as AgentTeamRequestId,
+      workspaceId,
+      channelRef,
+      body: capabilityAssessmentText({ leaderHandle: leader.handle, targets }),
+      recipients: [leader.memberId],
+      asTask: false,
+    })
+  }
+
+  /**
+   * Out-of-band pointer for one unaddressed Human send: the Team Assistant's
+   * voice names the Leader in their own Channel with the Human's excerpt and
+   * the Thread ref, so the Leader can open the Thread and route the work. A
+   * throw is logged — the send itself is already durable.
+   */
+  private async announceUnaddressedSend(input: { readonly workspaceId: WorkspaceId; readonly leader: { readonly memberId: AgentTeamMemberId; readonly handle: string }; readonly body: string; readonly threadRef: AgentTeamThreadRef }): Promise<void> {
+    try {
+      const channelRef = this.requireLedger().channelsForMember(input.leader.memberId, input.workspaceId)[0]
+      if (channelRef === undefined) throw new Error(`leader '${input.leader.handle}' has no Channel in workspace '${input.workspaceId}'`)
+      await this.sendMessageAs(agentTeamAssistantActor(), {
+        requestId: randomUUID() as AgentTeamRequestId,
+        workspaceId: input.workspaceId,
+        channelRef,
+        body: unaddressedSendNoticeText({ leaderHandle: input.leader.handle, humanName: this.requireLedger().actorFor(AGENT_TEAM_HUMAN_MEMBER_ID).name, excerpt: sanitizeQuotedText(input.body.slice(0, 200)), threadRef: input.threadRef }),
+        recipients: [input.leader.memberId],
+        asTask: false,
+      })
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: unaddressed-send notice for leader '${input.leader.handle}' failed to post: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** Shared existing-Thread reply commit: same upload resolution and outcome emission. */

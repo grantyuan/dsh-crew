@@ -56,6 +56,38 @@ export function hasAllMarker(body: string): boolean {
 }
 
 /**
+ * Quoted text (a Human's own words) inside a generated notice must not
+ * re-resolve as an authored mention: an excerpt that opens with
+ * `@SomeMember` would otherwise escalate a bystander into a direct recipient
+ * of THIS message. Full-width `＠` reads identically to the model yet stays
+ * invisible to the mention scanner. Authored `@handle` prefixes the notice
+ * itself carries are added after this and never pass through.
+ */
+export function sanitizeQuotedText(value: string): string {
+  return value.replace(/@/g, '＠')
+}
+
+/**
+ * The out-of-band pointer for one unaddressed Human send whose Channel has
+ * no designated Leader: posted in the Team Assistant's voice into the
+ * Leader's own Channel, it quotes the Human's excerpt and names the Thread so
+ * the Leader can open it and route the work.
+ */
+export function unaddressedSendNoticeText(input: {
+  readonly leaderHandle: string
+  readonly humanName: string
+  readonly excerpt: string
+  readonly threadRef: string
+}): string {
+  const lines = [
+    `@${input.leaderHandle} Unaddressed send notice: ${input.humanName} posted a message without naming any Member:`,
+    `"${input.excerpt}"`,
+    `Review and route it in the Thread: ${input.threadRef}`,
+  ]
+  return lines.join('\n')
+}
+
+/**
  * Every `@Handle` occurrence in one body that names one of `handles`:
  * case-insensitive, on Unicode word boundaries, longest handle first, outside
  * code. Writing `@` is required: bare handles are ordinary words. This is the

@@ -195,6 +195,20 @@ export interface AgentTeamMemberModelScheduledOperation extends AgentTeamOperati
   readonly data: { readonly member: AgentTeamAgentMember }
 }
 
+/**
+ * Durable capability-rating change for one Member: the Human edit commits it
+ * under the Human actor, the designated Leader commits it through the
+ * `team_rate` tool under the Leader's own member actor, and the opt-in
+ * automatic assessment commits it under the delegated Human actor (the
+ * auto-prune precedent). `member` carries the snapshot with the new
+ * `capabilityScore`; an absent one in that snapshot means the rating was
+ * cleared back to unrated. The snapshot moves exactly this one field.
+ */
+export interface AgentTeamMemberCapabilityChangedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/member-capability-changed'
+  readonly data: { readonly member: AgentTeamAgentMember }
+}
+
 /** Durable addition of one Agent Member to one Channel. */
 export interface AgentTeamChannelMemberAddedOperation extends AgentTeamOperationBase {
   readonly kind: 'team/channel-member-added'
@@ -588,6 +602,7 @@ export type AgentTeamOperation =
   | AgentTeamChannelUpdatedOperation
   | AgentTeamMemberUpdatedOperation
   | AgentTeamMemberModelScheduledOperation
+  | AgentTeamMemberCapabilityChangedOperation
   | AgentTeamChannelMemberAddedOperation
   | AgentTeamChannelMemberRemovedOperation
   | AgentTeamMemberWorkspaceJoinedOperation

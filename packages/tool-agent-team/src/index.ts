@@ -643,6 +643,7 @@ const teamView = defineTool({
       members: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
         memberId: { type: 'string', required: true }, kind: { type: 'string', required: true }, handle: { type: 'string', required: true }, description: { type: 'string', required: true }, presence: { type: 'string', required: true },
         contextStart: { type: 'string' },
+        capabilityScore: { type: 'number' },
       } } },
       threads: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
         threadRef: { type: 'string', required: true }, channelRef: { type: 'string', required: true }, revision: { type: 'number', required: true }, messageCount: { type: 'number', required: true }, subject: { type: 'string', required: true },
@@ -683,7 +684,7 @@ const teamView = defineTool({
       if (!continuation) {
         lines.push('', 'Members — current')
         if (value.members.length === 0) lines.push('No visible Members.')
-        else lines.push(...value.members.map(m => `${m.memberId} · @${m.handle} (${m.kind}, ${m.presence}${m.contextStart === undefined ? '' : `, ${m.contextStart}`})${m.description === '' ? '' : ` — ${m.description}`}`))
+        else lines.push(...value.members.map(m => `${m.memberId} · @${m.handle} (${m.kind}, ${m.presence}${m.contextStart === undefined ? '' : `, ${m.contextStart}`}${m.capabilityScore === undefined ? '' : `, capability ${m.capabilityScore}/10`})${m.description === '' ? '' : ` — ${m.description}`}`))
         lines.push('', 'Active task threads — work in flight right now')
         if (value.activeTaskThreads.length === 0) lines.push('No task thread is in flight in this Workspace.')
         else lines.push(...value.activeTaskThreads.map(t => `${t.threadRef} · ${t.channelRef} · ${t.status}${t.taskNumber === undefined ? '' : ` · #${t.taskNumber}`}${t.members.length === 0 ? '' : ` · ${t.members.map(m => `@${m.name}`).join(', ')}`} — ${t.subject} · last activity ${formatTeamTimestamp(t.lastActivityAt)}`))
@@ -709,7 +710,8 @@ const teamView = defineTool({
         { memberId: AGENT_TEAM_ASSISTANT_MEMBER_ID, kind: 'assistant', handle: AGENT_TEAM_ASSISTANT_HANDLE, description: 'Team Host supervision program — sends system notices; it reads nothing and cannot be messaged', presence: 'available' },
         ...host.members().filter(status => visibleMemberIds.has(status.member.memberId)).map(status => ({ memberId: status.member.memberId,
           kind: 'agent', handle: status.member.handle, description: status.member.description, presence: status.presence,
-          contextStart: status.member.contextStartPolicy === 'fresh' ? 'fresh context per task' : 'continues its context' })),
+          contextStart: status.member.contextStartPolicy === 'fresh' ? 'fresh context per task' : 'continues its context',
+          ...(status.member.capabilityScore === undefined ? {} : { capabilityScore: status.member.capabilityScore }) })),
       ],
       threads: view.items.map(item => {
         const thread = item.thread
@@ -956,6 +958,53 @@ const teamWatch = defineTool({
   },
 })
 
+const teamRate = defineTool({
+  name: 'team_rate',
+  description: 'Rate a fellow Member\'s capability from 1 (weakest) to 10 (strongest). Only the Team leader of the Workspace may rate, and never itself: the ledger refuses any other caller. action=set stores one whole-number score for an enabled Agent Member of your Workspace together with the reason it earned; action=clear returns the Member to unrated. The rating is one durable Member fact the Human and the automatic assessment (when the Human switched it on) also write, and team_view carries it on every Member row — consult it when you assign or reassign work, pair a weak score with more concrete instructions, and prefer your strongest-rated Members for the hardest Tasks.',
+  parameters: {
+    action: { type: 'string', required: true, enum: ['set', 'clear'] },
+    memberRef: { type: 'string', required: true, description: "Full branded Member ref exactly as returned by Team tools, including the 'member:' prefix. An unambiguous abbreviation of the first 6+ UUID hex characters also resolves. The enabled Agent Member of your Workspace to rate; you cannot rate yourself." },
+    score: { type: 'number', description: 'Whole number 1..10 for action=set: 10 is your strongest Member, 1 the weakest. Required for set, refused for clear.' },
+    reason: { type: 'string', description: 'One line of why the Member earned this score; folded into the tool answer so the Human reads the judgement too.' },
+    workspace: workspaceParam,
+  },
+  output: {
+    schema: { type: 'object', additionalProperties: false, properties: {
+      action: { type: 'string', required: true },
+      memberId: { type: 'string', required: true },
+      handle: { type: 'string', required: true },
+      capabilityScore: { type: 'number' },
+      reason: { type: 'string' },
+    } },
+    render: (_args, value) => {
+      const score = value.capabilityScore === undefined ? 'unrated' : `${value.capabilityScore}/10`
+      return [{ type: 'text', text: [
+        `Committed — @${value.handle} (${value.memberId}) is now rated ${score}.`,
+        ...(value.reason === undefined ? [] : [`Reason on record: ${value.reason}`]),
+        'The rating rides the Member for assignment decisions; team_view shows it on the Member row.',
+      ].join('\n') }]
+    },
+  },
+  async execute(args, exec) {
+    const agent = exec.agent
+    if (agent === undefined) throw new Error('team_rate requires an Agent session')
+    const host = service(agent)
+    const workspaceId = workspaceOf(args, agent)
+    if (args.memberRef === undefined) throw new Error('team_rate requires memberRef')
+    if (args.action === 'set' && args.score === undefined) throw new Error('team_rate action=set requires score (1..10)')
+    if (args.action === 'set' && (typeof args.score !== 'number' || !Number.isInteger(args.score) || args.score < 1 || args.score > 10)) {
+      throw new Error('team_rate score must be a whole number from 1 to 10')
+    }
+    const member = await host.rateMemberForAgent(agent, {
+      requestId: requestId(agent.id, exec.callId), workspaceId, memberId: args.memberRef as AgentTeamMemberId,
+      ...(args.action === 'set' ? { score: args.score } : {}),
+    })
+    return { action: args.action, memberId: member.member.memberId, handle: member.member.handle,
+      ...(member.member.capabilityScore === undefined ? {} : { capabilityScore: member.member.capabilityScore }),
+      ...(args.reason === undefined ? {} : { reason: args.reason }) }
+  },
+})
+
 /** The shared bounded job row, used by the single and list outputs alike. */
 const jobRowProperties = {
   jobId: { type: 'string', required: true },
@@ -1069,6 +1118,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(teamMessage)
   ctx.tools.register(teamClaim)
   ctx.tools.register(teamView)
+  ctx.tools.register(teamRate)
   ctx.tools.register(teamSupervise)
   ctx.tools.register(teamWatch)
   ctx.tools.register(teamJob)

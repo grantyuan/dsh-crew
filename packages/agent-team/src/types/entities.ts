@@ -292,6 +292,23 @@ export interface AgentTeamAgentMember {
    */
   readonly contextWindow?: number | undefined
   /**
+   * The Human's or the designated Leader's capability rating for this
+   * Member, 1 (weakest) to 10 (strongest), used for task assignment and
+   * assistance decisions. Absent means unrated. Written by the Human edit
+   * (`updateMember`), by the Leader through the `team_rate` tool, and by the
+   * opt-in automatic assessment — all landing on this one durable field.
+   * Members written before the rating existed omit the field.
+   */
+  readonly capabilityScore?: number | undefined
+  /**
+   * Opt-in switch for the automatic capability assessment: when set on the
+   * designated Leader, the Host periodically asks the Leader to re-evaluate
+   * Members whose finished work has accumulated since the last assessment.
+   * Meaningless on a non-Leader and ignored there. Members written before
+   * the switch existed omit the field.
+   */
+  readonly autoCapabilityAssessment?: boolean | undefined
+  /**
    * Durable lifecycle state. `enabled`/`suspended` are the reversible working
    * pair; `archived` hides the Member from every surface while keeping its
    * Session log and private memory recoverable (no restore entry point yet,

@@ -197,8 +197,8 @@ describe('Agent Team shipping contract', () => {
     expect([...dshPeerRanges(bundleManifest)]).toEqual(['>=0.2.1-rc.3 <0.2.2'])
     expect(preset).toContain('compaction: true')
     expect(preset).toContain('toolResultPruner: true')
-    expect(preset).toContain('team_inbox, team_thread, team_message, team_claim, team_view, team_supervise, team_watch, and team_job')
-    expect(preset).toContain('If you are the Team Leader, team_watch places a standing watch')
+    expect(preset).toContain('team_inbox, team_thread, team_message, team_claim, team_view, team_rate, team_supervise, team_watch, and team_job')
+    expect(preset).toContain('If you are the Team Leader: team_watch watches another Member')
     // The one token story has exactly two legal surfaces: a fully drained
     // read hands off the next-write token, and a committed public mutation's
     // returned token may serve as the basis for the next deliberate mutation.
@@ -242,7 +242,7 @@ describe('Agent Team shipping contract', () => {
     expect(preset).toContain('the bundled `member-memory-manager` skill')
     const toolSource = await readFile(resolve(root, 'packages/tool-agent-team/src/index.ts'), 'utf8')
     expect([...toolSource.matchAll(/name: '(team_[a-z]+)'/g)].map(match => match[1])).toEqual([
-      'team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_view', 'team_supervise', 'team_watch', 'team_job',
+      'team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_view', 'team_supervise', 'team_watch', 'team_rate', 'team_job',
     ])
     // Validation errors teach the same two token surfaces as the descriptions,
     // never a single-source story.

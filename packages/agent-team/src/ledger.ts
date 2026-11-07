@@ -66,6 +66,7 @@ import type {
   AgentTeamMemberInterruptResolvedOperation,
   AgentTeamMemberModelSchedule,
   AgentTeamMemberModelScheduledOperation,
+  AgentTeamMemberCapabilityChangedOperation,
   AgentTeamModelScheduleWindow,
   AgentTeamMemberPromptProfile,
   AgentTeamMemberRemovedOperation,
@@ -274,6 +275,21 @@ export interface AgentTeamAuthorizedScheduleMemberModelRequest {
   /** The route to apply; absent clears `scheduledModel` back to inheritance. */
   readonly selection?: AgentTeamModelSelection
   readonly actor: AgentTeamHumanActor
+}
+
+/**
+ * Host-authorized intent to move one Member's capability rating: the
+ * designated Leader (through `team_rate`, rating another Member) or the
+ * Human actor riding a delegated Host automation (the opt-in automatic
+ * assessment). Absent `score` clears the rating back to unrated.
+ */
+export interface AgentTeamAuthorizedChangeMemberCapabilityRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly memberId: AgentTeamMemberId
+  /** The rating to store, 1..10; absent clears `capabilityScore`. */
+  readonly score?: number
+  readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
 }
 
 /**
@@ -995,6 +1011,7 @@ export class AgentTeamLedger {
       this.assertHandleAvailable(request.workspaceId, handle)
       this.assertModelSelection(request.member.model)
       this.assertModelSchedule(request.member.modelSchedule)
+      if (request.member.capabilityScore !== undefined) this.assertCapabilityScore(request.member.capabilityScore)
       this.assertCapabilities(request.member.capabilities)
       this.assertContextControl(request.member.contextStartPolicy, request.member.contextWindow)
       this.assertPromptProfile(request.member.prompt)
@@ -1045,13 +1062,21 @@ export class AgentTeamLedger {
       this.assertCapabilities(request.capabilities)
       this.assertContextControl(request.contextStartPolicy, request.contextWindow)
       this.assertPromptProfile(request.prompt)
+      if (request.capabilityScore !== undefined && request.capabilityScore !== null) this.assertCapabilityScore(request.capabilityScore)
       // An absent model or capabilities field must CLEAR any override
       // (inherit the Host default / full standard capability surface);
       // spreading `prior` verbatim would silently keep the pinned value.
       // `scheduledModel` deliberately stays on the identity spread: a Human
       // edit never moves the schedule-applied route — the monitor owns that
       // field, and its next pass reconciles it against the edited intent.
-      const { model: _priorModel, modelFallbacks: _priorFallbacks, modelSchedule: _priorSchedule, capabilities: _priorCapabilities, prompt: _priorPrompt, contextStartPolicy: _priorPolicy, contextWindow: _priorWindow, ...priorWithoutOverlays } = prior
+      // The capability rating and the assessment switch keep the stored
+      // value when omitted (like `leader`): the Leader's `team_rate` and the
+      // automatic assessment write the same fields, and an edit that does
+      // not mention them must not wipe them.
+      const { model: _priorModel, modelFallbacks: _priorFallbacks, modelSchedule: _priorSchedule, capabilityScore: _priorScore, autoCapabilityAssessment: _priorAssessment, capabilities: _priorCapabilities, prompt: _priorPrompt, contextStartPolicy: _priorPolicy, contextWindow: _priorWindow, ...priorWithoutOverlays } = prior
+      const nextScore = request.capabilityScore === undefined ? prior.capabilityScore
+        : request.capabilityScore === null ? undefined
+        : request.capabilityScore
       const member = Object.freeze({
         ...priorWithoutOverlays, handle, description,
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
@@ -1061,6 +1086,8 @@ export class AgentTeamLedger {
         ...freezePromptProfile(normalizePromptProfile(request.prompt)),
         ...(request.contextStartPolicy === undefined ? {} : { contextStartPolicy: request.contextStartPolicy }),
         ...(request.contextWindow === undefined ? {} : { contextWindow: request.contextWindow }),
+        ...(nextScore === undefined ? {} : { capabilityScore: nextScore }),
+        ...(request.autoCapabilityAssessment === undefined ? {} : { autoCapabilityAssessment: request.autoCapabilityAssessment }),
         ...(request.leader === undefined ? {} : { leader: request.leader }),
       })
       const operation: AgentTeamMemberUpdatedOperation = Object.freeze({
@@ -1101,6 +1128,46 @@ export class AgentTeamLedger {
       })
       const operation: AgentTeamMemberModelScheduledOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/member-model-scheduled',
+        data: Object.freeze({ member }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.memberResult(operation))
+    })
+  }
+
+  /**
+   * Move one Member's capability rating. The Human edit commits through
+   * `updateMember`; this is the Leader-tool and automatic-assessment path —
+   * the actor is either the Workspace's designated Leader (rating another
+   * Member through `team_rate`, never itself) or the Human actor riding a
+   * delegated Host automation. The write moves exactly the rating field.
+   */
+  changeMemberCapability(request: AgentTeamAuthorizedChangeMemberCapabilityRequest): Promise<AgentTeamLedgerResult<AgentTeamDurableMemberResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameMemberCapabilityChanged(existing, request)
+        return this.resolved(this.memberResult(existing))
+      }
+      const target = this.requireMember(request.memberId)
+      if (request.actor.kind === 'human') {
+        this.assertHumanActor(request.actor)
+      } else {
+        const leader = this.assertWatchLeader(request.actor, request.workspaceId)
+        if (leader.memberId === target.memberId) throw new Error('the Team Leader cannot rate itself')
+        if (target.workspaceId !== request.workspaceId) throw new Error(`Agent Member '${target.handle}' is not in Workspace '${request.workspaceId}'`)
+      }
+      if (target.state !== 'enabled') throw new Error(`Agent Member '${target.handle}' is ${target.state}; only enabled Members carry a capability rating`)
+      if (target.external === true) throw new Error(`Agent Member '${target.handle}' is virtual; capability ratings apply to Agents this Host runs`)
+      if (request.score !== undefined) this.assertCapabilityScore(request.score)
+      const { capabilityScore: _priorScore, ...priorWithoutScore } = target
+      const member = Object.freeze({
+        ...priorWithoutScore,
+        ...(request.score === undefined ? {} : { capabilityScore: request.score }),
+      })
+      const operation: AgentTeamMemberCapabilityChangedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/member-capability-changed',
         data: Object.freeze({ member }),
       })
       await this.table.put(operation.operationId, operation)
@@ -1484,6 +1551,7 @@ export class AgentTeamLedger {
       case 'team/member-session-rolled-over':
       case 'team/member-updated':
       case 'team/member-model-scheduled':
+      case 'team/member-capability-changed':
       case 'team/member-archived':
       case 'team/member-removed':
         return [operation.data.member.workspaceId]
@@ -1731,7 +1799,8 @@ export class AgentTeamLedger {
       // operation carries the merged set, so a retry has to re-derive the same
       // list for the collision check to prove it is the same request.
       const redirects = this.redirectedMentions(actor.memberId, channel, body, request.requestId)
-      const recipients = this.mergeMentionRecipients(this.mergeBodyMentions(actor.memberId, channel.channelRef, body, this.normalizeRecipients(request.actor, request.recipients)), redirects)
+      const recipients = this.withImplicitLeaderDelivery(actor,
+        this.mergeMentionRecipients(this.mergeBodyMentions(actor.memberId, channel.channelRef, body, this.normalizeRecipients(request.actor, request.recipients)), redirects), channel)
       const parentTaskRef = this.resolveParentTaskRef(request, channel.channelRef)
       const existing = this.state.byRequest.get(request.requestId)
       if (existing !== undefined) {
@@ -2500,6 +2569,36 @@ export class AgentTeamLedger {
       }
     }
     return false
+  }
+
+  /**
+   * The finished work one Member accumulated after `sinceSequence`: the
+   * count of its own Claims marked done (the Member's own completion marker)
+   * plus the Tasks accepted while its Claims were still active (the Human
+   * finished the work for it). Bounded to the Members' own refs, so a busy
+   * Team's tail scan stays cheap; this is the evidence the automatic
+   * capability assessment reads. Newest refs first, capped.
+   */
+  completedWorkSince(memberId: AgentTeamMemberId, sinceSequence: number, limit = 8): { readonly finished: number; readonly taskRefs: readonly AgentTeamTaskRef[] } {
+    const taskRefs: AgentTeamTaskRef[] = []
+    let finished = 0
+    for (let index = this.state.ordered.length - 1; index >= 0 && taskRefs.length < limit; index -= 1) {
+      const operation = this.state.ordered[index]!
+      if (operation.sequence <= sinceSequence) break
+      if (operation.kind === 'team/claim-done' && operation.data.claim.owner === memberId) {
+        finished += 1
+        if (!taskRefs.includes(operation.data.claim.taskRef)) taskRefs.push(operation.data.claim.taskRef)
+        continue
+      }
+      if (operation.kind === 'team/task-changed' && operation.data.activity.kind === 'accept') {
+        const acceptedMemberClaims = operation.data.claims.filter(claim => claim.owner === memberId)
+        if (acceptedMemberClaims.length > 0) {
+          finished += acceptedMemberClaims.length
+          if (!taskRefs.includes(operation.data.task.taskRef)) taskRefs.push(operation.data.task.taskRef)
+        }
+      }
+    }
+    return { finished, taskRefs }
   }
 
   /**
@@ -3477,6 +3576,7 @@ export class AgentTeamLedger {
       case 'team/member-session-rolled-over':
       case 'team/member-updated':
       case 'team/member-model-scheduled':
+      case 'team/member-capability-changed':
       case 'team/member-removed':
         return this.memberWorkspaceScopes(operation.data.member.memberId)
       case 'team/member-interrupt-recorded':
@@ -3629,6 +3729,7 @@ export class AgentTeamLedger {
       case 'team/member-session-rolled-over':
       case 'team/member-updated':
       case 'team/member-model-scheduled':
+      case 'team/member-capability-changed':
       case 'team/channel-member-added':
       case 'team/thread-read':
       case 'team/dm-sent':
@@ -3851,6 +3952,26 @@ export class AgentTeamLedger {
       const { scheduledModel: _priorScheduled, ...priorRest } = prior
       const { scheduledModel: _nextScheduled, ...nextRest } = operation.data.member
       if (!isDeepStrictEqual(priorRest, nextRest)) throw new Error('invalid Member schedule update')
+      return
+    }
+    if (operation.kind === 'team/member-capability-changed') {
+      // The Human edit and the delegated automatic assessment ride the Human
+      // actor; the Leader's own `team_rate` write rides the Leader's member
+      // actor — resolved against the same replay projection the write ran on.
+      if (operation.actor.kind === 'human') assertHuman()
+      else {
+        assertMember()
+        const leader = projection.members.get(operation.actor.memberId)
+        if (leader === undefined || leader.leader !== true || leader.state !== 'enabled') throw new Error('invalid Member capability update')
+      }
+      const prior = projection.members.get(operation.data.member.memberId)
+      if (prior === undefined || prior.state !== 'enabled' || operation.data.member.state !== prior.state) throw new Error('invalid Member capability update')
+      // The rating operation moves exactly one field; a leader cannot rate
+      // itself, and a ledger can never smuggle another edit inside the write.
+      const { capabilityScore: _priorScore, ...priorRest } = prior
+      const { capabilityScore: _nextScore, ...nextRest } = operation.data.member
+      if (!isDeepStrictEqual(priorRest, nextRest)) throw new Error('invalid Member capability update')
+      if (operation.actor.kind === 'member' && operation.actor.memberId === prior.memberId) throw new Error('invalid Member capability update')
       return
     }
     if (operation.kind === 'team/channel-member-added') {
@@ -4547,6 +4668,10 @@ export class AgentTeamLedger {
       return
     }
     if (operation.kind === 'team/member-model-scheduled') {
+      target.members.set(operation.data.member.memberId, operation.data.member)
+      return
+    }
+    if (operation.kind === 'team/member-capability-changed') {
       target.members.set(operation.data.member.memberId, operation.data.member)
       return
     }
@@ -5916,6 +6041,35 @@ export class AgentTeamLedger {
   }
 
   /**
+   * An unaddressed Human send is still Team business. When the Human's
+   * top-level Message names no Agent — no authored mention, no `@all`, no
+   * explicit recipient, no departed-Member redirect — it is delivered to the
+   * designated enabled Leader of the Channel (first by enrollment) exactly as
+   * if the Human had @-mentioned them: the body is never rewritten, the
+   * delivery rides the ordinary direct-marker path, and the Leader wakes into
+   * a normal turn to route the work. A send that already names anyone stays
+   * exactly as authored, and a Channel with no such Leader delivers to
+   * nobody — the Host may still point the Leader at it out of band.
+   */
+  private withImplicitLeaderDelivery(
+    actor: AgentTeamHumanActor | AgentTeamAssistantActor | AgentTeamMemberActor,
+    recipients: readonly AgentTeamMemberId[],
+    channel: AgentTeamChannel,
+  ): readonly AgentTeamMemberId[] {
+    if (actor.kind !== 'human') return recipients
+    if (recipients.some(memberId => this.state.members.has(memberId))) return recipients
+    const memberships = this.state.memberships.get(channel.channelRef)
+    if (memberships === undefined) return recipients
+    for (const memberId of memberships) {
+      if (memberId === actor.memberId || memberId === AGENT_TEAM_HUMAN_MEMBER_ID) continue
+      const member = this.state.members.get(memberId)
+      if (member === undefined || member.state !== 'enabled' || member.leader !== true) continue
+      return Object.freeze([...recipients, memberId].sort())
+    }
+    return recipients
+  }
+
+  /**
    * Whether one Member has ever held Attention on one Thread. Committed Inbox
    * deltas append a follow/unfollow observation, and the live index covers the
    * Thread-creating Message whose initial Attention is never observed — so the
@@ -6170,6 +6324,8 @@ export class AgentTeamLedger {
       // window list is a distinct stored shape from an absent schedule.
       || !isDeepStrictEqual(operation.data.member.modelFallbacks ?? undefined, (request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? undefined : request.modelFallbacks))
       || !isDeepStrictEqual(operation.data.member.modelSchedule ?? undefined, request.modelSchedule ?? undefined)
+      || !isDeepStrictEqual(operation.data.member.capabilityScore ?? undefined, request.capabilityScore === undefined ? (operation.data.member.capabilityScore ?? undefined) : (request.capabilityScore === null ? undefined : request.capabilityScore))
+      || (operation.data.member.autoCapabilityAssessment ?? undefined) !== (request.autoCapabilityAssessment ?? undefined)
       || !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.capabilities ?? undefined)
       || !isDeepStrictEqual(operation.data.member.prompt ?? undefined, normalizePromptProfile(request.prompt))
       || (operation.data.member.contextStartPolicy ?? undefined) !== (request.contextStartPolicy ?? undefined)
@@ -6181,6 +6337,17 @@ export class AgentTeamLedger {
     if (operation.kind !== 'team/member-model-scheduled' || !this.sameActor(operation.actor, request.actor)
       || operation.data.member.memberId !== request.memberId
       || !isDeepStrictEqual(operation.data.member.scheduledModel ?? undefined, request.selection ?? undefined)) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameMemberCapabilityChanged(operation: AgentTeamOperation, request: AgentTeamAuthorizedChangeMemberCapabilityRequest): asserts operation is AgentTeamMemberCapabilityChangedOperation {
+    if (operation.kind !== 'team/member-capability-changed' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.member.memberId !== request.memberId
+      || !isDeepStrictEqual(operation.data.member.capabilityScore ?? undefined, request.score ?? undefined)) this.throwRequestCollision(request.requestId)
+  }
+
+  /** The capability rating is a whole 1..10 number; unrated is the absence. */
+  private assertCapabilityScore(score: number): void {
+    if (!Number.isInteger(score) || score < 1 || score > 10) throw new Error('a Member capability score must be a whole number from 1 to 10')
   }
 
   private assertSameChannelJoin(operation: AgentTeamOperation, request: AgentTeamAuthorizedJoinChannelRequest): asserts operation is AgentTeamChannelMemberAddedOperation {
@@ -6443,7 +6610,7 @@ export class AgentTeamLedger {
     return Object.freeze({ receipt: this.receipt(operation), channel: operation.data.channel })
   }
 
-  private memberResult(operation: AgentTeamMemberAddedOperation | AgentTeamMemberSuspendedOperation | AgentTeamMemberResumedOperation | AgentTeamMemberSessionRestartedOperation | AgentTeamMemberSessionRenewedOperation | AgentTeamMemberSessionRolledOverOperation | AgentTeamMemberUpdatedOperation | AgentTeamMemberModelScheduledOperation): AgentTeamDurableMemberResult {
+  private memberResult(operation: AgentTeamMemberAddedOperation | AgentTeamMemberSuspendedOperation | AgentTeamMemberResumedOperation | AgentTeamMemberSessionRestartedOperation | AgentTeamMemberSessionRenewedOperation | AgentTeamMemberSessionRolledOverOperation | AgentTeamMemberUpdatedOperation | AgentTeamMemberModelScheduledOperation | AgentTeamMemberCapabilityChangedOperation): AgentTeamDurableMemberResult {
     return Object.freeze({ receipt: this.receipt(operation), member: operation.data.member })
   }
 

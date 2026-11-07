@@ -109,3 +109,17 @@ describe('ModelScheduleField surface', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 })
+
+describe('parseCapabilityScore', () => {
+  it('maps the empty text to a clear, keeps the stored rating on the same number, and rejects out-of-range input', async () => {
+    const { parseCapabilityScore } = await import('../src/client/TeamMemberEditor.tsx')
+    expect(parseCapabilityScore('', 8)).toBe(null)
+    expect(parseCapabilityScore('', undefined)).toBe(null)
+    expect(parseCapabilityScore('8', 8)).toBe(undefined)
+    expect(parseCapabilityScore(' 9 ', undefined)).toBe(9)
+    expect(parseCapabilityScore('0', undefined)).toBe(Number.NaN)
+    expect(parseCapabilityScore('11', undefined)).toBe(Number.NaN)
+    expect(parseCapabilityScore('3.5', undefined)).toBe(Number.NaN)
+    expect(parseCapabilityScore('abc', undefined)).toBe(Number.NaN)
+  })
+})

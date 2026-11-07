@@ -397,6 +397,23 @@ export function ModelScheduleField({ draft, onChange, applied, loadModels, disab
 }
 
 /**
+ * Parses the capability-score text shared by the edit dialog: empty means
+ * "clear the rating back to unrated" (the `null` payload), a whole number
+ * from 1 to 10 is a valid rating, and anything else parses to NaN — the
+ * caller's invalid sentinel that blocks submission. The dialog omits the
+ * field entirely when the text equals the stored rating, because omitted
+ * keeps it (the Leader's `team_rate` writes the same field).
+ */
+export function parseCapabilityScore(text: string, stored: number | undefined): number | null | undefined {
+  const trimmed = text.trim()
+  if (trimmed === '') return null
+  if (!/^\d+$/.test(trimmed)) return Number.NaN
+  const parsed = Number(trimmed)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) return Number.NaN
+  return parsed === stored ? undefined : parsed
+}
+
+/**
  * Parses the context-window override text shared by the create and edit
  * forms: empty means "follow the route window" (an absent field), a whole
  * number at the 8192 floor is a valid override, and anything else parses to
@@ -1028,6 +1045,8 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
   const [policy, setPolicy] = useState<'continue' | 'fresh'>(status.member.contextStartPolicy ?? 'continue')
   const [windowText, setWindowText] = useState(status.member.contextWindow === undefined ? '' : String(status.member.contextWindow))
   const [schedule, setSchedule] = useState<ModelScheduleDraft>(() => scheduleStoredDraft(status.member.modelSchedule))
+  const [capabilityText, setCapabilityText] = useState(status.member.capabilityScore === undefined ? '' : String(status.member.capabilityScore))
+  const [autoAssessment, setAutoAssessment] = useState(status.member.autoCapabilityAssessment === true)
   const { saving, error, pendingRequest, save } = useEditDialogSave({
     save: updateMember,
     onCommitted,
@@ -1042,16 +1061,29 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
   // A stored schedule must always be echoed (absent-clears); an absent one
   // is only sent once the draft actually differs from nothing.
   const scheduleSend = status.member.modelSchedule !== undefined || scheduleChanged
+  const storedCapability = status.member.capabilityScore
+  const capabilityParsed = parseCapabilityScore(capabilityText, storedCapability)
+  const capabilityInvalid = Number.isNaN(capabilityParsed)
+  // undefined means the text equals the stored rating: omitted keeps it, so
+  // an edit that never touched the rating cannot disturb the Leader's writes.
+  const capabilitySend = capabilityParsed === undefined
+    ? {}
+    : capabilityParsed === null
+      ? (storedCapability === undefined ? {} : { capabilityScore: null })
+      : { capabilityScore: capabilityParsed }
+  const capabilityChanged = 'capabilityScore' in capabilitySend
+  const autoAssessmentChanged = autoAssessment !== (status.member.autoCapabilityAssessment === true)
   const dirty = handle.trim() !== status.member.handle || description.trim() !== status.member.description
     || !sameModel(model, status.member.model) || leader !== storedLeader
     || policy !== (status.member.contextStartPolicy ?? 'continue') || parsedWindow !== status.member.contextWindow
     || JSON.stringify(fallbacks) !== JSON.stringify(status.member.modelFallbacks ?? [])
     || scheduleChanged
+    || capabilityChanged || autoAssessmentChanged
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const normalizedHandle = handle.trim()
     const normalizedDescription = description.trim()
-    if (saving || !dirty || normalizedHandle.length === 0 || windowInvalid || scheduleInvalid) return
+    if (saving || !dirty || normalizedHandle.length === 0 || windowInvalid || scheduleInvalid || capabilityInvalid) return
     const payload = {
       memberId,
       handle: normalizedHandle,
@@ -1061,6 +1093,8 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       // (absent-clears, like `model`), a non-empty one rides in order.
       ...(fallbacks.length === 0 ? {} : { modelFallbacks: fallbacks }),
       ...(scheduleSend ? { modelSchedule: schedulePayload } : {}),
+      ...capabilitySend,
+      ...(autoAssessmentChanged ? { autoCapabilityAssessment: autoAssessment } : {}),
       // The editor owns no capabilities UI, but an absent field would clear a
       // Remote-written override; echo the stored intent through the edit.
       ...(status.member.capabilities === undefined ? {} : { capabilities: status.member.capabilities }),
@@ -1089,6 +1123,8 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       && pendingRequest.current.contextWindow === parsedWindow
       && (pendingRequest.current.leader ?? false) === leader
       && JSON.stringify(pendingRequest.current.modelSchedule ?? null) === JSON.stringify(scheduleSend ? schedulePayload : null)
+      && (pendingRequest.current.capabilityScore ?? undefined) === (capabilitySend as { capabilityScore?: number | null }).capabilityScore
+      && (pendingRequest.current.autoCapabilityAssessment ?? undefined) === (autoAssessmentChanged ? autoAssessment : undefined)
     const request: AgentTeamUpdateMemberRequest = samePending ? pendingRequest.current! : {
       requestId: mintRequestId(),
       ...payload,
@@ -1104,7 +1140,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       description={`@${status.member.handle}`}
       closeLabel={t('close')}
       contentClassName={createCss.dialogContent!}
-      footer={<><Button variant="outline" disabled={saving} onClick={onClose}>{t('cancel')}</Button><Button type="submit" form="team-agent-edit-form" variant="primary" disabled={saving || !dirty || handle.trim().length === 0 || windowInvalid || scheduleInvalid}>{saving ? t('editSaving') : t('editSave')}</Button></>}
+      footer={<><Button variant="outline" disabled={saving} onClick={onClose}>{t('cancel')}</Button><Button type="submit" form="team-agent-edit-form" variant="primary" disabled={saving || !dirty || handle.trim().length === 0 || windowInvalid || scheduleInvalid || capabilityInvalid}>{saving ? t('editSaving') : t('editSave')}</Button></>}
     >
       <form id="team-agent-edit-form" className={createCss.form} onSubmit={event => { void submit(event) }}>
         <label className={createCss.field}>
@@ -1140,6 +1176,20 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
           <small className={css.editHint}>{t('memberPromptHint')}</small>
         </div>
         <Checkbox checked={leader} onChange={next => { pendingRequest.current = undefined; setLeader(next) }} disabled={saving} label={t('memberLeader')} title={t('memberLeaderHint')} />
+        <label className={createCss.field}>
+          <span>{t('memberCapability')}</span>
+          <Input
+            className={createCss.input!}
+            value={capabilityText}
+            placeholder={t('memberCapabilityPlaceholder')}
+            inputMode="numeric"
+            onChange={event => { pendingRequest.current = undefined; setCapabilityText(event.target.value) }}
+            disabled={saving}
+          />
+          <small className={css.editHint}>{t('memberCapabilityHint')}</small>
+        </label>
+        {leader && <Checkbox checked={autoAssessment} onChange={next => { pendingRequest.current = undefined; setAutoAssessment(next) }} disabled={saving} label={t('memberCapabilityAuto')} title={t('memberCapabilityAutoHint')} />}
+        {capabilityInvalid && <p className={createCss.error} role="alert">{t('memberCapabilityInvalid')}</p>}
         {error !== undefined && <p className={createCss.error} role="alert">{error}</p>}
       </form>
       {promptOpen && (

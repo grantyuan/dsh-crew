@@ -152,6 +152,10 @@ const memberSchema = z.object({
   // Ledgers written before the task-start policy existed omit the field.
   contextStartPolicy: z.union([z.literal('continue'), z.literal('fresh')]).optional(),
   contextWindow: z.number().int().min(MEMBER_CONTEXT_WINDOW_FLOOR).optional(),
+  // Ledgers written before the capability rating existed omit the field.
+  capabilityScore: z.number().int().min(1).max(10).optional(),
+  // Ledgers written before the assessment switch existed omit the field.
+  autoCapabilityAssessment: z.boolean().optional(),
   privateMemoryPath: z.string().min(1),
   state: z.union([z.literal('enabled'), z.literal('suspended'), z.literal('inactive'), z.literal('archived')]),
 }).strict()
@@ -476,6 +480,12 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-model-scheduled'),
+    data: z.object({ member: memberSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/member-capability-changed'),
     data: z.object({ member: memberSchema }).strict(),
   }).strict(),
   z.object({

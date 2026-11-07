@@ -87,6 +87,8 @@ export interface AgentTeamAddMemberRequest {
   readonly contextStartPolicy?: 'continue' | 'fresh'
   /** Context-window override in tokens; absent follows the route window. */
   readonly contextWindow?: number
+  /** Capability rating, 1..10; absent starts the Member unrated. */
+  readonly capabilityScore?: number
   /** Existing Channels in this Workspace; may be empty — the Member joins Channels later and stays reachable through its DM view. */
   readonly channelRefs: readonly AgentTeamChannelRef[]
 }
@@ -175,6 +177,17 @@ export interface AgentTeamUpdateMemberRequest {
    * Tasks still open. Omitted keeps the stored designation.
    */
   readonly leader?: boolean
+  /**
+   * The Member's capability rating, 1..10. Omitted keeps the stored rating
+   * (the Leader's `team_rate` tool writes the same field); `null` clears it
+   * back to unrated; a number outside 1..10 is refused at the ledger.
+   */
+  readonly capabilityScore?: number | null
+  /**
+   * Opt-in switch for the automatic capability assessment (meaningful on the
+   * designated Leader only). Omitted keeps the stored switch.
+   */
+  readonly autoCapabilityAssessment?: boolean
 }
 
 /** Human read of one Member's prompt profile for the Prompt dialog. */

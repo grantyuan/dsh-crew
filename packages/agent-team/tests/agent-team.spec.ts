@@ -3827,3 +3827,158 @@ describe('AgentTeam Member model schedule', () => {
     replayLedger(test).validate()
   })
 })
+
+describe('AgentTeam unaddressed Human sends', () => {
+  it('delivers an unaddressed Human send to the in-channel designated Leader as an implicit recipient', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-unaddr'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const leader = await addLedgerMember(ledger, channel.channel.channelRef, 'member:lead', 'lead')
+    const worker = await addLedgerMember(ledger, channel.channel.channelRef, 'member:worker', 'worker')
+    await ledger.updateMember({ requestId: requestId('designate-lead'), memberId: leader.member.memberId, handle: leader.member.handle, description: leader.member.description, leader: true, actor: agentTeamHumanActor() })
+    // Nobody is named: the Leader receives the send as if @-mentioned, the
+    // Worker hears nothing, and the body is stored verbatim.
+    const sent = committed((await ledger.sendMessage({ requestId: requestId('unaddr'), workspaceId: alpha, channelRef: channel.channel.channelRef, body: 'please take a look at the build', asTask: false, actor: agentTeamHumanActor() })).value)
+    expect(sent.directMarkers.map(marker => marker.memberId)).toEqual([leader.member.memberId])
+    expect(sent.message.body).toBe('please take a look at the build')
+    // An authored mention keeps delivery exactly as authored.
+    const addressed = committed((await ledger.sendMessage({ requestId: requestId('addr'), workspaceId: alpha, channelRef: channel.channel.channelRef, body: `@worker please look`, asTask: false, actor: agentTeamHumanActor() })).value)
+    expect(addressed.directMarkers.map(marker => marker.memberId)).toEqual([worker.member.memberId])
+    // An explicit recipient names the target, so the rule stays out.
+    const explicit = committed((await ledger.sendMessage({ requestId: requestId('expl'), workspaceId: alpha, channelRef: channel.channel.channelRef, body: 'plain words', recipients: [worker.member.memberId], asTask: false, actor: agentTeamHumanActor() })).value)
+    expect(explicit.directMarkers.map(marker => marker.memberId)).toEqual([worker.member.memberId])
+    replayLedger(test).validate()
+  })
+
+  it('leaves an unaddressed send undelivered when no designated Leader hears the Channel', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-nolead'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    await addLedgerMember(ledger, channel.channel.channelRef, 'member:plain', 'plain')
+    const sent = committed((await ledger.sendMessage({ requestId: requestId('unaddr-nolead'), workspaceId: alpha, channelRef: channel.channel.channelRef, body: 'anyone there?', asTask: false, actor: agentTeamHumanActor() })).value)
+    expect(sent.directMarkers).toEqual([])
+    replayLedger(test).validate()
+  })
+
+  it('points an out-of-channel Leader at an unaddressed send through the Assistant voice', async () => {
+    const test = await harness()
+    const workChannel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-work'), workspaceId: alpha, name: 'work', description: 'Work' })
+    const leaderChannel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-lead'), workspaceId: alpha, name: 'leads', description: 'Leads' })
+    // The Members must stand in the HOST's projection for the Host-side
+    // pointer to see them, so they join through the Remote; the harness has
+    // no model adapter and activation fails — the durable Member stands.
+    const addRemote = async (id: string, handle: string, channelRef: string): Promise<AgentTeamMemberId> => {
+      try {
+        const added = await test.ctx.agentTeam.addMember({ requestId: requestId(id), workspaceId: alpha, handle, description: `${handle} agent`, presetId: 'team-member', channelRefs: [channelRef as never] })
+        return added.status.member.memberId
+      } catch {
+        return test.ctx.agentTeam.membersForClient({ workspaceId: alpha }).find(status => status.member.handle === handle)!.member.memberId
+      }
+    }
+    const leaderId = await addRemote('add-out-lead', 'out-lead', leaderChannel.channel.channelRef)
+    await addRemote('add-out-worker', 'out-worker', workChannel.channel.channelRef)
+    await test.ctx.agentTeam.updateMember({ requestId: requestId('designate-out'), memberId: leaderId, handle: 'out-lead', description: 'out-lead agent', leader: true })
+    const logWarn = vi.spyOn(test.ctx.logger, 'warn').mockImplementation(() => {})
+    await test.ctx.agentTeam.sendMessage({ requestId: requestId('unaddr-out'), workspaceId: alpha, channelRef: workChannel.channel.channelRef, body: 'hello team, who can take this?', asTask: false })
+    // The ledger delivered to nobody (the Leader cannot hear that Channel);
+    // the Host posts the pointer into the Leader's own Channel.
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(logWarn.mock.calls.map(call => String(call[0])).filter(text => text.includes('unaddressed'))).toEqual([])
+    const sent = [...(test.facility.get('agent_team')!.table('operations') as unknown as Map<string, AgentTeamOperation>).entries()].map(([, operation]) => operation)
+    expect(sent.filter(operation => operation.kind === 'team/message-sent' && operation.data.mentions.includes(leaderId) && operation.actor.kind === 'assistant')).toHaveLength(1)
+    const notice = sent.find(operation => operation.kind === 'team/message-sent' && operation.actor.kind === 'assistant' && operation.data.mentions.includes(leaderId)) as Extract<AgentTeamOperation, { kind: 'team/message-sent' }>
+    expect(notice.data.message.body).toContain('@out-lead')
+    expect(notice.data.message.body).toContain('hello team, who can take this?')
+    expect(notice.data.message.channelRef).toBe(leaderChannel.channel.channelRef)
+    replayLedger(test).validate()
+  })
+})
+
+describe('AgentTeam capability ratings', () => {
+  it('stores the rating through updateMember with keep/null/number semantics and refuses out-of-range scores', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:rated', 'rated')
+    const base = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    // Absent keeps (the Leader's team_rate writes the same field), null clears, a number sets.
+    await ledger.updateMember({ ...base, requestId: requestId('score-set'), capabilityScore: 8 })
+    expect(ledger.getMember(member.memberId)?.capabilityScore).toBe(8)
+    await ledger.updateMember({ ...base, requestId: requestId('score-keep'), description: 'still rated' })
+    expect(ledger.getMember(member.memberId)?.capabilityScore).toBe(8)
+    await ledger.updateMember({ ...base, requestId: requestId('score-clear'), capabilityScore: null })
+    expect(ledger.getMember(member.memberId)?.capabilityScore).toBeUndefined()
+    await expect(ledger.updateMember({ ...base, requestId: requestId('score-low'), capabilityScore: 0 })).rejects.toThrow(/1 to 10/)
+    await expect(ledger.updateMember({ ...base, requestId: requestId('score-high'), capabilityScore: 11 })).rejects.toThrow(/1 to 10/)
+    await ledger.updateMember({ ...base, requestId: requestId('score-again'), capabilityScore: 3, autoCapabilityAssessment: true })
+    expect(ledger.getMember(member.memberId)).toMatchObject({ capabilityScore: 3, autoCapabilityAssessment: true })
+    replayLedger(test).validate()
+  })
+
+  it('lets the designated Leader rate another Member through team_rate and refuses everyone else', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-rate'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const leader = await addLedgerMember(ledger, channel.channel.channelRef, 'member:rate-lead', 'rate-lead')
+    const target = await addLedgerMember(ledger, channel.channel.channelRef, 'member:rate-target', 'rate-target')
+    await ledger.updateMember({ requestId: requestId('designate-rate'), memberId: leader.member.memberId, handle: leader.member.handle, description: leader.member.description, leader: true, actor: agentTeamHumanActor() })
+    // The Leader's own member actor is the durable author of the rating.
+    const rated = await ledger.changeMemberCapability({ requestId: requestId('rate-8'), workspaceId: alpha, memberId: target.member.memberId, score: 8, actor: leader.actor })
+    expect(rated.value.member.capabilityScore).toBe(8)
+    expect(replayLedger(test).getMember(target.member.memberId)?.capabilityScore).toBe(8)
+    // Self-rating and non-Leader calls are refused; the score survives them.
+    await expect(ledger.changeMemberCapability({ requestId: requestId('rate-self'), workspaceId: alpha, memberId: leader.member.memberId, score: 10, actor: leader.actor })).rejects.toThrow(/cannot rate itself/)
+    await expect(ledger.changeMemberCapability({ requestId: requestId('rate-outsider'), workspaceId: alpha, memberId: target.member.memberId, score: 5, actor: target.actor })).rejects.toThrow(/only the Team Leader/)
+    expect(ledger.getMember(target.member.memberId)?.capabilityScore).toBe(8)
+    // The automatic assessment path rides the Human actor; absent score clears.
+    await ledger.changeMemberCapability({ requestId: requestId('rate-auto'), workspaceId: alpha, memberId: target.member.memberId, actor: agentTeamHumanActor() })
+    expect(ledger.getMember(target.member.memberId)?.capabilityScore).toBeUndefined()
+    await expect(ledger.changeMemberCapability({ requestId: requestId('rate-bad'), workspaceId: alpha, memberId: target.member.memberId, score: 12, actor: agentTeamHumanActor() })).rejects.toThrow(/1 to 10/)
+    const operations = [...(test.facility.get('agent_team')!.table('operations') as unknown as Map<string, AgentTeamOperation>).entries()].map(([, operation]) => operation).filter(operation => operation.kind === 'team/member-capability-changed')
+    expect(operations).toHaveLength(2)
+    replayLedger(test).validate()
+  })
+
+  it('fails replay when a capability change smuggles another field into its snapshot', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-sneak-cap'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const leader = await addLedgerMember(ledger, channel.channel.channelRef, 'member:sneak-cap-lead', 'sneak-cap-lead')
+    const target = await addLedgerMember(ledger, channel.channel.channelRef, 'member:sneak-cap', 'sneak-cap')
+    await ledger.updateMember({ requestId: requestId('designate-sneak-cap'), memberId: leader.member.memberId, handle: leader.member.handle, description: leader.member.description, leader: true, actor: agentTeamHumanActor() })
+    await ledger.changeMemberCapability({ requestId: requestId('sneak-cap-apply'), workspaceId: alpha, memberId: target.member.memberId, score: 7, actor: leader.actor })
+    const records = [...(test.facility.get('agent_team')!.table('operations') as unknown as Map<string, AgentTeamOperation>).entries()]
+    await test.fiber.dispose()
+    cleanups.pop()
+    const tampered = records.map(([key, operation]) => operation.kind !== 'team/member-capability-changed'
+      ? [key, operation] as [string, unknown]
+      : [key, { ...operation, data: { member: { ...operation.data.member, handle: 'renamed-by-the-rater' } } }] as [string, unknown])
+    await expect(harness(storedPool(tampered))).rejects.toThrow(/invalid Member capability update/)
+  })
+
+  it('counts finished work per Member since a sequence for the automatic assessment', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel-work-since'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const { member, actor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:worker-since', 'worker-since')
+    const started = withTask(committed((await ledger.sendMessage({ requestId: requestId('work-since-start'), workspaceId: alpha, channelRef: channel.channel.channelRef, body: 'Work since check', asTask: true, actor })).value))
+    const read = (await ledger.readThread({ requestId: requestId('work-since-read'), workspaceId: alpha, taskRef: started.task.taskRef, actor })).value
+    const claimed = committed((await ledger.changeClaim({ requestId: requestId('work-since-claim'), workspaceId: alpha, taskRef: started.task.taskRef,
+      action: 'claim', direction: 'build', baseRevision: read.thread.revision, actor })).value)
+    const before = ledger.completedWorkSince(member.memberId, 0)
+    expect(before.finished).toBe(0)
+    const readDone = (await ledger.readThread({ requestId: requestId('work-since-read-done'), workspaceId: alpha, taskRef: started.task.taskRef, actor })).value
+    await ledger.changeClaim({ requestId: requestId('work-since-done'), workspaceId: alpha, taskRef: started.task.taskRef,
+      action: 'done', claimRef: claimed.claim.claimRef, baseRevision: readDone.thread.revision, actor })
+    const after = ledger.completedWorkSince(member.memberId, 0)
+    expect(after.finished).toBe(1)
+    expect(after.taskRefs).toEqual([started.task.taskRef])
+    // The Human accepting the work also counts as the Member's finished work.
+    const readAccept = (await ledger.readThread({ requestId: requestId('work-since-read-accept'), workspaceId: alpha, taskRef: started.task.taskRef, actor: agentTeamHumanActor() })).value
+    await ledger.changeTask({ requestId: requestId('work-since-accept'), workspaceId: alpha, taskRef: started.task.taskRef,
+      action: 'accept', baseRevision: readAccept.thread.revision, actor: agentTeamHumanActor() })
+    expect(ledger.completedWorkSince(member.memberId, 0).finished).toBe(2)
+    // Work before the cursor is invisible to the next assessment window.
+    expect(ledger.completedWorkSince(member.memberId, ledger.position()).finished).toBe(0)
+  })
+})
