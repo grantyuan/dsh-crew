@@ -22,4 +22,12 @@ Agent 只能读取或修改其已参与 Workspace 中的 Channels，且仍需是
 
 除事件时刻外，每个符合条件的 Team Member turn 的首个 model step 会收到一条 durable clock snapshot（`member-time-context` preset row）：UTC+8 的当前时刻、距上一个 model-visible event 的 elapsed，以及 ordering-authority 说明。 同一 turn 的后续 step 默认保持安静，只有距上一条落盘 snapshot 已超过 refresh interval 才再注入一条——快速 step 的 tool-dense turn 恰好产出一行，超出 interval 的 turn 仍能显示真实跨度；被跳过的 step 绝不回填，其时间跨度折叠进下一条 snapshot 的 elapsed。 默认 interval 为 30 分钟，可通过 preset row 的 plugin config 覆盖，留给未来的配置层接管。 baseline 从该 Member Session 自身事件折叠而来，因此 restart、resume 和 compaction 无需第二存储即可派生出相同值；rollover 开启全新日志，elapsed 渲染为 `unavailable` 而不是跨代猜测；wall-clock 回拨将 elapsed 夹为 `0s` 而不改写历史。
 
-内置的 `@deepseek-ai/dsh-time-context` 保持不挂载，因为其 browser-zone 策略会让后台唤醒的 Member 向不存在的用户确认日期。 时间绝不驱动 Task 语义：不存在 deadline、SLA 或按陈旧度的状态变更；Host 的协调 pass（supervision 与 idle continuation——见 Host authority）观察的是健康与空闲形态，而非 Task 时间。
+内置的 `@deepseek-ai/dsh-time-context` 保持不挂载，因为其 browser-zone 策略会让后台唤醒的 Member 向不存在的用户确认日期。 时间绝不驱动 Task 语义：不存在 deadline、SLA 或按陈旧度的状态变更；Host 的协调 pass（supervision、idle continuation 与 model schedule——见 Host authority）观察的是健康、空闲形态与路由时间窗，而非 Task 时间。
+
+## 时间区间模型路由
+
+Member 可以携带 `modelSchedule`：一组按顺序解析的每日 `HH:MM` 时间窗（Team 协调时区 UTC+8），每个窗口指定一条 provider 路由。窗口按列表顺序解析——第一个命中的窗口生效；结束早于开始的窗口跨午夜；未被任何窗口覆盖的小时（或日程被禁用时）回到成员固定的 `model`。这份 intent 与 `model` 一样挂在 Member entity 上，通过同一个 `updateMember` Remote 编辑；编辑日程本身从不动 live Session。
+
+Host 的 model-schedule monitor 每个 pass 重新派生期望路由，并与持久化的已应用路由（Member entity 上的 `scheduledModel`，只由 monitor 以受托 Human authority 提交的 `team/member-model-scheduled` operation 移动）比较。每一次真实变更都经共享的 context-renewal 路径落地——与 Human 菜单的「重置」同一条路径——因此切换总是开启一个以新路由激活的全新 generation。turn 进行中的 Member 把切换推迟到第一个安静边界；跨边界宕机的 Host 在下一个 pass 收敛；持久化比较就是幂等性，切换绝不重复。
+
+在改变路由的边界前 10 分钟，monitor 以 Team Assistant 的口吻向该 Member 发出一条预告，点名即将到来的路由与切换时刻，让它来得及交接——把进行中的状态发进 Thread、把该留的笔记写进 private memory——然后重置才会清空其上下文。预告闩锁与其他 watcher 一致是 process-local 的：重启后的 Host 可能把一条预告再放行一次，但绝不会出现第二次切换。

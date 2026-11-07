@@ -138,10 +138,10 @@ Inbox 页打开时订一次无 scope 的 changes，唤醒重拉列表，离开�
 
 ## 任务（Tasks）
 
-Tasks 页是 Human 的跨 Workspace 任务列表：每个 Task 连同子任务关联与实时进度尽收一页，不必点开 Thread 即可读进度。它复用 Inbox 页框架——同一套共享 surface 类、两段节奏（进行中在上、已完成在下）与段计数——以及 Inbox 行几何：gutter 里一枚状态点，crumb 行在参与 Workspace 多于一个时带 Workspace 标题、per-Channel 任务序号 chip、派生 status，owners 以头像堆叠呈现、相对时间收尾。
+Tasks 页是 Human 的跨 Workspace **任务看板**：每个 Task 连同子任务关联与实时进度尽收一页，不必点开 Thread 即可读进度，按四泳道敏捷看板排布（泳道语法与卡片解剖见 [`components.zh.md`](components.zh.md)）。它复用 Inbox 页框架——同一套共享 surface 类与段计数——以及 Inbox 行几何：gutter 里一枚状态点，crumb 行在参与 Workspace 多于一个时带 Workspace 标题、per-Channel 任务序号 chip、派生 status，owners 以头像堆叠呈现、相对时间收尾。
 
-父行另带子任务进度（`子任务 n/m`）；subject 是预览行。子任务在父行下缩进一级；父行自身也是子任务、或其父行不在列表中时，该行回退为顶层——列表绝不因缺失关联而隐藏一行。点击一行选中该行 Workspace 并打开 Task 的 Thread。
+父卡带子树进度（`子任务 n/m`）；subject 是预览行。看板是扁平的——一个 Task 一张卡——没有行会藏在缺失的父关联后面，子任务各站在自己派生 status 对应的泳道里。点击一张卡选中该行 Workspace 并打开 Task 的 Thread。
 
-进行中的行在行按钮外携带一个选择 checkbox，勾选永远不会打开 Thread；第一次勾选升起一条吸底批量条——已选计数、验收所选、关闭所选、清除选择——按所触达的 Workspace 各发一次 Host `changeTasks` 解决整批。批量条的备注汇报已提交、已是终态与失败三类计数；提交成功的运行清空选择，其备注以一行状态文本活得比批量条更久，失败的运行保留选择以便重试。
+进行中的卡在行按钮外携带一个选择 checkbox，勾选永远不会打开 Thread；第一次勾选升起一条吸底批量条——已选计数、验收所选、关闭所选、清除选择——按所触达的 Workspace 各发一次 Host `changeTasks` 解决整批。批量条的备注汇报已提交、已是终态与失败三类计数；提交成功的运行清空选择，其备注以一行状态文本活得比批量条更久，失败的运行保留选择以便重试。同一条备注行也回答单卡移动——拖入泳道或其菜单等价操作——批量 Remote 把它当作一个只含一张任务的批次。
 
 空态讲共享的一对文案（「还没有任务」+ 提示）；loading/error/retry 复用共享对话类。页面打开时对每个参与的 Workspace 各拉一次列表，并订阅无 scope 的 changes、唤醒重拉；离开即停。

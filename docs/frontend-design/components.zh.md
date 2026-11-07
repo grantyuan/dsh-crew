@@ -24,6 +24,10 @@
 - 已知的 branded Thread ref（`thread:*`）走同一条路经 Host 的 `resolveThreadRefs` 批量解析，在原出现位置渲染为带所指 Thread 首行摘要的可点击 Thread chip（中文为`讨论 · …`），taskless Thread 之间不再长得一模一样。只有 Host 确认过的 ref（缩写拼写同样要过解析）才会成链，点击按解析出的完整 ref 导航；解析失败的保留为非导航原文，永远不会静默无响应。
 - 已知的 branded Channel ref（`channel:*`）在原出现位置渲染为带频道名的可点击 Channel chip（中文为`频道 · …`），点击跳到该频道。已知的 branded Member ref（`member:*`）渲染为带 handle 的 Member chip（中文为`成员 · @…`）——与会发通知的 `@mention` chip 刻意区分，引用永不发通知。点击活跃成员的 chip 按 agent card 同款行为打开其 session；被暂停的成员与 Human 只渲染为带名但不可点的文本。两者都直接复用已加载的频道/成员 roster 解析，不新增 Host 接口；落在已加载窗口之外的 ref 按解析失败同规则保留原文。
 
+## 任务看板（Task board）
+- 「任务」页是四个泳道的敏捷看板：待处理、进行中、待验收，以及把 `done` 与 `closed` 收在一个屋顶下的「已完成」。ledger 仍是 standing 的唯一写入方——卡片所在泳道就是派生 status，绝非另一份存储列——因此看板上的每次移动都映射到它真正对应的那个 Host 写入：把 open 卡拖到「已完成」（或用卡片菜单的验收）走 Host 批量解析，活动 Claim 在同一 atomic operation 内完成；把终态卡拖出去是 reopen；把待处理卡拖到「进行中」打开指派弹窗，以 Human 口吻在 Task 自己的 Thread 里 @ 所选成员发一条回复。请求只是请求——Claim 是成员自己的承诺——卡片在成员认领时移动，而不是弹窗关闭时。
+- 卡片沿用 Inbox 行的形状，只加看板的两件事：它是泳道移动的拖拽把手，并带一个承载同样动作的溢出菜单——键盘能做看板上的一切，没有任何一步必须用指针。父卡保留 `{done}/{total}` 子树计数；看板是扁平的，一个 Task 一张卡，没有任何 Task 藏在另一张卡的泳道里。open 卡保留多选 checkbox，多选栏保留批量验收与关闭。泳道只在被拖卡片合法可落时以品牌色描边；空泳道明说「暂无任务」而不是塌陷消失；手机宽度下 auto-fit 网格把泳道竖向堆叠，绝不横向滚动。
+
 ## 计数胶囊（count capsule）
 - `TeamCountBadge.tsx` 配上 `countBadge.module.css .badge` 是**唯一**一枚计数胶囊，读者能看到的每一处计数都穿它：Channel feed 的 Thread 入口、以及 Inbox 队列行。同一套声明每面各写一份（共享之前就是如此），正是 feed 那一份落到与队列行不同的行盒、数字彼此差出一个像素的原因。侧栏「收件箱」入口**有意不在其列**：它把未读说成一个点而不是一个数字（见「Inbox（收件箱）」），因为读者扫侧栏问的是「有没有东西在等」，而数量随每一条 fact 变动、是**专门去问**才要的答案，所以它留在控件自己的可访问名里。
 - 这份规则是：高 18px、`min-width: 18px` 配 `box-sizing: border-box`（平台没有全局 border-box reset，否则内边距会把一位数字撑成椭圆）、`border-radius: 999px` 配 `corner-shape: round`、`display: inline-flex` 双向居中、11px/600 配 `font-variant-numeric: tabular-nums`（两位计数不会推动墨迹）、`line-height: 18px`——行盒就取胶囊自己的高度，而不是各面碰巧继承到的值（一面的入口行继承 `normal`，另一面自己设了高度），再加 `flex: none`，座位被挤时 Inbox 行不会把圆圈压小。定位仍留在挂胶囊的那个面上（`className`），因为窄轨要把它钉在 36px 图标盒内。

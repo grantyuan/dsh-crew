@@ -30,4 +30,14 @@ Later steps of the same turn stay quiet unless the turn has run longer than the 
 
 The baseline folds from the Member Session's own events, so restart, resume, and compaction derive identical values without a second store; a rollover starts a fresh log and renders elapsed as `unavailable` rather than guessing across generations; a wall-clock rollback clamps elapsed to `0s` without rewriting history. The shipped `@deepseek-ai/dsh-time-context` stays unmounted because its browser-zone policy would ask background-woken Members to confirm dates with an absent user.
 
-Time never drives Task semantics: no deadlines, SLAs, or staleness-driven state changes exist. The Host's coordination passes (supervision, idle continuation — see Host authority) watch health and idleness shape, not Task timing.
+Time never drives Task semantics: no deadlines, SLAs, or staleness-driven state changes exist. The Host's coordination passes (supervision, idle continuation, the model schedule — see Host authority) watch health, idleness shape, and routing windows, not Task timing.
+
+## Time-interval model routing
+
+A Member may carry a `modelSchedule`: an ordered list of daily `HH:MM` windows in the Team coordination zone UTC+8, each demanding one provider route. Windows resolve in list order — the first covering window wins — a window whose end is at or before its start wraps past midnight, and hours no window covers (or a disabled schedule) leave the Member on its pinned model. The intent rides the Member entity like `model` and edits through the same `updateMember` Remote; a schedule edit never touches a live Session by itself.
+
+The Host's model-schedule monitor re-derives the desired route each pass and compares it with the durable applied route (`scheduledModel` on the Member entity, moved only by the `team/member-model-scheduled` operation the monitor commits under delegated Human authority). Every actual change lands through the shared context-renewal path — the same reset the Human menu uses — so a switch always starts a fresh generation activating on the new route.
+
+A mid-turn Member defers the switch to its first quiet boundary, and a Host that was down across a boundary converges on the next pass; the durable comparison is the idempotence, so a switch never duplicates.
+
+Ten minutes before a route-changing boundary the monitor posts one heads-up in the Team Assistant's voice, addressed to the Member with the incoming route and the switch moment, so it can hand its work over — post in-flight state to the Threads, write durable notes to private memory — before the reset empties its context. The reminder latch is process-local like every watcher's: a restarted Host may let one heads-up through a second time, never a second switch.

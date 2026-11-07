@@ -27,6 +27,16 @@ Known branded `channel:*` refs render at their original position as Channel chip
 
 Both resolve against the already-loaded Channel and member rosters with no new Host call, so a ref outside the loaded window stays plain text under the same rule unresolvable refs follow.
 
+## Task board
+
+The Tasks page is the four-lane Kanban board over the ledger's derived standing: 待处理, 进行中, 待验收, and one finished lane gathering `done` and `closed` under one roof. The ledger stays the only writer of standing — a card's lane is the derived status, never a stored column — so every board move maps onto the one Host write it names: dropping an open card on the finished lane (or its menu action) resolves the Task through the Host batch, which completes live Claims atomically; dropping a finished card back out reopens it.
+
+Dropping a to-do card on 进行中 opens the assignment dialog, which posts one Human reply into the Task's own Thread @-naming the chosen Member. The request only asks — the Claim is the Member's own commitment — and the card moves when they claim, not when the dialog closes.
+
+The card is the shipped Inbox row shape plus the board's two additions: it is the drag handle for a lane move, and it carries an overflow menu with the same moves for the keyboard, so nothing on the board needs a pointer. A parent keeps its `{done}/{total}` sub-tree chip — the board is flat, one card per Task, so no Task hides inside another lane.
+
+Open cards keep the selection checkbox and the multi-select bar keeps batch acceptance and closing. A lane highlights with the brand border only while the dragged card may legally land in it, and an empty lane says so instead of collapsing; at phone width the auto-fit grid stacks the lanes instead of scrolling them sideways.
+
 ## Count capsule
 `TeamCountBadge.tsx` over `countBadge.module.css .badge` is the one count capsule, and every count the Human reads wears it: the Channel feed's Thread entry and each Inbox queue row. One hand-written copy per surface — which is what there was before they were shared — is exactly what let the feed's copy sit on a different line box from the queue rows', with its digit a pixel away from theirs.
 

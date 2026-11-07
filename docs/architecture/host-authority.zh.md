@@ -34,6 +34,8 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - watcher 的 open 集合止于 `in_review`：Claims 全部完成的任务在等 Human 验收，这不是要提醒已停止 Agent 的工作，因此只剩这类任务的 Workspace 永不触发——Human 任务列表仍将其显示为进行中。
 - 重置按 escalation 恰好公示一次：以 Team Assistant 口吻向该 Member 所在的每个 Channel 发一条结构化重置公示，列明失败原因，声明重置保留了 Member 的身份（handle、设置、私有记忆、Claims）且没有产生任何替补，并带上 `@human` 的请求——若它持续失败，请人工接管（recover、清空上下文，或归档）。
 - 重置以普通的 member-session renewal operation 落账，因此升级中途崩溃只会按正常台账重放，绝不会留下半真半假的 Team 事实；计数器、未结强制链与 exhausted 闩为进程内，重启即重新挣回预算，与压力策略同构。 重置未能治愈的 Member 会闭链进入闩，并在其 Channel 里以一条 durable 的 `@human` 通知宣告让位：闩本身是进程内的，通知才是它的 durable 对应物。
+- model-schedule monitor（`model-schedule.ts`）负责 Member `modelSchedule` 声明的时间区间路由：每三十秒一趟 pass——与监督共用同一个 restore gate——重新派生命中窗口的路由，并与该 Member 持久化的 `scheduledModel` 比较。变更以 `team/member-model-scheduled` 落账，并经共享的 context-renewal（重置）路径落地，让新 generation 以新路由激活；turn 进行中的 Member 把切换推迟到后续 pass，持久化比较让切换跨重启保持幂等。
+- 在改变路由的边界前十分钟，monitor 以 Team Assistant 的口吻单独向该 Member 发出一条预告，点名即将到来的路由与时刻——普通 Inbox 路径唤醒它，赶在重置清空上下文之前交接工作。预告闩锁与其他 watcher 一致是进程内的；预告是一条普通 ledger Message（Assistant 只能发言，不发 DM）。
 
 ## 变更流与 Projection
 - `changes()` 是流式 Remote，可声明一个 scope（workspace/channel/thread/presence）；省略 scope 时观察共享 Team 投影变化，不包含 presence。Host 先注册监听，再发送当前基线，之后只发送匹配的变更通知；消费者暂停期间仅保留最新待发送版本。取消或 Host 释放时关闭订阅。Thread read 与 `team/dm-sent` 不改变共享投影，因此既不推进其版本也不唤醒订阅者。Presence 使用进程内 epoch，其余 scope 使用最近一次共享投影提交的 ledger sequence。版本只在同一 scope 和 Host 生命周期内有意义。Host 只为受 operation 影响的 Members 重算 Inbox hints。

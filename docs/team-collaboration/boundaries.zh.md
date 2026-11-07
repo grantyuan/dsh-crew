@@ -20,7 +20,7 @@ Human Client 使用 `readThread`、`threadHistory`、`threadObservations` 和 `c
 
 `threadObservations` 是针对一个 Thread 的、只读的 Human-only follow/unfollow Attention transitions projection，返回体同时携带当前关注者集合（`followers`）。 Thread composer 用该读取为 mention 候选排序（当前关注者优先），observation 历史本身暂不渲染。 Client 只在本地保存 navigation mode、Workspace selection 与 Inbox 页位置（navigation 事实，不是未读事实）；unread state、Attention、revisions 和 observations 仍由 Host 持有。 各 Workspace 的 Inbox 调用由 Client 合并：home 级不存在 Inbox ledger 或 Remote。
 
-Task resolution 为 Human 专属，有两种形态：Thread 页提供的单个 `changeTask`，和 Tasks 页提供的批量 `changeTasks`——每个 Workspace 一次调用、在一个 Host turn 内解决多个 Task，每个 Task 以从批次 requestId 派生的 requestId 提交独立 durable operation，重试的批次因此幂等重放。
+Task resolution 为 Human 专属，有两种形态：Thread 页提供的单个 `changeTask`，和任务看板提供的批量 `changeTasks`——每个 Workspace 一次调用、在一个 Host turn 内以 `accept`、`close` 或 `reopen` 解决多个 Task，每个 Task 以从批次 requestId 派生的 requestId 提交独立 durable operation，重试的批次因此幂等重放。看板的单卡移动就是一个只含一张任务的批次。
 
 批量刻意绕过 unread fence：选择来自 Host 自己的 Task-list 投影，要求逐 Task 先读 Thread 会让批量失去意义；每个 Task 仍守护自己的终态——已终结的 Task 以 `already_resolved` 回报而不是拖垮整批，一个被拒绝的 Task 也从不阻塞其余。
 

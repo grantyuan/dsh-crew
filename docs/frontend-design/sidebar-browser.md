@@ -149,10 +149,14 @@ The badge subscribes the same way for its totals and re-pulls only totals (`limi
 
 ## Tasks (任务)
 
-The Tasks page is the Human's cross-Workspace Task list: every Task with its sub-task linkage and live progress, readable without opening a Thread. It reuses the Inbox page frame — the same shared surface classes, the two-section rhythm (进行中 above 已完成), and the section counts — and the Inbox row geometry: a status dot in the gutter, the crumb line naming the Workspace when more than one participates, the per-Channel ordinal chip, the derived status, owners as an avatar stack, and the relative instant trailing.
+The Tasks page is the Human's cross-Workspace **Task board**: every Task with its sub-task linkage and live progress, readable without opening a Thread, laid out as the four-lane Kanban board (the lane grammar and card anatomy live in [`components.md`](components.md)).
 
-A parent row adds its sub-task progress (`n/m 子任务`); the subject is the preview line. Sub-tasks indent one step under their parent; a row whose parent is itself a sub-task, or whose parent row is absent from the list, flattens to top level — the list never hides a row behind a missing link. Clicking a row selects that row's Workspace and opens the Task's Thread.
+It reuses the Inbox page frame — the same shared surface classes and section counts — and the Inbox row geometry: a status dot in the gutter, the crumb line naming the Workspace when more than one participates, the per-Channel ordinal chip, the derived status, owners as an avatar stack, and the relative instant trailing.
 
-Open rows carry a selection checkbox outside the row button, so selecting never opens the Thread; the first tick raises one sticky batch bar — the selected count, 验收所选, 关闭所选, 清除选择 — that resolves the selection through one Host `changeTasks` call per touched Workspace. The bar's note reports committed, already-terminal, and failed counts; a committed run clears its selection and its note outlives the bar as one status line, while a failed run keeps the selection for retry.
+A parent card carries its sub-tree progress (`n/m 子任务`); the subject is the preview line. The board is flat — one card per Task — so no row hides behind a missing parent link, and children stand in their own derived lane. Clicking a card selects that row's Workspace and opens the Task's Thread.
+
+Open cards carry a selection checkbox outside the row button, so selecting never opens the Thread; the first tick raises one sticky batch bar — the selected count, 验收所选, 关闭所选, 清除选择 — that resolves the selection through one Host `changeTasks` call per touched Workspace. The bar's note reports committed, already-terminal, and failed counts; a committed run clears its selection and its note outlives the bar as one status line, while a failed run keeps the selection for retry.
+
+That same note line also answers a single-card move — a lane drag or its menu equivalent — which the batch remote carries as a one-Task batch.
 
 The empty state speaks the shared pair (「还没有任务」 plus its hint); loading, error, and retry reuse the shared conversation classes. While open, the page fetches each participated Workspace once and subscribes without a change scope, refetching on every wake; closed, the fetches stop.

@@ -20,7 +20,7 @@ Neither slice names an archived Channel's Threads: archival ends participation a
 
 The Client merges the per-Workspace Inbox calls in the Client; there is no home-level Inbox ledger or Remote.
 
-Task resolution is Human-only and comes in two shapes: the single `changeTask` the Thread page offers and the batch `changeTasks` the Tasks page offers — one call per Workspace resolving several Tasks in one Host turn, each Task committing its own durable operation under a request id derived from the batch's, so a retried batch replays idempotently.
+Task resolution is Human-only and comes in two shapes: the single `changeTask` the Thread page offers and the batch `changeTasks` the Tasks board offers — one call per Workspace resolving several Tasks in one Host turn over `accept`, `close`, or `reopen`, each Task committing its own durable operation under a request id derived from the batch's, so a retried batch replays idempotently. A single-card board move is the batch with one Task in it.
 
 The batch deliberately forgoes the unread fence: the selection is made from the Host's own Task-list projection, so demanding a Thread read per Task would defeat it, while each Task still upholds its own terminal state — an already-resolved Task reports back as `already_resolved` instead of failing its batch, and one rejected Task never blocks the rest.
 
