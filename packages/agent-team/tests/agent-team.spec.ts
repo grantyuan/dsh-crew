@@ -805,6 +805,145 @@ describe('AgentTeam durable Thread Attention ledger', () => {
     soloLedger.validate()
   })
 
+  it('replays a redirected call recorded before departed-Member redirects existed', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+    committed((await ledger.sendMessage({ requestId: requestId('call'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@ghost 请审查', asTask: false, actor: coderActor })).value)
+    ledger.validate()
+    // Ledgers written before a departed-name call started redirecting carry
+    // no annotation, and the delivery rode the mentions alone: the record
+    // names no receiver, starts no receiver Attention, adds no direct marker.
+    // That legacy shape stays legal on load and replays exactly as written.
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()].map(([id, operation]) => {
+      const typed = operation as AgentTeamOperation
+      if (typed.kind !== 'team/message-sent' && typed.kind !== 'team/thread-replied') return [id, typed] as [string, unknown]
+      const receiver = typed.data.redirectedMentions?.[0]?.deliveredToMemberId
+      if (receiver === undefined) return [id, typed] as [string, unknown]
+      const { redirectedMentions: _redirected, ...data } = typed.data
+      return [id, { ...typed, data: { ...data, mentions: data.mentions.filter(memberId => memberId !== receiver),
+        inbox: { ...data.inbox, attention: { ...data.inbox.attention,
+          set: data.inbox.attention.set.filter(entry => entry.memberId !== receiver) },
+          directMarkers: { ...data.inbox.directMarkers,
+            added: data.inbox.directMarkers.added.filter(marker => marker.memberId !== receiver) } } } }] as [string, unknown]
+    })
+    const legacy = await harness(storedPool(records))
+    const legacyLedger = replayLedger(legacy)
+    expect(() => legacyLedger.validate()).not.toThrow()
+    expect(legacyLedger.inbox(manager.actor, { workspaceId: alpha })).toMatchObject({ items: [], totalUnreadCount: 0 })
+  })
+
+  it('reads a live Member name that extends a departed name as the live Member, never as the departed one', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { member: successor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:architect-4', 'Builds', '架构师-4')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:architect', 'Builds', '架构师')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+
+    // A teammate naming the successor by their own name resolves live: the
+    // departed base name it extends stays prose, so no ghost receiver is
+    // paged beside the real one.
+    const { actor: peerActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:peer')
+    const named = committed((await ledger.sendMessage({ requestId: requestId('call-successor'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@架构师-4 请复审 R3.3', asTask: false, actor: peerActor })).value)
+    expect(named.redirectedMentions).toBeUndefined()
+    expect(named.directMarkers).toEqual([expect.objectContaining({ memberId: successor.memberId })])
+
+    // Writing the departed name itself still pages its receiver — the exact
+    // call is a real departed-name redirect, prefix shadowing changes only
+    // extended names.
+    const departed = committed((await ledger.sendMessage({ requestId: requestId('call-departed'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@架构师 请审查旧稿', asTask: false, actor: peerActor })).value)
+    expect(departed.redirectedMentions).toEqual([expect.objectContaining({ memberId: ghost.member.memberId, handle: '架构师',
+      deliveredToMemberId: manager.member.memberId, deliveredToHandle: 'manager' })])
+    ledger.validate()
+    const cold = replayLedger(test)
+    cold.validate()
+    expect(cold.getMember(successor.memberId)?.handle).toBe('架构师-4')
+  })
+
+  it('replays a permissive-era redirect annotation for an extended live name, and refuses anything looser', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { member: successor, actor: successorActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:architect-4', 'Builds', '架构师-4')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:architect', 'Builds', '架构师')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+
+    // The shadowed derivation commits no annotation for the extended name.
+    // Records written by the permissive derivation of the earlier build DID
+    // carry one — plus the receiver they paged — and replay keeps accepting
+    // exactly that shape: mentions and delivery extended by the derived
+    // receiver, annotation equal to the legacy derivation.
+    const named = committed((await ledger.sendMessage({ requestId: requestId('era-call'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@架构师-4 请复审 R3.3', asTask: true, actor: successorActor })).value)
+    expect(named.redirectedMentions).toBeUndefined()
+    const receiver = manager.member.memberId
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()].map(([id, operation]) => {
+      const typed = operation as AgentTeamOperation
+      if (typed.kind !== 'team/message-sent' || typed.data.message.messageRef !== named.message.messageRef) return [id, typed] as [string, unknown]
+      const message = typed.data.message
+      return [id, { ...typed, data: { ...typed.data,
+        mentions: [...typed.data.mentions, receiver].sort(),
+        redirectedMentions: [{ memberId: ghost.member.memberId, handle: ghost.member.handle, deliveredToMemberId: receiver, deliveredToHandle: manager.member.handle }],
+        inbox: { ...typed.data.inbox, attention: { ...typed.data.inbox.attention,
+          set: [...typed.data.inbox.attention.set, { memberId: receiver, threadRef: message.threadRef, startSequence: message.sequence, readThroughSequence: message.sequence - 1 }] },
+          directMarkers: { ...typed.data.inbox.directMarkers,
+            added: [...typed.data.inbox.directMarkers.added, { memberId: receiver, threadRef: message.threadRef, messageRef: message.messageRef, sequence: message.sequence }] } } } }] as [string, unknown]
+    })
+    const permissive = await harness(storedPool(records))
+    const permissiveLedger = replayLedger(permissive)
+    expect(() => permissiveLedger.validate()).not.toThrow()
+    expect(permissiveLedger.inbox(manager.actor, { workspaceId: alpha })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1 })
+
+    // The tolerance buys exactly the permissive shape: an annotation naming a
+    // receiver no derivation of any era would draw stays a forgery.
+    const forged = records.map(([id, operation]) => {
+      const typed = operation as AgentTeamOperation
+      if (typed.kind !== 'team/message-sent' || typed.data.redirectedMentions === undefined) return [id, typed] as [string, unknown]
+      return [id, { ...typed, data: { ...typed.data, redirectedMentions: [{ memberId: ghost.member.memberId, handle: ghost.member.handle, deliveredToMemberId: successor.memberId, deliveredToHandle: successor.handle }] } }] as [string, unknown]
+    })
+    await expect(harness(storedPool(forged))).rejects.toThrow(/invalid Message mention redirect/)
+  })
+
+  it('rejects a redirected call whose annotation names a receiver the body does not justify', async () => {
+    const test = await harness()
+    const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
+    const ledger = replayLedger(test)
+    const manager = await addLedgerMember(ledger, channel.channel.channelRef, 'member:manager')
+    await ledger.updateMember({ requestId: requestId('designate'), memberId: manager.member.memberId, handle: manager.member.handle,
+      description: manager.member.description, leader: true, actor: agentTeamHumanActor() })
+    const { actor: coderActor } = await addLedgerMember(ledger, channel.channel.channelRef, 'member:coder')
+    const ghost = await addLedgerMember(ledger, channel.channel.channelRef, 'member:ghost')
+    await ledger.removeMember({ requestId: requestId('depart'), memberId: ghost.member.memberId, actor: agentTeamHumanActor() })
+    committed((await ledger.sendMessage({ requestId: requestId('call'), workspaceId: alpha, channelRef: channel.channel.channelRef,
+      body: '@ghost 请审查', asTask: false, actor: coderActor })).value)
+    // A forged record that keeps the redirect-era delivery but points the
+    // annotation at a receiver the re-derived scan does not justify.
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()].map(([id, operation]) => {
+      const typed = operation as AgentTeamOperation
+      if ((typed.kind !== 'team/message-sent' && typed.kind !== 'team/thread-replied')
+        || typed.data.redirectedMentions === undefined) return [id, typed] as [string, unknown]
+      return [id, { ...typed, data: { ...typed.data, redirectedMentions: typed.data.redirectedMentions.map(redirect =>
+        ({ ...redirect, deliveredToMemberId: coderActor.memberId })) } }] as [string, unknown]
+    })
+    await expect(harness(storedPool(records))).rejects.toThrow(/invalid Message mention redirect/)
+  })
+
   it('serves the Human Inbox with row previews and whole-unread totals', async () => {
     const test = await harness()
     const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })

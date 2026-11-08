@@ -156,6 +156,31 @@ class GatedAdapter extends ScriptedAdapter {
   }
 }
 
+/**
+ * Two independent park points keyed on call order: the first parked call holds
+ * its Member's running turn (the handle disposal waits for the loop to
+ * settle), the second parks a dispatch judgement. Staging a judgement that
+ * outlives its Team needs both live at once, which the single-gate adapters
+ * cannot express.
+ */
+class TwoGateAdapter extends ScriptedAdapter {
+  readonly gates = [0, 1].map(() => ({ started: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() }))
+  private calls = 0
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const gate = this.gates[this.calls]
+    this.calls += 1
+    if (gate === undefined) {
+      yield* super.stream(options)
+      return
+    }
+    this.requests.push(options)
+    gate.started.resolve()
+    await gate.release.promise
+    for (const chunk of textResponse('Acknowledged.')) yield chunk
+  }
+}
+
 function toolCallResponse(rawCallId: string, name: string, args: object): StreamChunk[] {
   const id = ToolCallId(rawCallId)
   const argumentsJson = JSON.stringify(args)
@@ -5494,6 +5519,126 @@ describe('Agent Team member context control (ticket 01)', () => {
     const session1 = await waitFor(() => sessionOf() !== session0 ? sessionOf() : undefined)
     await waitForArchived(archived, session0)
     expect(adapter.judgements).toHaveLength(2)
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it('survives a dispatch judgement that lands after its Member Session was disposed', async () => {
+    const adapter = new TwoGateAdapter()
+    const { ctx, workspaceId, teamFiber } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('lostwake-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const mgr = await ctx.agentTeam.addMember({ requestId: requestId('lostwake-mgr'), workspaceId, handle: 'manager', description: 'Dispatches work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    await ctx.agentTeam.updateMember({ requestId: requestId('lostwake-designate'), memberId: mgr.status.member.memberId, handle: 'manager', description: 'Dispatches work', leader: true })
+    const worker = await ctx.agentTeam.addMember({ requestId: requestId('lostwake-worker'), workspaceId, handle: 'worker', description: 'Executes dispatched work', presetId: 'team-member', channelRefs: [channel.channel.channelRef], contextStartPolicy: 'fresh' })
+    const session0 = worker.status.member.sessionId
+
+    // The Member holds authored history so the judge reads real work; the
+    // dispatched assignment then starts the relevance call, which the adapter
+    // parks mid-flight.
+    const workerAgent = ctx.agents.get(session0)!
+    const authored = await executeToolCall(ctx.tools, workerAgent, ToolCallId('lostwake-author'), 'team_message',
+      { action: 'start', channelRef: channel.channel.channelRef, body: '旧任务：装配 kv_cache_unified.rs 的三跳配置' })
+    expect(authored.isError, authored.isError ? authored.error.message : 'ok').toBe(false)
+    const mgrAgent = ctx.agents.get(mgr.status.member.sessionId)!
+    const dispatched = await ctx.agentTeam.sendMessageForAgent(mgrAgent, { requestId: requestId('lostwake-dispatch'), workspaceId, channelRef: channel.channel.channelRef, body: '新任务：把 README 的安装段落重写成三步 @worker' })
+    expect(dispatched.kind).toBe('committed')
+    await adapter.gates[0]!.started.promise
+
+    // The shape that killed the Host: the judgement outlives its Team. A
+    // rollback (a failed co-plugin, a restart) disposes the fiber, detaching
+    // every Member Session while the unawaited judgement body is still in
+    // flight — its wake delivery then meets a Session that can no longer
+    // append. Losing that delivery is recoverable (the durable unread state
+    // re-derives it); an escaping rejection is a fatal process exit.
+    //
+    // Staged deterministically: the parked manager turn keeps its own handle
+    // disposal waiting (a dispose joins every handle, and the loop settles
+    // only when the parked turn ends), so `handles` stays populated after the
+    // idle worker's Session has detached. Releasing the judgement then makes
+    // its tail steer exactly that detached Session.
+    const workerSessionDetached = Promise.withResolvers<void>()
+    ctx.on('session/disposed', (session: { id: SessionId }) => {
+      if (session.id === session0) workerSessionDetached.resolve()
+    })
+    const mgrTurnParked = adapter.gates[1]!
+    mgrAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'hold this turn open' }], source: { kind: 'user' } }))
+    await mgrTurnParked.started.promise
+    const disposing = teamFiber.dispose()
+    await workerSessionDetached.promise
+
+    // notifyMember is private, so the seam is observed through an untyped
+    // prototype view: the staging only pins a real regression if the judgement
+    // tail actually attempts the wake after the Session detached.
+    const wakeAttempts: number[] = []
+    const notifySeam = AgentTeam.prototype as unknown as {
+      notifyMember: (this: AgentTeam, agent: NonNullable<ReturnType<Context['agents']['get']>>, sequenced?: boolean) => void
+    }
+    const originalNotify = notifySeam.notifyMember
+    notifySeam.notifyMember = function (this: AgentTeam, ...args: Parameters<typeof originalNotify>) {
+      wakeAttempts.push(Date.now())
+      return originalNotify.apply(this, args)
+    }
+    const escapedRejections: unknown[] = []
+    const onRejection = (error: unknown): void => { escapedRejections.push(error) }
+    process.on('unhandledRejection', onRejection)
+    try {
+      adapter.gates[0]!.release.resolve()
+      // Let the unawaited body settle and surface any escaped rejection.
+      await new Promise(resolve => setTimeout(resolve, 50))
+    } finally {
+      notifySeam.notifyMember = originalNotify
+      process.off('unhandledRejection', onRejection)
+    }
+    // The parked turn ends only now, so the dispose and this test finish
+    // together; the wake attempt had to land while the handle map was frozen.
+    mgrTurnParked.release.resolve()
+    await disposing
+    expect(wakeAttempts.length).toBeGreaterThan(0)
+    expect(escapedRejections).toEqual([])
+  })
+
+  it('drops a Member handle whose Session was disposed outside the Team lifecycle, and supervises it back', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('extkill-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const mgr = await ctx.agentTeam.addMember({ requestId: requestId('extkill-mgr'), workspaceId, handle: 'manager', description: 'Supervises work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    await ctx.agentTeam.updateMember({ requestId: requestId('extkill-designate'), memberId: mgr.status.member.memberId, handle: 'manager', description: 'Supervises work', leader: true })
+    const worker = await ctx.agentTeam.addMember({ requestId: requestId('extkill-worker'), workspaceId, handle: 'worker', description: 'Executes work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const workerId = worker.status.member.memberId
+    const session0 = worker.status.member.sessionId
+    const mgrAgent = ctx.agents.get(mgr.status.member.sessionId)!
+
+    // The incident shape: a grouping surface (or any teardown the Team
+    // lifecycle did not drive) disposes the Session under its live handle.
+    // The handle must go with it — every reader otherwise keeps reporting a
+    // live Member while appends refuse.
+    ctx.emit('session/disposed', { id: session0 } as never)
+    const after = ctx.agentTeam.members().find(status => status.member.memberId === workerId)!
+    // Narrow primitive asserts: vitest's pretty-format cannot print a live
+    // Agent (cordis scope objects), so failures print fields, not graphs.
+    if (after.availability !== 'unavailable') throw new Error(`expected unavailable after external dispose, received ${after.availability}; diagnostic ${JSON.stringify(after.diagnostic)}`)
+    if (after.diagnostic?.class !== 'activation') throw new Error(`expected an activation diagnostic, received ${JSON.stringify(after.diagnostic)}`)
+    // The Agent teardown rides unawaited behind the sync dispose dispatch;
+    // its registry unregistration is what makes the Member gone for readers.
+    await waitFor(() => ctx.agents.get(session0) === undefined ? true : undefined)
+    if (ctx.agents.get(session0) !== undefined) throw new Error('the disposed Agent is still registered')
+
+    // The DM relay reports the truth — no live session, recovery will pick
+    // the recorded DM up — instead of steering a dead Session.
+    adapter.enqueue(textResponse('Acknowledged.'))
+    await expect(ctx.agentTeam.dmForAgent(mgrAgent, { requestId: requestId('extkill-dm'), workspaceId, recipientMemberId: workerId, body: 'ping' }))
+      .rejects.toThrow(/has no live session/)
+
+    // Supervision now reads the Member as abnormal, so the reset the old
+    // state refused rebuilds it. With no live generation there is nothing to
+    // renew: the rebuild resumes the persisted binding in place — identity,
+    // history, and session id survive; the Agent is live again.
+    for (let turn = 0; turn < 4; turn += 1) adapter.enqueue(textResponse('Back.'))
+    const reset = await ctx.agentTeam.resetMemberForAgent(mgrAgent, { requestId: requestId('extkill-reset'), workspaceId, memberId: workerId })
+    expect(reset.status.availability).toBe('active')
+    const session1 = ctx.agentTeam.members().find(status => status.member.memberId === workerId)!.member.sessionId
+    expect(session1).toBe(session0)
+    expect(ctx.agents.get(session1)).toBeDefined()
+    await waitForIdle(ctx, ctx.agents.get(session1)!)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 

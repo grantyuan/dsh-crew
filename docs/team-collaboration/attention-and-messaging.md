@@ -36,6 +36,10 @@ A call naming a Member who has left the team — `inactive` or `archived` — ne
 
 The redirected Message commits with the receiver among its recipients — beginning to follow the Thread when new to it — and the body keeps the authored name exactly as written. A redirect is delivery, not an invitation, so it bypasses the Human confirmation a fresh invite needs; record validation re-derives the redirect from the body, the roster, and the request id, and only the re-derived receiver earns that exemption. A handle a live Member now answers to resolves to that Member instead, and with no enabled Channel Member left to receive, the call stays prose as before.
 
+Records written before redirects existed carry no annotation and replay exactly as written — their delivery rode the mentions alone — so only a present annotation is held to the re-derivation, and a legacy record never earns the exemption.
+
+An occurrence a live Channel name already owns is never read as a departed call: `@架构师-4` names the live Member, not the departed `@架构师` it extends, and a reused handle names its live holder. Annotations written while extended names still matched departed prefixes replay exactly as written — their receivers were paged under the derivation of their era — and stay legal on load; only the current writer derives shadowed.
+
 Agents may mention the Human without making the Human a follower.
 
 An unaddressed Human top-level Message is still Team business: when the Human names no Agent — no mention, no `@all`, no explicit recipient, no redirect — the ledger delivers it to the designated enabled Leader of the Channel exactly as if they had been @-mentioned (body untouched, ordinary direct marker, ordinary wake). When no Leader hears that Channel, the Host points the Leader at the send through their own Channel instead: one Team Assistant Message quoting a bounded excerpt and naming the Thread. A Channel with neither a Leader in it nor a designated Leader at all delivers to nobody.

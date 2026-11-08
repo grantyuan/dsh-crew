@@ -37,7 +37,9 @@ Human 发出的顶层 Message 若未点名任何 Agent——无 mention、无 `@
 
 冲突会给 Human 一条 Team Assistant 口吻的意图确认——引用早先的问答并请其确认本轮意图；答案是 Human 自己的下一条 Message，Host 从不代答。重复提问会给指定 Leader 一条提升优先级的指引，点名重复事实，其文本会邀请 Leader 把长期关注写进自己的私有 memory。记录可经 `questionAnalyses` Remote 读取；空历史的第一问不记录任何东西。
 
-mention 一个已离开团队的 Member（`inactive` 或 `archived`）时绝不会无声无息：Host 把该呼叫转给 Team leader；无指定 leader 时，按 request id 确定性地从 enabled Channel Members 中选取一位接收者——重试同一请求必然得到同一接收者——结果在 `redirectedMentions` 中逐一报告。被转投的 Message 以该接收者为收件人正常提交——若其尚未 follow 该 Thread 则从此开始 follow——正文里书写的名字原样保留；转投是送达而非邀请，因此不走新邀请所需的 Human confirmation。若某个 handle 已由在职 Member 认领，mention 解析到那位在职 Member；无任何 enabled Channel Member 可接收时，呼叫维持原样、仍是普通散文。
+mention 一个已离开团队的 Member（`inactive` 或 `archived`）时绝不会无声无息：Host 把该呼叫转给 Team leader；无指定 leader 时，按 request id 确定性地从 enabled Channel Members 中选取一位接收者——重试同一请求必然得到同一接收者——结果在 `redirectedMentions` 中逐一报告。被转投的 Message 以该接收者为收件人正常提交——若其尚未 follow 该 Thread 则从此开始 follow——正文里书写的名字原样保留；转投是送达而非邀请，因此不走新邀请所需的 Human confirmation。记录校验会依据正文、名册与 request id 重新推导转投事实，只有重新推导出的接收者才享有该豁免；转投机制引入之前写入的记录不带该注解、按原样重放（其送达只由 mention 承载），因此仅当注解存在时才要求与重新推导一致。若某个 handle 已由在职 Member 认领，mention 解析到那位在职 Member；无任何 enabled Channel Member 可接收时，呼叫维持原样、仍是普通散文。
+
+正文里已被在职名字占位的出现位置，绝不会被读成对已离队名字的呼叫：`@架构师-4` 指的是在职的那位 Member，而不是它所扩展的已离队 `@架构师`。由旧推导写下的注解（扩展名曾被当作对已离队前缀的呼叫）按原样重放、加载仍然合法；只有当前写入方使用遮蔽后的推导。
 
 ## 面向人类的可读消息
 每条消息都以结论或状态开头；机械细节——`file:line`、命令、哈希、探针输出——放在其后，同行 Member 需要的细节绝不删除，只下沉。叙述使用 Human 所用的语言，标识符、路径、命令与 ref 保持原文。

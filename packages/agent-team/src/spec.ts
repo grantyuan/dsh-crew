@@ -386,6 +386,14 @@ const threadReadSnapshotDataSchema = z.object({
   inbox: inboxDeltaSchema,
 }).strict().transform(omitUndefined)
 
+/** One departed-name call with the live Member that received it instead. */
+const mentionRedirectSchema = z.object({
+  memberId: memberIdSchema,
+  handle: z.string().min(1),
+  deliveredToMemberId: memberIdSchema,
+  deliveredToHandle: z.string().min(1),
+}).strict()
+
 /** Closed Agent Team operation union before occurrence stamping. */
 const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -558,6 +566,9 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
       task: taskSchema.optional(),
       thread: threadSchema,
       inbox: inboxDeltaSchema,
+      // Ledgers written before a departed-name call started redirecting omit
+      // the field; the replay re-derivation owns the era distinction.
+      redirectedMentions: z.array(mentionRedirectSchema).optional(),
     }).strict().transform(omitUndefined),
   }).strict(),
   z.object({
@@ -572,6 +583,7 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
       task: taskSchema.optional(),
       thread: threadSchema,
       inbox: inboxDeltaSchema,
+      redirectedMentions: z.array(mentionRedirectSchema).optional(),
     }).strict().transform(omitUndefined),
   }).strict(),
   z.object({

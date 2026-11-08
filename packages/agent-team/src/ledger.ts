@@ -4674,17 +4674,35 @@ export class AgentTeamLedger {
    * `validateMessageInbox` (a Member reply pulling a fresh receiver into the
    * Thread) is only legal when a real departed-name call in the body pays for
    * it, so the ledger re-derives rather than trusting the annotation.
+   *
+   * Ledgers written before a departed-name call started redirecting carry no
+   * annotation, and the projection replays them exactly as written — the
+   * delivery rode the mentions alone, which is what every later record of
+   * that era was written against. That legacy shape stays legal on load, and
+   * it claims no exemption in `validateMessageInbox`; only a present
+   * annotation is held to the re-derivation, so anything else is a forgery.
+   *
+   * One narrower era rides the same tolerance: records written while the
+   * departed-name scan still matched handle prefixes (`@架构师-4` reading as
+   * the departed `@架构师` it extends) store redirects the shadowed
+   * derivation no longer produces. They were legal under the derivation of
+   * their era, so replay accepts exactly the permissive shape —
+   * {@linkcode redirectedMentionsFromLegacy} — and nothing looser.
    */
   private validateMentionRedirects(
     operation: AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation,
     projection: Projection,
   ): void {
+    const stored = operation.data.redirectedMentions
+    if (stored === undefined) return
     const channel = projection.channels.get(operation.data.message.channelRef)
     if (channel === undefined) throw new Error('invalid Message mention redirect')
     const expected = this.redirectedMentionsFrom(projection, operation.actor.memberId, channel,
       operation.data.message.body, operation.requestId)
-    const stored = operation.data.redirectedMentions ?? []
-    if (!isDeepStrictEqual(stored, expected)) throw new Error('invalid Message mention redirect')
+    if (isDeepStrictEqual(stored, expected)) return
+    const legacyExpected = this.redirectedMentionsFromLegacy(projection, operation.actor.memberId, channel,
+      operation.data.message.body, operation.requestId)
+    if (!isDeepStrictEqual(stored, legacyExpected)) throw new Error('invalid Message mention redirect')
   }
 
   private apply(operation: AgentTeamOperation): void {
@@ -6124,7 +6142,53 @@ export class AgentTeamLedger {
     return this.redirectedMentionsFrom(this.state, sender, channel, body, requestId)
   }
 
+  /**
+   * The redirect derivation commits write and replay validates against: a
+   * departed name is called only where the body genuinely names it. The
+   * departed handle is scanned alone, but an occurrence the live Channel
+   * names already own is shadowed — `@架构师-4` is the live Member it
+   * names, never the departed `@架构师` it extends, and `@ghost` belongs to
+   * the live holder of a reused handle. Only an occurrence outside every
+   * live-owned span stays a real departed-name call.
+   */
   private redirectedMentionsFrom(
+    projection: Projection,
+    sender: AgentTeamMemberId,
+    channel: AgentTeamChannel,
+    body: string,
+    requestId: AgentTeamRequestId,
+  ): readonly AgentTeamMentionRedirect[] {
+    const liveMatches = scanBodyHandles(body,
+      this.mentionCandidatesFrom(projection, channel.channelRef).map(candidate => candidate.handle))
+    const called = [...projection.members.values()].filter(member =>
+      (member.state === 'inactive' || member.state === 'archived')
+      && member.memberId !== sender
+      && this.participatesInFrom(projection, member.memberId, channel.workspaceId)
+      && scanBodyHandles(body, [member.handle]).some(match =>
+        !liveMatches.some(live => match.start >= live.start && match.end <= live.end)))
+    if (called.length === 0) return Object.freeze([])
+    const pool = [...(projection.memberships.get(channel.channelRef) ?? new Set<AgentTeamMemberId>())]
+      .filter(memberId => memberId !== sender && memberId !== AGENT_TEAM_HUMAN_MEMBER_ID
+        && projection.members.get(memberId)?.state === 'enabled')
+      .sort()
+    const leaders = pool.filter(memberId => projection.members.get(memberId)?.leader === true)
+    const delegates = leaders.length > 0 ? leaders : pool
+    if (delegates.length === 0) return Object.freeze([])
+    const deliveredTo = delegates[fnv1a(requestId) % delegates.length]!
+    return Object.freeze(called.map(member => Object.freeze({
+      memberId: member.memberId, handle: member.handle,
+      deliveredToMemberId: deliveredTo, deliveredToHandle: projection.members.get(deliveredTo)!.handle,
+    })))
+  }
+
+  /**
+   * The derivation builds before prefix shadowing wrote: each departed handle
+   * was scanned alone, so `@架构师-4` matched the departed `@架构师` it
+   * prefixes whenever no live Member carried the exact base name. Replay keeps
+   * accepting exactly this shape for records of that era
+   * ({@linkcode validateMentionRedirects}); commits never produce it again.
+   */
+  private redirectedMentionsFromLegacy(
     projection: Projection,
     sender: AgentTeamMemberId,
     channel: AgentTeamChannel,

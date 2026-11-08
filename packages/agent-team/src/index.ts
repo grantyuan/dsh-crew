@@ -1381,6 +1381,44 @@ export default class AgentTeam extends TypertRemoteService {
       // the projection (not this listener) decides what that means.
       this.contextManagement.onSessionEvent(memberId, handle.agent, event)
     })
+    // A Member Session disposed under a live handle — a grouping surface
+    // closing or archiving it, a storage retirement, any teardown the Team
+    // lifecycle did not drive — must not leave the handle standing: presence,
+    // supervision, and the DM relay would keep reporting a live Member while
+    // every append refuses. Detachment is permanent for a Session, so the only
+    // truthful runtime state is no handle; the activation diagnostic tells the
+    // Human why and points at restart. Sanctioned disposals never reach this:
+    // every Team-driven path deletes the session→Member mapping before it
+    // disposes, and the dispose effect flips `accepting` first.
+    this.ctx.on('session/disposed', session => {
+      if (!this.accepting) return
+      const memberId = this.memberBySessionId.get(session.id)
+      if (memberId === undefined) return
+      const handle = this.handles.get(memberId)
+      if (handle === undefined || handle.agent.session.id !== session.id) return
+      this.handles.delete(memberId)
+      this.memberBySessionId.delete(session.id)
+      this.recovery.stopTracking(memberId)
+      this.memberRuntime.forgetMember(memberId)
+      this.responseGuard.forgetMember(memberId)
+      this.truncationEscalation.forgetMember(memberId)
+      this.clearMemberNotificationState(memberId)
+      // The Agent may still be running against the detached Session; its
+      // disposal is the same cleanup suspend performs. The store's dispose
+      // dispatch is synchronous and observe-only, so the teardown rides
+      // unawaited with its failure contained — the Member is already
+      // unavailable by the time it settles.
+      void handle.dispose().catch(error => {
+        this.ctx.logger.warn(`agent-team: disposing member '${this.memberLabel(memberId)}' after its Session was disposed failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      this.setActivationDiagnostic(memberId, {
+        class: 'activation',
+        detail: 'the Member\'s Session was disposed outside the Team lifecycle (closed or archived as a Session); restart the Member to rebuild it',
+        sessionId: session.id,
+      })
+      const stored = this.ledger?.getMember(memberId)
+      if (stored !== undefined) this.emitMemberPresenceChanged(stored)
+    })
     // Claim the single-writer authority before opening the domain: any older
     // live ledger for this storage is superseded from here on, and its own
     // next ledger call fails the fence instead of interleaving a fork.
@@ -2676,7 +2714,7 @@ export default class AgentTeam extends TypertRemoteService {
       if (this.pendingPolicyResets.has(memberId)) return
     }
     const current = this.handles.get(memberId)
-    if (current !== undefined) this.notifyMember(current.agent)
+    if (current !== undefined) this.notifyMemberUnawaited(current.agent)
   }
 
   /**
@@ -2755,7 +2793,7 @@ export default class AgentTeam extends TypertRemoteService {
       // after a renewal the live handle is the fresh generation, exactly
       // where the dispatch belongs.
       const latest = this.handles.get(memberId)
-      if (latest !== undefined) this.notifyMember(latest.agent)
+      if (latest !== undefined) this.notifyMemberUnawaited(latest.agent)
     }
   }
 
@@ -4853,6 +4891,24 @@ export default class AgentTeam extends TypertRemoteService {
       this.requireAccepting()
       this.clearMemberFailure(request.memberId, 'runtime')
       this.clearMemberFailure(request.memberId, 'compaction')
+      // A Member whose generation is already gone — an activation that failed
+      // mid-window, or a Session disposed outside the Team lifecycle — has
+      // nothing to renew. The reset rebuilds the binding in place instead:
+      // resume the persisted Session, or recreate it under the recorded id
+      // when its log was lost with the detachment. The ordinary activation
+      // delivers the wake; the reset notice keeps the supervise voice.
+      if (this.handles.get(request.memberId) === undefined) {
+        const stored = this.requireLedger().getMember(request.memberId)!
+        this.ctx.logger.warn(`agent-team: supervision reset rebuilds member '${stored.handle}' without a live generation`)
+        await this.activateMember(stored)
+        const rebuilt = this.handles.get(request.memberId)
+        if (rebuilt === undefined) {
+          throw new Error(`Agent Member '${stored.handle}' failed to rebuild its Session: ${this.memberFailures.get(request.memberId)?.activation?.detail ?? 'unknown error'}`)
+        }
+        this.notifyMemberContextReset(rebuilt.agent, stored, 'teammate')
+        this.notifyMember(rebuilt.agent)
+        return
+      }
       await this.renewMemberContextNow(request.memberId, request.requestId, 'teammate')
     })
     return Object.freeze({ status: this.memberStatus(this.requireLedger().getMember(request.memberId)!) })
@@ -4904,7 +4960,13 @@ export default class AgentTeam extends TypertRemoteService {
       if (handle.agent.status === 'idle') handle.agent.followup(message)
       else handle.agent.steer(message)
     } catch (error) {
-      throw new AgentTeamDmDeliveryError(recipient.memberId, recipient.handle, `DM recorded but not delivered: ${error instanceof Error ? error.message : String(error)}`)
+      const raw = error instanceof Error ? error.message : String(error)
+      // A Session disposed under its handle refuses appends with the store's
+      // detachment error; name the repair instead of surfacing the raw seam.
+      const reason = raw.includes('cannot append outside a SessionStore')
+        ? 'DM recorded but not delivered: the Member\'s Session was disposed outside the Team lifecycle — restart the Member (or reset its context through supervision) and resend; the DM is already in its history'
+        : `DM recorded but not delivered: ${raw}`
+      throw new AgentTeamDmDeliveryError(recipient.memberId, recipient.handle, reason)
     }
     return result.value
   }
@@ -6613,6 +6675,14 @@ export default class AgentTeam extends TypertRemoteService {
       // first and rederives the Inbox afterwards.
       if (options?.deferNotify !== true) this.notifyMember(created.agent, recoveryCarried > 0)
     } catch (error) {
+      // A failure after `handles.set()` leaves the just-created handle pointing
+      // at a disposed Session. The mapping goes first so neither this dispose
+      // nor the session/disposed listener can race a stale entry back into
+      // presence, supervision, or the DM relay.
+      if (created !== undefined && this.handles.get(member.memberId) === created) {
+        this.handles.delete(member.memberId)
+        this.memberBySessionId.delete(created.agent.session.id)
+      }
       await created?.dispose()
       this.memberRuntime.forgetMember(member.memberId)
       const message = error instanceof Error ? error.message : String(error)
@@ -6849,6 +6919,27 @@ export default class AgentTeam extends TypertRemoteService {
   /** Presence invalidation in every Workspace the Member participates in — each panel listing it must refresh. */
   private emitMemberPresenceChanged(member: AgentTeamAgentMember): void {
     for (const workspaceId of this.requireLedger().workspacesOf(member.memberId)) this.emitPresenceChanged(workspaceId)
+  }
+
+  /**
+   * Wake delivery from an unawaited body (a dispatch judgement's tail, a
+   * scheduled reset's flush). Such a body outlives its trigger: the Member's
+   * Session may have been detached under it by a Host rollback, a restart, or
+   * a lifecycle swap, and appending then throws. Losing the delivery is
+   * recoverable — notifyMember already cleared the delivered signature, so the
+   * durable unread state re-derives this wake on the next committed change —
+   * while an escaping rejection turns into a fatal process exit (dsh reports
+   * every unhandled rejection as a load failure and exits). Failures are
+   * logged, never thrown, matching the fire-and-forget contract of
+   * {@link runFreshStartReset}.
+   */
+  private notifyMemberUnawaited(agent: Agent): void {
+    try {
+      this.notifyMember(agent)
+    } catch (error) {
+      const handle = this.memberForAgent(agent)?.handle ?? agent.id
+      this.ctx.logger.warn(`agent-team: unawaited wake delivery for member '${handle}' was not delivered: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** Wake from durable unread state with bounded facts for direct and state-changing work. */
