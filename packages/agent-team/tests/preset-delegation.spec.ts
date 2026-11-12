@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
+import { loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 
 const root = resolve(import.meta.dirname, '../../..')
 
@@ -46,5 +48,29 @@ describe('team-member delegation preset contract', () => {
     const memberSlice = patch.slice(memberStart, childStart)
     expect(memberSlice).toContain("name: '@grantyuan/dsh-crew/tools'")
     expect(memberSlice).toContain('tool-subagent')
+  })
+
+  it('registers the same child preset definition in the host-plane registry', async () => {
+    // The shipped SubagentRuntime is a host-plane process singleton: it mints
+    // every child agent context in the host realm, so the spawn resolves the
+    // pinned `agentPreset` against the HOST registry — the group-private one
+    // is unreachable from there. The Members' delegation tool still validates
+    // its pin against the private registry it sees, so the definition must be
+    // registered twice, and the YAML alias keeps both rows on one definition.
+    const patch = await readFile(resolve(root, 'cordis.patch.yml'), 'utf8')
+    expect(patch).toContain('config: &team-subagent-preset')
+    expect(patch).toContain('id: wowyuarm-agent-team-preset-team-subagent-host-plane')
+    expect(patch).toContain('config: *team-subagent-preset')
+    const alias = patch.indexOf('config: *team-subagent-preset')
+    const anchor = patch.indexOf('config: &team-subagent-preset')
+    expect(alias).toBeGreaterThan(anchor)
+    const composed = applyEntryPatches([], loadOverlayPatches('delegation topology', resolve(root, 'cordis.patch.yml')), () => {})
+    const inGroup = composed.find(entry => entry.id === 'wowyuarm-agent-team-scope')
+    const groupRows = (Array.isArray(inGroup?.config) ? inGroup.config : []) as { id?: string; config?: unknown }[]
+    const groupChild = groupRows.find(entry => entry.id === 'wowyuarm-agent-team-preset-team-subagent')
+    const hostChild = composed.find(entry => entry.id === 'wowyuarm-agent-team-preset-team-subagent-host-plane')
+    // One definition: the alias row shares the in-group row's config object.
+    expect(groupChild).toBeDefined()
+    expect(hostChild?.config).toBe(groupChild?.config)
   })
 })

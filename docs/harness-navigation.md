@@ -68,7 +68,7 @@ dsh plugin --profile team-demo add /absolute/path/to/dsh-crew
 dsh --profile team-demo
 ```
 
-`cordis.patch.yml` exposes `dsh.bundle.patch`, mounting Host, Client, and invariant rows in `wowyuarm-agent-team-scope` and declaring the Team preset registry and the `team-member` definition row inside `isolate.agentPresets`. Ordinary DSH rosters are unchanged.
+`cordis.patch.yml` exposes `dsh.bundle.patch`, mounting Host, Client, and invariant rows in `wowyuarm-agent-team-scope` and declaring the Team preset registry and the `team-member` definition row inside `isolate.agentPresets`. Ordinary DSH rosters are unchanged except the host-plane `team-subagent` child preset (see Tools and preset): the host-plane SubagentRuntime resolves spawn presets outside the isolated registry.
 
 Verification order is `npm run typecheck`, `npm test`, `npm run build`, `npm pack --dry-run`, and browser tests for browser/bundle changes. Manual preview uses `npm run preview`; check ordinary Sessions for absence of Team tools, guidance, and UI. Do not commit temporary overlays, browser tests, or generated files to Harness.
 

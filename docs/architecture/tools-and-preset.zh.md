@@ -4,6 +4,10 @@
 
 显式的 `team-member` preset 是唯一的 Team Member composition。它加入完整 coding capability rows（shell、filesystem/search、web search 与 fetch、background jobs、skill 加载工具、todo、compaction）；skill 发现本身不是 preset row——每个 Member 的 provider 由 Host 注册在其 agent scope 上（见 Host authority）、Team collaboration guidance/tools、Harness Workspace instruction discovery 和有界的 private-memory reference context。普通 Sessions 留在这个 isolated roster 之外，不会获得 Team prompt sections、tools 或 Member memory。
 
+委派引入一个 child preset：`team-subagent`，纯工作型 delegated worker，带完整 coding tools，不带任何 Team tools 与 Team 身份（见 Host authority）。Harness 的 SubagentRuntime 是 host-plane 进程单例——每个 child agent context 都由它在 host realm 中创建——因此 spawn 出的子智能体只能从 host-plane 注册表解析它锁定的 preset，`team-member` preset 所在的组内私有注册表在那里不可达。
+
+bundle 因此把同一份定义注册两次（一个 YAML anchor，`cordis.patch.yml` 里两行）：host-plane 行是子智能体实际组合的，组内行是 Member 的 `tool-subagent` 行校验锁定的对象，两行都不可删。这是记录在案的 Harness 限制——没有公开扩展点能让 isolated registry 为 spawn 子智能体提供 preset。代价是普通 preset roster 会列出 `team-subagent`；用它组合普通 Session 得到的是纯 worker，永远不会是 Team Member。
+
 每个 Member 还可携带一段 custom role paragraph：ledger 画像的 `customPrompt`，由 Host 限制在 8192 个 UTF-8 字节内、空白归一化为缺省（见 Host authority）。激活时它作为一个 scoped `systemPrompt.section`（`team:member-prompt`，排在既有 sections 之后）注册在 Member 自己的 agent scope 上，因此保持成员隔离，普通 Sessions 永远看不到它。编辑在与 tool、skill 编辑相同的 turn boundary 换装该 section，不续期 Session；段落清空或离开 Team 时解除注册。Human 通过 Web Client 的 Prompt 对话框经 `memberPromptView` Remote 编辑它（见 client-and-remote）。
 
 Section 也可以按 Member 移除。ledger 画像的 `droppedSections` 记录 Human 从该 Member 下一次 assembly 中移除的 section 名；`member-runtime.ts` 为每个 Member 注册一个 scoped `system-prompt/assemble` waterfall listener，把这些名字从 `assembly.sections` 中过滤掉，在与段落相同的 turn boundary 换装这份清单，并在每次激活时重新施加存储的清单，因此 drop 状态跨重启保留。

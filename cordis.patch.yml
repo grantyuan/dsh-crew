@@ -232,7 +232,7 @@
         # further children regardless.
         - id: wowyuarm-agent-team-preset-team-subagent
           name: '@deepseek-ai/dsh-agent-preset'
-          config:
+          config: &team-subagent-preset
             id: team-subagent
             description: "Plain delegated worker for a Team Member: does the sub-task and reports back to its parent; never speaks for the team."
             plugins:
@@ -286,6 +286,22 @@
             # same location, and a user-layer patch overriding this row's whole
             # config must restate it or the Host silently runs unfenced.
             ledgerDirectory: !!js dshHomePath('storages')
+    # The same child preset again, in the host plane's own registry. The
+    # shipped SubagentRuntime is a host-plane process singleton: it mints
+    # every child agent context in the host realm, so a spawn resolves its
+    # pinned `agentPreset` against the HOST registry — the group-private
+    # one above is unreachable from there, and the delegation fails with
+    # `agent-preset/not-found`. The in-group row still cannot be dropped:
+    # the Members' `tool-subagent` row validates its pin against the
+    # registry its own composition sees, which is the private one, so a
+    # host-plane-only row fails Member activation instead. The alias keeps
+    # both registrations on one definition; a user-layer override replaces
+    # one row's whole config, so it must target the registry the intent
+    # concerns. The cost of the host registration: the ordinary preset
+    # roster lists `team-subagent` beside the shipped presets.
+    - id: wowyuarm-agent-team-preset-team-subagent-host-plane
+      name: '@deepseek-ai/dsh-agent-preset'
+      config: *team-subagent-preset
     - id: wowyuarm-agent-team-client
       name: '@grantyuan/dsh-crew'
     # Team-owned ledger divergence guard. Harness retired its runtime invariant
