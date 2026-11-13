@@ -167,9 +167,9 @@ Record candidate tag, symptom, affected interface, reproduction command, and nex
 
 ## 6. Current baseline
 
-The current certified baseline is DSH `0.2.1-rc.3`; the paragraphs below preserve the history that produced the preceding baselines.
+The current certified baseline is DSH `0.2.2-rc.2`; the paragraphs below preserve the history that produced the preceding baselines.
 
-The DSH peers state exactly that certified line, `>=0.2.1-alpha.2 <0.2.2`, so a line this repository has not verified falls outside the declared range instead of installing under an unverified compatibility claim.
+The DSH peers state exactly that certified line, `>=0.2.2-rc.2 <0.2.3`, so a line this repository has not verified falls outside the declared range instead of installing under an unverified compatibility claim.
 
 The routed sqlite backend is a vendored fork, not a dependency at all (GitHub issue #28): the upstream package stays a devDependency pinned at the fork source, 0.1.5-rc.2, as the byte-compatibility fixture reference, and every compat round diffs the fork against that version's file before anything else.
 
@@ -344,3 +344,29 @@ npm drags a second generation in: the regular dependency `@wowyuarm/dsh-context-
 No published engine release names this line yet — `0.2.0`, `0.2.1` and `0.3.0` all still declare `<0.2.1` — so the gap is recorded rather than papered over.
 
 The close is the same as the `0.2.0-rc.1` round: raise the dependency floor to an engine whose peers admit the host, in the window that engine's own move ships.
+
+### DSH 0.2.2-rc.2
+
+DSH `0.2.2-rc.2` is certified and moves the baseline. Tag `dsh-v0.2.2-rc.2` (2026-11-11) carries the release; npm `next` pointed at the candidate while `latest` stayed on `0.2.2-rc.1`, so the round was not release-blocking. The published-bundle viability check is vacuous for now: no Team bundle has been published to npm yet, so there is no released bundle a candidate could break.
+
+The candidate falls outside `>=0.2.1-rc.3 <0.2.2` — a `0.2.1`-based comparator reaches no `0.2.2` cut — and section 4 requires the atomic move: all 46 `@deepseek-ai/dsh-*` peers to `>=0.2.2-rc.2 <0.2.3`, the CI harness tag and the Hoplite tag to `dsh-v0.2.2-rc.2`, and every wording spot that names the range in the same cut.
+
+The `@deepseek-ai/cordis` peer moved with the line it binds to, `~4.0.5-alpha.1` → `~4.1.0`, the range this line's packages declare for themselves. `zod` moved to an exact `4.6.6` pin — the version the line ships: the Host analyzer unifies Team and Host zod types only at one version, and `^4.6.6` resolving `4.6.7` still failed it, so the pin is the floor that keeps one zod generation in every resolving tree.
+
+Two upstream changes moved Team source. `LlmError`'s `code` parameter narrowed back to `BuiltinLlmFailureCode` — the `string` widening rc.3 carried is gone — and the three finish-failure re-raise sites now call `LlmError.fromFailure`, the constructor the same class ships for exactly that ("a stream's terminal chunk").
+
+The other moved the Session header's context-menu trigger behind the `ui-context-menu` module's standard-root props, so the client bench mounts that module and the conversation seat receives the production hook; the sidebar owner share also gained a required `drawer` flag, which the bench fixture passes as `false`.
+
+The rest of the consumed surface moved without touching bundle source: `agent-preset-registry` refactored its projection internals behind an unchanged remote face, the Typert resource declaration gained an optional `resolve` identity extractor the Team does not use, and session-persistence's snapshot gained an optional diagnostic `SessionLocation`.
+
+The `panelList` anchor the pinning test holds on still exists under `SidebarRoot`'s `src/client/` path.
+
+One committed snapshot refreshed onto the certified markup, and the narrow-viewport journey legs moved with the drawer era: the collapsed state opens through the new `data-sidebar-opener` control (the drawer's own toggle renders beside it, so the old accessible-name locator resolved two buttons), and the collapsed-frame width poll now bounds the drawer by the viewport instead of the retired rail.
+
+`drawer || …` keeps the owner `wide` through the whole narrow cut, so the team browser renders its card surface in the drawer and the old rail never mounts. A folded column's content is inert under the certified sidebar, so the desktop leg re-opens the Inbox page through the card before its keyboard assertions.
+
+The vendored sqlite fork re-synced to this tag's `index.ts` and `unit.ts` — upstream added rollback-failure retention, `compatibleVersions` stamp acceptance, and the batch `deleteRecords` primitive — with `schema.ts` unchanged upstream and still at its cut; the fork diff against the pinned `0.1.5-rc.2` files remains the accumulated upstream delta plus the fork headers.
+
+Evidence on the certified tree: `npm run typecheck` (581 Harness mappings), `npm test` (1312 passed, 1 skipped), `npm run lint`, `npm run build`, `npm pack --dry-run`, `git diff --check`, and `npm run test:browser`.
+
+The engine gap persists unchanged: the newest `@wowyuarm/dsh-context-continuity` (`0.3.0`) still declares its DSH peers as `>=0.2.0-rc.1 <0.2.1`, so an npm resolution beside the candidate drags a second, unsatisfiable generation in — recorded as the `0.2.1-alpha.2` round recorded it, to be closed by the engine's own move.

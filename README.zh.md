@@ -33,13 +33,13 @@ dsh-crew 基于 [dsh-agent-team](https://github.com/wowyuarm/dsh-agent-team) 扩
 
 ### 1. 检查 DSH
 
-当前版本已针对 DSH `0.2.1-rc.3` 完成认证。请显式指定 DSH 版本，而不要跟随 `latest`：不指定版本时可能解析到本 bundle 声明区间之外的宿主线（其 peer 要求 `>=0.2.1-rc.3 <0.2.2`）。
+当前版本已针对 DSH `0.2.2-rc.2` 完成认证。请显式指定 DSH 版本，而不要跟随 `latest`：不指定版本时可能解析到本 bundle 声明区间之外的宿主线（其 peer 要求 `>=0.2.2-rc.2 <0.2.3`）。
 
 ```sh
-npx @deepseek-ai/dsh@0.2.1-rc.3 web
+npx @deepseek-ai/dsh@0.2.2-rc.2 web
 ```
 
-需要下面步骤里的 `dsh` 命令就全局安装：`npm i -g @deepseek-ai/dsh@0.2.1-rc.3`。
+需要下面步骤里的 `dsh` 命令就全局安装：`npm i -g @deepseek-ai/dsh@0.2.2-rc.2`。
 
 先停止它，再把 Team bundle 安装到 `web` profile：
 

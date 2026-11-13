@@ -1981,7 +1981,7 @@ export default class AgentTeam extends TypertRemoteService {
     // adapter ignored the signal and streamed to completion.
     if (linked.aborted) throw new Error('curation call was cancelled or timed out')
     const finish = assembler.finish
-    if (finish.kind === 'error' || finish.kind === 'aborted') throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+    if (finish.kind === 'error' || finish.kind === 'aborted') throw LlmError.fromFailure(finish.failure)
     if (finish.kind === 'max-tokens') throw new Error('curation reply was truncated at the token cap')
     const text = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('')
     const parsed = parseCurateProposal(text, isProtectedPromptSection)
@@ -4635,7 +4635,7 @@ export default class AgentTeam extends TypertRemoteService {
     // adapter ignored the signal and streamed to completion.
     if (linked.aborted) throw new Error('digest call was cancelled or timed out')
     const finish = assembler.finish
-    if (finish.kind === 'error' || finish.kind === 'aborted') throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+    if (finish.kind === 'error' || finish.kind === 'aborted') throw LlmError.fromFailure(finish.failure)
     if (finish.kind === 'max-tokens') throw new Error('digest reply was truncated at the token cap')
     const text = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('')
     const parsed = parseThreadDigest(text)
@@ -6189,7 +6189,7 @@ export default class AgentTeam extends TypertRemoteService {
         maxTokens: QUESTION_ANALYSIS_MAX_TOKENS, signal,
       })) assembler.push(chunk)
       const finish = assembler.finish
-      if (finish.kind === 'error' || finish.kind === 'aborted') throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+      if (finish.kind === 'error' || finish.kind === 'aborted') throw LlmError.fromFailure(finish.failure)
       if (finish.kind === 'max-tokens') throw new Error('question analysis reply was truncated at the token cap')
       const text = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('')
       const parsed = parseQuestionAnalysis(text, past.length)

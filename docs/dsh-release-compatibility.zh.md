@@ -226,9 +226,9 @@ Harness 随附一套 experimental Agent Teams，以独立 profile bundle 形式�
 
 ## 6. 当前基线
 
-当前 Team bundle 的已认证基线是 DSH `0.2.1-rc.3`；以下几段保留产生前几条基线的历史。
+当前 Team bundle 的已认证基线是 DSH `0.2.2-rc.2`；以下几段保留产生前几条基线的历史。
 
-DSH peers 正好声明这条已认证线：`>=0.2.1-alpha.2 <0.2.2`，因此本仓库尚未验证的线会落在声明区间之外，而不是以未经认证的兼容性声明被装上。
+DSH peers 正好声明这条已认证线：`>=0.2.2-rc.2 <0.2.3`，因此本仓库尚未验证的线会落在声明区间之外，而不是以未经认证的兼容性声明被装上。
 
 经路由的 sqlite 后端是 vendored fork，根本不是 dependency（GitHub issue #28）：上游包只以 devDependency 钉在 fork 来源版本 0.1.5-rc.2，用作字节兼容 fixture 参照；每次兼容认证先把 fork 与该版本文件对一遍 diff，再做其他事。
 
@@ -421,3 +421,31 @@ npm 会把这个不满足的区间自动装到 engine 旁边，而该 engine 以
 目前没有任何已发布的 engine 版本写明这条线——`0.2.0`、`0.2.1`、`0.3.0` 都还是 `<0.2.1`——所以这个缺口记录在案，不做粉饰。
 
 关闭方式与 `0.2.0-rc.1` 那轮相同：等 engine 自己移动区间的窗口，把依赖下限抬到 peers 能容纳宿主的版本。
+
+### DSH 0.2.2-rc.2
+
+DSH `0.2.2-rc.2` 完成认证并移动基线。release 由 tag `dsh-v0.2.2-rc.2`（2026-11-11）承载；认证时 npm `next` 已指向候选而 `latest` 仍在 `0.2.2-rc.1`，本轮不构成发布阻塞。
+
+「已发布 bundle 可用性」检查目前是空集：Team bundle 尚未在 npm 发布过，不存在会被候选破坏的已发布版本。
+
+候选落在 `>=0.2.1-rc.3 <0.2.2` 之外——基于 `0.2.1` 的比较器够不到任何 `0.2.2` cut——第 4 节要求原子移动：46 个 `@deepseek-ai/dsh-*` peers 一起移到 `>=0.2.2-rc.2 <0.2.3`，CI harness tag 与 Hoplite tag 移到 `dsh-v0.2.2-rc.2`，写明该线的措辞位点同一批移动。
+
+`@deepseek-ai/cordis` peer 随所绑的线一起动：`~4.0.5-alpha.1` → `~4.1.0`，即这条线的包为自己声明的区间。
+
+`zod` 移为精确 `4.6.6` pin——这条线发布的版本：Host 分析器只在同一版本上统一 Team 与 Host 的 zod 类型，`^4.6.6` 解析到 `4.6.7` 仍会失败，这个 pin 就是让每棵解析树只持有一代 zod 的地板。
+
+两处 upstream 变化移动了 Team 源码。`LlmError` 的 `code` 参数收回到 `BuiltinLlmFailureCode`——rc.3 带的 `string` 放宽已不存在——三处 finish-failure 重新抛出改为调用 `LlmError.fromFailure`，同类为这个场景准备的构造入口。
+
+另一处把 Session 头部的右键菜单触发移到了 `ui-context-menu` 模块的 standard-root props 之后，client bench 改为挂载该模块，让 conversation 席位拿到生产 hook；sidebar owner 共享新增必填 `drawer` 标志，bench fixture 以 `false` 传入。
+
+其余消费面的移动没有触碰 bundle 源码：`agent-preset-registry` 在不变的 remote face 后重构 projection 内部，Typert 资源声明增加了 Team 未使用的可选 `resolve` 提取器，session-persistence 的 snapshot 增加了可选诊断字段 `SessionLocation`。
+
+pinning 测试锚定的 `panelList` 仍在 `SidebarRoot` 的 `src/client/` 路径下。一份已提交快照刷新到认证时代的标记，窄视口 journey 也随 drawer 时代移动：收起态改经新的 `data-sidebar-opener` 控件展开（390 宽度下 drawer 自己的 toggle 会渲染在旁边，旧的可达名定位器会命中两个按钮），收起态宽度断言改为按视口上限收窄 drawer 而不是已退役的 56px rail。
+
+`drawer || …` 让 owner 在整个窄 cut 保持 `wide`：team 浏览器以卡片面渲染进 drawer、旧 rail 不再挂载；折叠后的栏内容是 inert 的，桌面段先经卡片重开 Inbox 页再做键盘断言。
+
+vendored sqlite fork 重新同步到本 tag 的 `index.ts` 与 `unit.ts`——upstream 增加了回滚失败保留、`compatibleVersions` 版本戳接受、批量 `deleteRecords` 原语——`schema.ts` upstream 无变化；fork 与钉住的 `0.1.5-rc.2` 文件的 diff 仍是累计 upstream 增量加上 fork 头部。
+
+认证树上的证据：`npm run typecheck`（581 个 Harness 映射）、`npm test`（1312 通过，1 跳过）、`npm run lint`、`npm run build`、`npm pack --dry-run`、`git diff --check`、`npm run test:browser`。
+
+engine 缺口照旧：最新的 `@wowyuarm/dsh-context-continuity`（`0.3.0`）仍声明 `>=0.2.0-rc.1 <0.2.1`，npm 在候选旁解析仍会拖进第二代——与 `0.2.1-alpha.2` 那轮一样记录在案，等 engine 自己的移动来关闭。

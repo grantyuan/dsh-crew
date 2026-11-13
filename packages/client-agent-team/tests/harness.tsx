@@ -10,6 +10,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { SlotTestRuntime, stubConfigForm } from '@deepseek-ai/dsh-client-test-runtime'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import { apply as applySidebar, inject as injectSidebar } from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import { apply as applyContextMenu, inject as injectContextMenu } from '@deepseek-ai/dsh-client-ui-context-menu/client'
 import { apply as applyConversation, inject as injectConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { apply, inject } from '../src/client/index.ts'
 
@@ -27,7 +28,7 @@ function Frame({ renderSlot }: FrameProps) {
   const [collapsed, setCollapsed] = useState(false)
   return <>
     <button type="button" data-test-control onClick={() => { setCollapsed(value => !value) }}>Toggle fixture sidebar</button>
-    {renderSlot('sidebar', { collapsed, width: collapsed ? 56 : 280 })}
+    {renderSlot('sidebar', { collapsed, width: collapsed ? 56 : 280, drawer: false })}
     {renderSlot('main', {}, { entryKey: 'conversation' })}
     {renderSlot('rightbar', { width: 400, viewportWidth: 1440, canShow: true })}
     {renderSlot('shell.overlay', {})}
@@ -823,6 +824,10 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
       },
     },
   } as never, TeamTabHost as never)
+  // rc.2.2 moves the Session header's context-menu trigger behind the shipped
+  // context-menu module's standard-root props; the bench mounts the real
+  // module so the conversation seat receives the production hook.
+  await runtime.mount({ inject: [...injectContextMenu], apply: applyContextMenu })
   await runtime.mount({ inject: [...injectSidebar], apply: applySidebar })
   // The shipped ConversationRoot occupies the conversation seat — the same
   // surface production mounts — so member-session specs assert the

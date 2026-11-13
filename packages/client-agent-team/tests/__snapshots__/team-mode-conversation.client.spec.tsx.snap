@@ -68,6 +68,7 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
           <button
             aria-label="打开侧边栏"
             class="iconButton toggle"
+            data-sidebar-toggle="true"
             type="button"
           >
             <svg
@@ -99,508 +100,526 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
           </span>
         </button>
         <div
-          class="regionArea"
+          class="scrollRegion"
         >
           <div
-            data-slot="sidebar.workspaces"
-            style="display: contents;"
+            class="scrollArea"
+            data-sidebar-scrollport=""
           >
-            <section
-              aria-label="工作区"
-              class="workspaceBrowser"
+            <div
+              class="regionArea"
             >
-              <button
-                aria-label="收件箱"
-                class="inboxCard"
-                type="button"
+              <div
+                data-slot="sidebar.workspaces"
+                style="display: contents;"
               >
-                <span
-                  class="inboxMark"
+                <section
+                  aria-label="工作区"
+                  class="workspaceBrowser"
                 >
-                  <svg
-                    aria-hidden="true"
-                    data-content="4b39aa7b"
-                    data-icon="dsw-icon-queue-outline-regular"
-                    height="16"
-                    width="16"
-                  />
-                </span>
-                <span
-                  class="inboxCardLabel"
-                >
-                  收件箱
-                </span>
-              </button>
-              <button
-                aria-label="任务"
-                class="tasksCard"
-                type="button"
-              >
-                <svg
-                  aria-hidden="true"
-                  data-content="1f8c5fc4"
-                  data-icon="dsw-icon-checklist-outline-regular"
-                  height="16"
-                  width="16"
-                />
-                <span
-                  class="inboxCardLabel"
-                >
-                  任务
-                </span>
-              </button>
-              <button
-                aria-label="消息中心"
-                class="messagesCard"
-                type="button"
-              >
-                <svg
-                  aria-hidden="true"
-                  data-content="9b050d2e"
-                  data-icon="dsw-icon-browse-outline-regular"
-                  height="16"
-                  width="16"
-                />
-                <span
-                  class="inboxCardLabel"
-                >
-                  消息中心
-                </span>
-              </button>
-              <span
-                class="root"
-              >
-                <button
-                  aria-current="page"
-                  aria-expanded="false"
-                  aria-haspopup="menu"
-                  aria-label="工作区，Alpha"
-                  class="workspaceTrigger"
-                  data-team-workspace-trigger="true"
-                  title="Alpha · /work/alpha"
-                  type="button"
-                >
-                  <span
-                    aria-hidden="true"
-                    class="workspaceIcon"
+                  <button
+                    aria-label="收件箱"
+                    class="inboxCard"
+                    type="button"
+                  >
+                    <span
+                      class="inboxMark"
+                    >
+                      <svg
+                        aria-hidden="true"
+                        data-content="4b39aa7b"
+                        data-icon="dsw-icon-queue-outline-regular"
+                        height="16"
+                        width="16"
+                      />
+                    </span>
+                    <span
+                      class="inboxCardLabel"
+                    >
+                      收件箱
+                    </span>
+                  </button>
+                  <button
+                    aria-label="任务"
+                    class="tasksCard"
+                    type="button"
                   >
                     <svg
                       aria-hidden="true"
-                      data-content="7e1820f0"
-                      data-icon="dsw-icon-folder-open-regular"
+                      data-content="1f8c5fc4"
+                      data-icon="dsw-icon-checklist-outline-regular"
                       height="16"
                       width="16"
                     />
-                  </span>
-                  <span
-                    class="workspaceValue"
-                  >
-                    Alpha
-                  </span>
-                  <span
-                    aria-hidden="true"
-                    class="workspaceChevron"
+                    <span
+                      class="inboxCardLabel"
+                    >
+                      任务
+                    </span>
+                  </button>
+                  <button
+                    aria-label="消息中心"
+                    class="messagesCard"
+                    type="button"
                   >
                     <svg
                       aria-hidden="true"
-                      data-content="2a7eaef6"
-                      data-icon="dsw-icon-chevron-down-outline-regular"
-                      height="14"
-                      width="14"
+                      data-content="9b050d2e"
+                      data-icon="dsw-icon-browse-outline-regular"
+                      height="16"
+                      width="16"
                     />
+                    <span
+                      class="inboxCardLabel"
+                    >
+                      消息中心
+                    </span>
+                  </button>
+                  <span
+                    class="root"
+                    style="anchor-name: --dsh-menu-trigger-rmh;"
+                  >
+                    <button
+                      aria-current="page"
+                      aria-expanded="false"
+                      aria-haspopup="menu"
+                      aria-label="工作区，Alpha"
+                      class="workspaceTrigger"
+                      data-team-workspace-trigger="true"
+                      title="Alpha · /work/alpha"
+                      type="button"
+                    >
+                      <span
+                        aria-hidden="true"
+                        class="workspaceIcon"
+                      >
+                        <svg
+                          aria-hidden="true"
+                          data-content="7e1820f0"
+                          data-icon="dsw-icon-folder-open-regular"
+                          height="16"
+                          width="16"
+                        />
+                      </span>
+                      <span
+                        class="workspaceValue"
+                      >
+                        Alpha
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        class="workspaceChevron"
+                      >
+                        <svg
+                          aria-hidden="true"
+                          data-content="2a7eaef6"
+                          data-icon="dsw-icon-chevron-down-outline-regular"
+                          height="14"
+                          width="14"
+                        />
+                      </span>
+                    </button>
                   </span>
-                </button>
-              </span>
-              <div
-                class="workspaceSection"
-              >
-                <div>
                   <div
-                    class="panel"
+                    class="workspaceSection"
                   >
-                    <section
-                      class="section"
-                    >
+                    <div>
                       <div
-                        class="sectionHeader"
+                        class="panel"
                       >
-                        <button
-                          aria-expanded="true"
-                          class="sectionToggle"
-                          type="button"
+                        <section
+                          class="section"
                         >
-                          <svg
-                            aria-hidden="true"
-                            class="sectionChevron"
-                            data-content="2a7eaef6"
-                            data-icon="dsw-icon-chevron-down-outline-regular"
-                            height="14"
-                            width="14"
+                          <div
+                            class="sectionHeader"
+                          >
+                            <button
+                              aria-expanded="true"
+                              class="sectionToggle"
+                              type="button"
+                            >
+                              <svg
+                                aria-hidden="true"
+                                class="sectionChevron"
+                                data-content="2a7eaef6"
+                                data-icon="dsw-icon-chevron-down-outline-regular"
+                                height="14"
+                                width="14"
+                              />
+                              <span
+                                class="sectionTitle"
+                              >
+                                频道
+                              </span>
+                            </button>
+                            <span
+                              class="sectionActions"
+                            >
+                              <button
+                                aria-label="新建频道"
+                                class="iconButton"
+                                type="button"
+                              >
+                                <svg
+                                  aria-hidden="true"
+                                  data-content="c04850e4"
+                                  data-icon="dsw-icon-plus-outline-regular"
+                                  height="14"
+                                  width="14"
+                                />
+                              </button>
+                            </span>
+                          </div>
+                          <p
+                            class="emptyState"
+                          >
+                            还没有频道
+                          </p>
+                          <div
+                            class="channelList"
                           />
-                          <span
-                            class="sectionTitle"
-                          >
-                            频道
-                          </span>
-                        </button>
-                        <span
-                          class="sectionActions"
-                        >
-                          <button
-                            aria-label="新建频道"
-                            class="iconButton"
-                            type="button"
-                          >
-                            <svg
-                              aria-hidden="true"
-                              data-content="c04850e4"
-                              data-icon="dsw-icon-plus-outline-regular"
-                              height="14"
-                              width="14"
-                            />
-                          </button>
-                        </span>
+                        </section>
                       </div>
-                      <p
-                        class="emptyState"
-                      >
-                        还没有频道
-                      </p>
+                    </div>
+                    <div>
                       <div
-                        class="channelList"
-                      />
-                    </section>
+                        class="panel"
+                      >
+                        <section
+                          class="section"
+                        >
+                          <div
+                            class="sectionHeader"
+                          >
+                            <button
+                              aria-expanded="true"
+                              class="sectionToggle"
+                              type="button"
+                            >
+                              <svg
+                                aria-hidden="true"
+                                class="sectionChevron"
+                                data-content="2a7eaef6"
+                                data-icon="dsw-icon-chevron-down-outline-regular"
+                                height="14"
+                                width="14"
+                              />
+                              <span
+                                class="sectionTitle"
+                              >
+                                Agents
+                              </span>
+                            </button>
+                            <span
+                              class="sectionActions"
+                            >
+                              <button
+                                aria-label="添加 Agent"
+                                class="iconButton"
+                                type="button"
+                              >
+                                <svg
+                                  aria-hidden="true"
+                                  data-content="c04850e4"
+                                  data-icon="dsw-icon-plus-outline-regular"
+                                  height="14"
+                                  width="14"
+                                />
+                              </button>
+                            </span>
+                          </div>
+                          <div
+                            class="agentList"
+                          >
+                            <div
+                              draggable="true"
+                            >
+                              <div
+                                class="agentRow"
+                                data-agent-row="true"
+                              >
+                                <button
+                                  aria-label="打开 builder 的会话"
+                                  class="agentSelect"
+                                  type="button"
+                                >
+                                  <span
+                                    aria-label="可用"
+                                    class="agentAvatar"
+                                    role="img"
+                                    style="--team-avatar-hue: 203;"
+                                  >
+                                    B
+                                    <span
+                                      aria-hidden="true"
+                                      class="agentAvatarBadge"
+                                    >
+                                      <span
+                                        aria-hidden="true"
+                                        class="dot"
+                                        data-state="done"
+                                        style="width: 10px; height: 10px;"
+                                      />
+                                    </span>
+                                  </span>
+                                  <span
+                                    class="copy agentCopy"
+                                  >
+                                    <strong>
+                                      builder
+                                    </strong>
+                                    <small>
+                                      builder description
+                                    </small>
+                                  </span>
+                                </button>
+                                <span
+                                  class="rowMenu"
+                                >
+                                  <span
+                                    class="root"
+                                    style="anchor-name: --dsh-menu-trigger-rmv;"
+                                  >
+                                    <button
+                                      aria-expanded="false"
+                                      aria-haspopup="menu"
+                                      aria-label="builder 的操作"
+                                      class="rowMenuButton"
+                                      type="button"
+                                    >
+                                      <svg
+                                        aria-hidden="true"
+                                        data-content="ce3185ff"
+                                        data-icon="dsw-icon-ellipsis-outline-regular"
+                                        height="16"
+                                        width="16"
+                                      />
+                                    </button>
+                                  </span>
+                                </span>
+                              </div>
+                            </div>
+                            <div
+                              draggable="true"
+                            >
+                              <div
+                                class="agentRow"
+                                data-agent-row="true"
+                              >
+                                <button
+                                  aria-label="打开 worker 的会话"
+                                  class="agentSelect"
+                                  type="button"
+                                >
+                                  <span
+                                    aria-label="工作中"
+                                    class="agentAvatar"
+                                    role="img"
+                                    style="--team-avatar-hue: 126;"
+                                  >
+                                    W
+                                    <span
+                                      aria-hidden="true"
+                                      class="agentAvatarBadge"
+                                    >
+                                      <svg
+                                        aria-hidden="true"
+                                        class="spinner"
+                                        data-content="7f45c13b"
+                                        data-state="ongoing"
+                                        height="10"
+                                        viewBox="0 0 24 24"
+                                        width="10"
+                                      />
+                                    </span>
+                                  </span>
+                                  <span
+                                    class="copy agentCopy"
+                                  >
+                                    <strong>
+                                      worker
+                                    </strong>
+                                    <small>
+                                      worker description
+                                    </small>
+                                  </span>
+                                </button>
+                                <span
+                                  class="rowMenu"
+                                >
+                                  <span
+                                    class="root"
+                                    style="anchor-name: --dsh-menu-trigger-rn2;"
+                                  >
+                                    <button
+                                      aria-expanded="false"
+                                      aria-haspopup="menu"
+                                      aria-label="worker 的操作"
+                                      class="rowMenuButton"
+                                      type="button"
+                                    >
+                                      <svg
+                                        aria-hidden="true"
+                                        data-content="ce3185ff"
+                                        data-icon="dsw-icon-ellipsis-outline-regular"
+                                        height="16"
+                                        width="16"
+                                      />
+                                    </button>
+                                  </span>
+                                </span>
+                              </div>
+                            </div>
+                            <div
+                              draggable="true"
+                            >
+                              <div
+                                class="agentRow"
+                                data-agent-row="true"
+                              >
+                                <button
+                                  aria-label="打开 failed 的会话"
+                                  class="agentSelect"
+                                  type="button"
+                                >
+                                  <span
+                                    aria-label="错误: model failed"
+                                    class="agentAvatar"
+                                    role="img"
+                                    style="--team-avatar-hue: 133;"
+                                  >
+                                    F
+                                    <span
+                                      aria-hidden="true"
+                                      class="agentAvatarBadge"
+                                    >
+                                      <span
+                                        aria-hidden="true"
+                                        class="dot"
+                                        data-state="error"
+                                        style="width: 10px; height: 10px;"
+                                      />
+                                    </span>
+                                  </span>
+                                  <span
+                                    class="copy agentCopy"
+                                  >
+                                    <strong>
+                                      failed
+                                    </strong>
+                                    <small>
+                                      failed description
+                                    </small>
+                                  </span>
+                                </button>
+                                <span
+                                  class="rowMenu"
+                                >
+                                  <span
+                                    class="root"
+                                    style="anchor-name: --dsh-menu-trigger-rn5;"
+                                  >
+                                    <button
+                                      aria-expanded="false"
+                                      aria-haspopup="menu"
+                                      aria-label="failed 的操作"
+                                      class="rowMenuButton"
+                                      type="button"
+                                    >
+                                      <svg
+                                        aria-hidden="true"
+                                        data-content="ce3185ff"
+                                        data-icon="dsw-icon-ellipsis-outline-regular"
+                                        height="16"
+                                        width="16"
+                                      />
+                                    </button>
+                                  </span>
+                                </span>
+                              </div>
+                            </div>
+                            <div
+                              draggable="true"
+                            >
+                              <div
+                                class="agentRow"
+                                data-agent-row="true"
+                              >
+                                <button
+                                  aria-label="打开 offline 的会话"
+                                  class="agentSelect"
+                                  disabled=""
+                                  type="button"
+                                >
+                                  <span
+                                    aria-label="不可用: preset missing"
+                                    class="agentAvatar"
+                                    role="img"
+                                    style="--team-avatar-hue: 139;"
+                                  >
+                                    O
+                                    <span
+                                      aria-hidden="true"
+                                      class="agentAvatarBadge"
+                                    >
+                                      <span
+                                        aria-hidden="true"
+                                        class="quiet"
+                                        data-variant="quiet"
+                                        style="width: 10px; height: 10px;"
+                                      />
+                                    </span>
+                                  </span>
+                                  <span
+                                    class="copy agentCopy"
+                                  >
+                                    <strong>
+                                      offline
+                                    </strong>
+                                    <small>
+                                      offline description
+                                    </small>
+                                  </span>
+                                </button>
+                                <span
+                                  class="rowMenu"
+                                >
+                                  <span
+                                    class="root"
+                                    style="anchor-name: --dsh-menu-trigger-rn8;"
+                                  >
+                                    <button
+                                      aria-expanded="false"
+                                      aria-haspopup="menu"
+                                      aria-label="offline 的操作"
+                                      class="rowMenuButton"
+                                      type="button"
+                                    >
+                                      <svg
+                                        aria-hidden="true"
+                                        data-content="ce3185ff"
+                                        data-icon="dsw-icon-ellipsis-outline-regular"
+                                        height="16"
+                                        width="16"
+                                      />
+                                    </button>
+                                  </span>
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </section>
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div>
-                  <div
-                    class="panel"
-                  >
-                    <section
-                      class="section"
-                    >
-                      <div
-                        class="sectionHeader"
-                      >
-                        <button
-                          aria-expanded="true"
-                          class="sectionToggle"
-                          type="button"
-                        >
-                          <svg
-                            aria-hidden="true"
-                            class="sectionChevron"
-                            data-content="2a7eaef6"
-                            data-icon="dsw-icon-chevron-down-outline-regular"
-                            height="14"
-                            width="14"
-                          />
-                          <span
-                            class="sectionTitle"
-                          >
-                            Agents
-                          </span>
-                        </button>
-                        <span
-                          class="sectionActions"
-                        >
-                          <button
-                            aria-label="添加 Agent"
-                            class="iconButton"
-                            type="button"
-                          >
-                            <svg
-                              aria-hidden="true"
-                              data-content="c04850e4"
-                              data-icon="dsw-icon-plus-outline-regular"
-                              height="14"
-                              width="14"
-                            />
-                          </button>
-                        </span>
-                      </div>
-                      <div
-                        class="agentList"
-                      >
-                        <div
-                          draggable="true"
-                        >
-                          <div
-                            class="agentRow"
-                            data-agent-row="true"
-                          >
-                            <button
-                              aria-label="打开 builder 的会话"
-                              class="agentSelect"
-                              type="button"
-                            >
-                              <span
-                                aria-label="可用"
-                                class="agentAvatar"
-                                role="img"
-                                style="--team-avatar-hue: 203;"
-                              >
-                                B
-                                <span
-                                  aria-hidden="true"
-                                  class="agentAvatarBadge"
-                                >
-                                  <span
-                                    aria-hidden="true"
-                                    class="dot"
-                                    data-state="done"
-                                    style="width: 10px; height: 10px;"
-                                  />
-                                </span>
-                              </span>
-                              <span
-                                class="copy agentCopy"
-                              >
-                                <strong>
-                                  builder
-                                </strong>
-                                <small>
-                                  builder description
-                                </small>
-                              </span>
-                            </button>
-                            <span
-                              class="rowMenu"
-                            >
-                              <span
-                                class="root"
-                              >
-                                <button
-                                  aria-expanded="false"
-                                  aria-haspopup="menu"
-                                  aria-label="builder 的操作"
-                                  class="rowMenuButton"
-                                  type="button"
-                                >
-                                  <svg
-                                    aria-hidden="true"
-                                    data-content="ce3185ff"
-                                    data-icon="dsw-icon-ellipsis-outline-regular"
-                                    height="16"
-                                    width="16"
-                                  />
-                                </button>
-                              </span>
-                            </span>
-                          </div>
-                        </div>
-                        <div
-                          draggable="true"
-                        >
-                          <div
-                            class="agentRow"
-                            data-agent-row="true"
-                          >
-                            <button
-                              aria-label="打开 worker 的会话"
-                              class="agentSelect"
-                              type="button"
-                            >
-                              <span
-                                aria-label="工作中"
-                                class="agentAvatar"
-                                role="img"
-                                style="--team-avatar-hue: 126;"
-                              >
-                                W
-                                <span
-                                  aria-hidden="true"
-                                  class="agentAvatarBadge"
-                                >
-                                  <svg
-                                    aria-hidden="true"
-                                    class="spinner"
-                                    data-content="7f45c13b"
-                                    data-state="ongoing"
-                                    height="10"
-                                    viewBox="0 0 24 24"
-                                    width="10"
-                                  />
-                                </span>
-                              </span>
-                              <span
-                                class="copy agentCopy"
-                              >
-                                <strong>
-                                  worker
-                                </strong>
-                                <small>
-                                  worker description
-                                </small>
-                              </span>
-                            </button>
-                            <span
-                              class="rowMenu"
-                            >
-                              <span
-                                class="root"
-                              >
-                                <button
-                                  aria-expanded="false"
-                                  aria-haspopup="menu"
-                                  aria-label="worker 的操作"
-                                  class="rowMenuButton"
-                                  type="button"
-                                >
-                                  <svg
-                                    aria-hidden="true"
-                                    data-content="ce3185ff"
-                                    data-icon="dsw-icon-ellipsis-outline-regular"
-                                    height="16"
-                                    width="16"
-                                  />
-                                </button>
-                              </span>
-                            </span>
-                          </div>
-                        </div>
-                        <div
-                          draggable="true"
-                        >
-                          <div
-                            class="agentRow"
-                            data-agent-row="true"
-                          >
-                            <button
-                              aria-label="打开 failed 的会话"
-                              class="agentSelect"
-                              type="button"
-                            >
-                              <span
-                                aria-label="错误: model failed"
-                                class="agentAvatar"
-                                role="img"
-                                style="--team-avatar-hue: 133;"
-                              >
-                                F
-                                <span
-                                  aria-hidden="true"
-                                  class="agentAvatarBadge"
-                                >
-                                  <span
-                                    aria-hidden="true"
-                                    class="dot"
-                                    data-state="error"
-                                    style="width: 10px; height: 10px;"
-                                  />
-                                </span>
-                              </span>
-                              <span
-                                class="copy agentCopy"
-                              >
-                                <strong>
-                                  failed
-                                </strong>
-                                <small>
-                                  failed description
-                                </small>
-                              </span>
-                            </button>
-                            <span
-                              class="rowMenu"
-                            >
-                              <span
-                                class="root"
-                              >
-                                <button
-                                  aria-expanded="false"
-                                  aria-haspopup="menu"
-                                  aria-label="failed 的操作"
-                                  class="rowMenuButton"
-                                  type="button"
-                                >
-                                  <svg
-                                    aria-hidden="true"
-                                    data-content="ce3185ff"
-                                    data-icon="dsw-icon-ellipsis-outline-regular"
-                                    height="16"
-                                    width="16"
-                                  />
-                                </button>
-                              </span>
-                            </span>
-                          </div>
-                        </div>
-                        <div
-                          draggable="true"
-                        >
-                          <div
-                            class="agentRow"
-                            data-agent-row="true"
-                          >
-                            <button
-                              aria-label="打开 offline 的会话"
-                              class="agentSelect"
-                              disabled=""
-                              type="button"
-                            >
-                              <span
-                                aria-label="不可用: preset missing"
-                                class="agentAvatar"
-                                role="img"
-                                style="--team-avatar-hue: 139;"
-                              >
-                                O
-                                <span
-                                  aria-hidden="true"
-                                  class="agentAvatarBadge"
-                                >
-                                  <span
-                                    aria-hidden="true"
-                                    class="quiet"
-                                    data-variant="quiet"
-                                    style="width: 10px; height: 10px;"
-                                  />
-                                </span>
-                              </span>
-                              <span
-                                class="copy agentCopy"
-                              >
-                                <strong>
-                                  offline
-                                </strong>
-                                <small>
-                                  offline description
-                                </small>
-                              </span>
-                            </button>
-                            <span
-                              class="rowMenu"
-                            >
-                              <span
-                                class="root"
-                              >
-                                <button
-                                  aria-expanded="false"
-                                  aria-haspopup="menu"
-                                  aria-label="offline 的操作"
-                                  class="rowMenuButton"
-                                  type="button"
-                                >
-                                  <svg
-                                    aria-hidden="true"
-                                    data-content="ce3185ff"
-                                    data-icon="dsw-icon-ellipsis-outline-regular"
-                                    height="16"
-                                    width="16"
-                                  />
-                                </button>
-                              </span>
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </section>
-                  </div>
-                </div>
+                </section>
               </div>
-            </section>
+            </div>
           </div>
+          <span
+            aria-hidden="true"
+            class="scrollFade"
+          />
         </div>
         <div
           class="footArea"
@@ -709,6 +728,7 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
                     >
                       <span
                         class="crumbSeg"
+                        tabindex="0"
                       >
                         <span
                           class="crumb crumbCurrent"
@@ -759,44 +779,49 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
             data-conversation-session="ordinary-session"
           >
             <div
-              class="scrollBody"
-              data-conversation-scroll=""
+              data-slot="conversation.hero.frame"
+              style="display: contents;"
             >
               <div
-                data-slot="conversation.session"
-                style="display: contents;"
+                class="scrollBody"
+                data-conversation-scroll=""
               >
                 <div
-                  class="viewArea"
-                />
-              </div>
-              <div
-                class="composerSeat"
-                data-composer-seat=""
-                data-conversation-region="composer"
-              >
-                <div
-                  data-slot="conversation.composer"
+                  data-slot="conversation.session"
                   style="display: contents;"
                 >
                   <div
-                    data-chain-overlay-fallback="conversation.composer"
+                    class="viewArea"
+                  />
+                </div>
+                <div
+                  class="composerSeat"
+                  data-composer-seat=""
+                  data-conversation-region="composer"
+                >
+                  <div
+                    data-slot="conversation.composer"
                     style="display: contents;"
                   >
                     <div
-                      class="composerStack"
+                      data-chain-overlay-fallback="conversation.composer"
+                      style="display: contents;"
                     >
                       <div
-                        data-slot="conversation.input.dock"
-                        style="display: contents;"
-                      />
-                      <div
-                        data-slot="conversation.composer.bar"
-                        style="display: contents;"
+                        class="composerStack"
                       >
                         <div
-                          data-slot-error="conversation.composer.bar"
+                          data-slot="conversation.input.dock"
+                          style="display: contents;"
                         />
+                        <div
+                          data-slot="conversation.composer.bar"
+                          style="display: contents;"
+                        >
+                          <div
+                            data-slot-error="conversation.composer.bar"
+                          />
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -828,7 +853,12 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
     <div
       data-slot="shell.overlay"
       style="display: contents;"
-    />
+    >
+      <span
+        class="root"
+        style="anchor-name: --dsh-menu-trigger-rms; position: fixed; left: 0px; top: 0px; width: 0px; height: 0px;"
+      />
+    </div>
   </div>
 </div>
 `;
