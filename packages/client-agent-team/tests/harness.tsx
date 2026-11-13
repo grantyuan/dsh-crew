@@ -158,6 +158,10 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     }
     throw new Error(`bench openTab: unexpected kind "${kind}"`)
   })
+  // The Member-session swap reads the column's held open state and restores it
+  // after the arriving Session's commit; specs shape both through these mocks.
+  const isExpanded = vi.fn(() => true)
+  const toggleExpanded = vi.fn()
   runtime.ctx.provide('sidebarRight', {
     openResource,
     openTab,
@@ -165,8 +169,8 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     close: vi.fn(),
     active: vi.fn(() => undefined),
     focus: vi.fn(),
-    isExpanded: vi.fn(() => true),
-    toggleExpanded: vi.fn(),
+    isExpanded,
+    toggleExpanded,
     split: vi.fn(),
     float: vi.fn(),
     dock: vi.fn(),
@@ -838,5 +842,5 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   const disposeSettings = runtime.slots.register({ name: 'sidebar.settings', priority: 0 }, BaselineSettings as never)
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
-  return { runtime, team, view, sidebarTabTypes: tabTypes, openResource, openTab, teamTabs: () => tabStore.getSnapshot().tabs, failSidebarOpens: (active: boolean) => { throwOpens.active = active }, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, openSession, summarizeThread, seedDigest, failDigest }
+  return { runtime, team, view, sidebarTabTypes: tabTypes, openResource, openTab, teamTabs: () => tabStore.getSnapshot().tabs, failSidebarOpens: (active: boolean) => { throwOpens.active = active }, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, sidebarColumn: { isExpanded, toggleExpanded }, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, openSession, summarizeThread, seedDigest, failDigest }
 }

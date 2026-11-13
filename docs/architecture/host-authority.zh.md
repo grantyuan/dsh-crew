@@ -40,6 +40,8 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - 冲突给 Human 一条 Team Assistant 口吻的意图确认；重复给指定 Leader 一条提升优先级的指引，并邀请其把长期关注写进 Leader 自己的 memory。Host 从不代答意图，也从不写 Member 的 memory。
 - model-schedule monitor（`model-schedule.ts`）负责 Member `modelSchedule` 声明的时间区间路由：每三十秒一趟 pass——与监督共用同一个 restore gate——重新派生命中窗口的路由，并与该 Member 持久化的 `scheduledModel` 比较。变更以 `team/member-model-scheduled` 落账，并经共享的 context-renewal（重置）路径落地，让新 generation 以新路由激活；turn 进行中的 Member 把切换推迟到后续 pass，持久化比较让切换跨重启保持幂等。
 - 在改变路由的边界前十分钟，monitor 以 Team Assistant 的口吻单独向该 Member 发出一条预告，点名即将到来的路由与时刻——普通 Inbox 路径唤醒它，赶在重置清空上下文之前交接工作。预告闩锁与其他 watcher 一致是进程内的；预告是一条普通 ledger Message（Assistant 只能发言，不发 DM）。
+- stop-schedule monitor（`stop-schedule.ts`）负责 Member `stopSchedule` 声明的停止运行区间：进入区间前三十分钟，向 Session 仍在的 Member 发出收尾通知（写好交接文档、完成前向 Manager 汇报进展与收尾情况、说明停止区间）；区间开始后，提醒仍在工作的 Member 停止。
+- 区间结束后一小时内，monitor 通知 Member 启动并向 Manager 获取后续工作安排。通知是唯一后果——Host 从不强行终止进行中的 turn，通知所要求的有序收尾本身就是契约。
 
 ## 变更流与 Projection
 - `changes()` 是流式 Remote，可声明一个 scope（workspace/channel/thread/presence）；省略 scope 时观察共享 Team 投影变化，不包含 presence。Host 先注册监听，再发送当前基线，之后只发送匹配的变更通知；消费者暂停期间仅保留最新待发送版本。取消或 Host 释放时关闭订阅。Thread read 与 `team/dm-sent` 不改变共享投影，因此既不推进其版本也不唤醒订阅者。Presence 使用进程内 epoch，其余 scope 使用最近一次共享投影提交的 ledger sequence。版本只在同一 scope 和 Host 生命周期内有意义。Host 只为受 operation 影响的 Members 重算 Inbox hints。

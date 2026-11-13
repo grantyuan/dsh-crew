@@ -270,6 +270,13 @@
   justify-items: start;
 }
 
+/* The Agent dialogs carry the route pickers and the schedule rows, which the
+   shared Modal's 380px card squeezes; the doubled class beats Modal's own
+   .dialog regardless of stylesheet order. */
+.dialogWide.dialogWide {
+  width: min(560px, 100%);
+}
+
 .dialogContent {
   max-height: min(70vh, 560px);
   overflow-y: auto;
@@ -325,12 +332,18 @@
 
 /* Model schedule rows: two minute-precision time fields, the window's route
    picker, and its remove action — one grid so the picker column tracks the
-   fallback row's flexible width while the time columns stay narrow. */
+   fallback row's flexible width while the time columns stay narrow. The stop
+   row carries no picker, so its remove action lands in the flexible column:
+   pinned compact and start-aligned instead of stretching across it. */
 .scheduleRow {
   align-items: end;
   display: grid;
   gap: 6px;
   grid-template-columns: 72px 72px minmax(0, 1fr) 32px;
+}
+.scheduleRow .fallbackAction {
+  justify-self: start;
+  width: 32px;
 }
 .scheduleTime {
   color: var(--dsw-alias-label-secondary);

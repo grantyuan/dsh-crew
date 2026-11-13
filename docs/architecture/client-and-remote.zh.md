@@ -90,6 +90,8 @@ Browser 会持久化 Team navigation mode、Workspace selection、最近选中�
 
 进入 Team mode（以及以 Team mode 完成的启动恢复）会重落 snapshot 所指的最后 face——以 reveal 方式，Sidebar 已持久化该 tab 时只呈现一次；Member 会话仍在时还包括嵌入式 Member 对话（runtime-only 记忆：Member 已续期或移除时不再重开）。离开 Team mode 不回收任何东西：Sidebar 的 tab 是 per-Session 状态，不是 Team chrome。session-history 页的 返回 会关闭自己的 tab——不同于 Thread 的 Back 落回其来源列表或 Channel，它下面没有任何 Team 页面。
 
+聚焦某个 Member（Agent 卡片，或时间线里的成员座席）只切换会话座席，不移动右栏本身：shipped Sidebar 每个 Session 持有一份布局，且新的 Member surface 以收起状态起步，所以这次切换曾会把 Human 摊开的右栏收掉。客户端在切换前记下右栏的摊开状态，等到达 surface 的 commit 落地后再恢复（等几帧，未 adopt 完 store 的座位会重试）——摊开的右栏保持摊开、里面换成该 Member 对话自己的 tab，收着的右栏保持收起；跟随聚焦的只有内容。
+
   每条 Inbox row 自带 Host 解析好的时间戳——`createdOccurredAt`、`latestReplyOccurredAt` 与其 `latestReplyActor`、以及 `needsHumanDecision`（某个 open Task 停在 `in_review` 等验收，或一条点名 Human 的 Message 在向其要决定且其后 Human 再无发言——单纯点名从不点亮它）——行因此不需自己再做 Thread read；页头的 排序 控件按本浏览器偏好重排这些行，这份偏好存 `localStorage`，从不成为 Team fact。
 
   Agent Inbox 仍由 Host 持有，并通过 `team_inbox` 提供。

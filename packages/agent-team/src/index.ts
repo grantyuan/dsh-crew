@@ -60,6 +60,7 @@ import { TruncationEscalator, truncationEscalationText, type TruncationLeader } 
 import { MemberWatchMonitor, memberWatchNoticeText, type MemberWatchNotice, type MemberWatchSample, type MemberWatchTask } from './member-watch.ts'
 import { clearRouteStreak, modelFailoverNoticeText, noteRouteFailure, routeKeyOf, settlePromotion, supervisionExhaustedNoticeText, type RouteFailureState } from './model-failover.ts'
 import { ModelScheduleMonitor, modelScheduleSwitchNoticeText, sameScheduleRoute, type ModelScheduleBoundary } from './model-schedule.ts'
+import { StopScheduleMonitor } from './stop-schedule.ts'
 import { CapabilityAssessor, capabilityAssessmentText, type CapabilityAssessmentTarget } from './capability-assessment.ts'
 import { BackgroundJobRegistry, backgroundJobNoticeText, type BackgroundJob, type BackgroundJobStartInput } from './background-jobs.ts'
 import { StoredSessionReadError, StoredSessionReader, sessionFailureOf } from './stored-session-reader.ts'
@@ -948,6 +949,26 @@ export default class AgentTeam extends TypertRemoteService {
     log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
   })
   /**
+   * Time-interval stop-run scheduling: delivers the wrap-up heads-up half an
+   * hour before each stop window to a Member whose Session is live, tells a
+   * still-working Member to stop once the window has started, and tells the
+   * Member it may start again after the window ends — notifications only,
+   * because the orderly wrap-up the notice asks for is the contract. The
+   * once-per-boundary latch is process-local; the notices themselves are the
+   * durable trace.
+   */
+  private readonly stopScheduleMonitor = new StopScheduleMonitor({
+    members: () => this.ledger?.listMembers() ?? [],
+    isRunning: member => this.handles.has(member.memberId),
+    isMidTurn: member => {
+      const active = this.handles.get(member.memberId)
+      return active !== undefined && this.runningAgents.has(active.agent.id)
+    },
+    notify: async (member, body) => { await this.announceStopSchedule(member, body) },
+    formatWhen: atMs => formatTeamTimestamp(new Date(atMs).toISOString()),
+    log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
+  })
+  /**
    * Opt-in automatic capability assessment: when the Human switched it on
    * for the designated Leader, Members whose finished work accumulated
    * since the last look are named to the Leader through the ordinary
@@ -1439,6 +1460,7 @@ export default class AgentTeam extends TypertRemoteService {
       this.truncationEscalation.dispose()
       this.memberWatch.dispose()
       this.modelScheduleMonitor.dispose()
+      this.stopScheduleMonitor.dispose()
       this.capabilityAssessor.dispose()
       this.backgroundJobs.dispose()
       this.contextManagement.dispose()
@@ -1510,6 +1532,10 @@ export default class AgentTeam extends TypertRemoteService {
     // roster settled would reset a Member that is still activating and read a
     // cold applied route as a missed boundary.
     this.modelScheduleMonitor.start()
+    // The stop-schedule pass rides the same restore gate: a pass before the
+    // roster settled would read an activating Member as running (or not) and
+    // deliver a boundary notice on a cold read.
+    this.stopScheduleMonitor.start()
     // The capability assessor reads finished work off the ledger tail; a pass
     // before the roster settled would read restoring Members as evidence-free.
     this.capabilityAssessor.start()
@@ -2210,6 +2236,7 @@ export default class AgentTeam extends TypertRemoteService {
         description: request.description,
         presetId: request.presetId,
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
+        ...(request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? {} : { modelFallbacks: Object.freeze(request.modelFallbacks.map(fallback => Object.freeze({ ...fallback }))) }),
         ...(request.modelSchedule === undefined ? {} : { modelSchedule: Object.freeze({ ...request.modelSchedule, windows: Object.freeze(request.modelSchedule.windows.map(w => Object.freeze({ ...w, selection: Object.freeze({ ...w.selection }) }))) }) }),
         ...(request.capabilities === undefined ? {} : { capabilities: Object.freeze(deepCopyCapabilities(request.capabilities)) }),
         ...(request.prompt === undefined ? {} : { prompt: Object.freeze(deepCopyPrompt(request.prompt)) }),
@@ -3945,6 +3972,25 @@ export default class AgentTeam extends TypertRemoteService {
         whenText: formatTeamTimestamp(new Date(boundary.atMs).toISOString()),
         incoming: boundary.incoming,
       }),
+      recipients: [member.memberId],
+      asTask: false,
+    })
+  }
+
+  /**
+   * Stop-schedule notice delivery: the same seam as the model-schedule
+   * heads-up — the Team Assistant's voice into the Member's oldest Channel
+   * with the Member as the only explicit recipient, so the ordinary Inbox
+   * path wakes it into the wrap-up (or resume) turn.
+   */
+  private async announceStopSchedule(member: AgentTeamAgentMember, body: string): Promise<void> {
+    const channelRef = this.requireLedger().channelsForMember(member.memberId, member.workspaceId)[0]
+    if (channelRef === undefined) throw new Error(`member '${member.handle}' has no Channel in workspace '${member.workspaceId}'`)
+    await this.sendMessageAs(agentTeamAssistantActor(), {
+      requestId: randomUUID() as AgentTeamRequestId,
+      workspaceId: member.workspaceId,
+      channelRef,
+      body,
       recipients: [member.memberId],
       asTask: false,
     })

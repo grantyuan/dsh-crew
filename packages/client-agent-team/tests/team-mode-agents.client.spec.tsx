@@ -441,6 +441,9 @@ describe('Team agent surfaces', () => {
     fireEvent.click(b.view.getByRole('button', { name: 'builder 的操作' }))
     fireEvent.click(await b.view.findByRole('menuitem', { name: '编辑 Agent' }))
     const editor = b.view.getByRole('dialog', { name: '编辑 Agent' })
+    // The card rides the widened class: the shared Modal's 380px default
+    // squeezes the route pickers and the schedule rows.
+    expect(editor.className).toContain('dialogWide')
     // The Host catalog arrives session-independently; the picker rides the
     // shared Menu primitive with the default entry leading each open.
     const modelTrigger = await within(editor).findByRole('button', { name: '模型' })

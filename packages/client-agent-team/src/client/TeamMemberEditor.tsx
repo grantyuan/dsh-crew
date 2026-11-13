@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AgentTeamClientMemberStatus, AgentTeamCurateMemberPromptProposal, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamMemberPromptProfile, AgentTeamMemberPromptSectionEntry, AgentTeamMemberPromptView, AgentTeamModelScheduleWindow, AgentTeamModelSelection, AgentTeamUpdateMemberRequest } from '@grantyuan/dsh-crew/types'
+import type { AgentTeamClientMemberStatus, AgentTeamCurateMemberPromptProposal, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamMemberPromptProfile, AgentTeamMemberPromptSectionEntry, AgentTeamMemberPromptView, AgentTeamMemberStopSchedule, AgentTeamModelScheduleWindow, AgentTeamModelSelection, AgentTeamUpdateMemberRequest } from '@grantyuan/dsh-crew/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TeamModelCatalog, TeamModelEffortOption, TeamModelProviderGroup, TeamSidebarProps } from './slots.ts'
 import { Button, Checkbox, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, Input, Menu, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -76,7 +76,7 @@ export function warmModelCatalog(loadModels: TeamSidebarProps['loadModels']): vo
  * failed read with no warmed value renders a retryable error instead of
  * stranding the field on "loading".
  */
-export function ModelPickerField({ model, onModelChange, loadModels, disabled, t, defaultLabel, fieldLabel }: {
+export function ModelPickerField({ model, onModelChange, loadModels, disabled, t, defaultLabel, fieldLabel, filterModel }: {
   readonly model: AgentTeamModelSelection | undefined
   readonly onModelChange: (choice: AgentTeamModelSelection | undefined) => void
   readonly loadModels: TeamSidebarProps['loadModels']
@@ -86,6 +86,14 @@ export function ModelPickerField({ model, onModelChange, loadModels, disabled, t
   readonly t: TeamSidebarProps['t']
   /** Overrides the follow-default option's label when the picker's fallback reads differently. */
   readonly defaultLabel?: string
+  /**
+   * Candidates failing this predicate are not offered as menu rows at all —
+   * the Host would refuse the commit (a backup route may not repeat the
+   * primary or another backup), and a silently ignored pick used to leave
+   * the form undirtied with no feedback. The caller keeps its own current
+   * value selectable.
+   */
+  readonly filterModel?: (candidate: { readonly provider: string; readonly model: string }) => boolean
 }) {
   const [groups, setGroups] = useState<readonly TeamModelProviderGroup[] | undefined>(() => peekCatalogGroups(loadModels))
   const [modelsError, setModelsError] = useState<string>()
@@ -129,8 +137,10 @@ export function ModelPickerField({ model, onModelChange, loadModels, disabled, t
   const items: MenuEntry[] = [{ id: '', label: defaultLabel ?? t('modelFollowDefault') }]
   const byKey = new Map<string, { provider: string; id: string; name: string; efforts: readonly TeamModelEffortOption[] }>()
   for (const group of groups ?? []) {
+    const offered = group.models.filter(entry => filterModel?.({ provider: group.id, model: entry.id }) ?? true)
+    if (offered.length === 0) continue
     items.push({ type: 'label', id: `model-group:${group.id}`, text: group.name })
-    for (const entry of group.models) {
+    for (const entry of offered) {
       const key = modelKey(group.id, entry.id)
       byKey.set(key, { provider: group.id, id: entry.id, name: entry.name, efforts: entry.reasoning?.efforts ?? [] })
       items.push({ id: key, label: entry.name })
@@ -235,8 +245,10 @@ export const MODEL_FALLBACK_MAX = 4
  * The ordered backup-route editor shared by the create and edit forms: one
  * row per pinned candidate (movable up, removable) plus one trailing picker
  * that appends the next candidate. The list rides the same absent-clears
- * discipline as `model`: an empty list clears the failover pin, and the
- * ledger refuses a candidate that repeats the primary.
+ * discipline as `model`: an empty list clears the failover pin. The ledger
+ * refuses a candidate that repeats the primary or another backup, so those
+ * candidates never appear in a picker here — a row's own current value stays
+ * selectable even when history left it invalid.
  */
 export function ModelFallbackPickerField({ fallbacks, onChange, primary, loadModels, disabled, t }: {
   readonly fallbacks: readonly AgentTeamModelSelection[]
@@ -246,6 +258,8 @@ export function ModelFallbackPickerField({ fallbacks, onChange, primary, loadMod
   readonly disabled: boolean
   readonly t: TeamSidebarProps['t']
 }) {
+  const sameRoute = (a: { readonly provider: string; readonly model: string }, b: { readonly provider: string; readonly model: string }): boolean =>
+    a.provider === b.provider && a.model === b.model
   const replaceAt = (index: number, choice: AgentTeamModelSelection | undefined): void => {
     if (choice === undefined) { onChange(fallbacks.filter((_, entryIndex) => entryIndex !== index)); return }
     onChange(fallbacks.map((entry, entryIndex) => entryIndex === index ? choice : entry))
@@ -256,6 +270,13 @@ export function ModelFallbackPickerField({ fallbacks, onChange, primary, loadMod
     const [moved] = next.splice(index, 1)
     next.splice(index - 1, 0, moved!)
     onChange(next)
+  }
+  /** Valid for row `index` (undefined = the trailing add picker): its own value, or a route nothing else pins. */
+  const candidateAllowed = (index: number | undefined, candidate: { readonly provider: string; readonly model: string }): boolean => {
+    const own = index === undefined ? undefined : fallbacks[index]
+    if (own !== undefined && sameRoute(own, candidate)) return true
+    if (primary !== undefined && sameRoute(primary, candidate)) return false
+    return fallbacks.every((entry, entryIndex) => entryIndex === index || !sameRoute(entry, candidate))
   }
   return <div className={createCss.field}>
     <span>{t('modelFallbacks')}</span>
@@ -268,6 +289,7 @@ export function ModelFallbackPickerField({ fallbacks, onChange, primary, loadMod
         loadModels={loadModels}
         disabled={disabled}
         t={t}
+        filterModel={candidate => candidateAllowed(index, candidate)}
       />
       <button type="button" className={createCss.fallbackAction!} aria-label={t('modelFallbackMoveUp')} disabled={disabled || index === 0} onClick={() => { moveUp(index) }}>
         <IconChevronUpOutlineRegular size={14} />
@@ -282,12 +304,12 @@ export function ModelFallbackPickerField({ fallbacks, onChange, primary, loadMod
       defaultLabel={t('modelFallbackAdd')}
       onModelChange={choice => {
         if (choice === undefined) return
-        if (primary !== undefined && choice.provider === primary.provider && choice.model === primary.model) return
         onChange([...fallbacks, choice])
       }}
       loadModels={loadModels}
       disabled={disabled}
       t={t}
+      filterModel={candidate => candidateAllowed(undefined, candidate)}
     />}
   </div>
 }
@@ -320,14 +342,27 @@ export function scheduleStoredDraft(stored: AgentTeamMemberModelSchedule | undef
 }
 
 /**
+ * The ledger stores strict `HH:MM` (its schema regex has no room for a
+ * single-digit hour), but a Human naturally types `9:00` — the editor accepts
+ * the lenient shape and pads it to the stored form, so the Host never sees
+ * what its own rule would refuse.
+ */
+function normalizeScheduleTimeText(text: string): string {
+  const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(text.trim())
+  return match === null ? text.trim() : `${match[1]!.padStart(2, '0')}:${match[2]!}`
+}
+
+/**
  * Complete, well-formed windows only: an incomplete row (missing bound, bad
  * format, equal bounds, or no model) never reaches the ledger — the editor
  * blocks submission while one exists, and the normalization drops it as a
- * second guard so a stale draft can't smuggle a rejected commit.
+ * second guard so a stale draft can't smuggle a rejected commit. Lenient
+ * time inputs (`9:00`) pad to the stored `HH:MM` first, so the Host-side
+ * strict pattern measures only what it defined.
  */
 export function normalizeScheduleDraft(draft: ModelScheduleDraft): AgentTeamMemberModelSchedule {
   const windows: readonly AgentTeamModelScheduleWindow[] = draft.windows
-    .map(w => ({ start: w.start.trim(), end: w.end.trim(), selection: w.selection }))
+    .map(w => ({ start: normalizeScheduleTimeText(w.start), end: normalizeScheduleTimeText(w.end), selection: w.selection }))
     .filter((w): w is { readonly start: string; readonly end: string; readonly selection: AgentTeamModelSelection } =>
       scheduleTimePattern.test(w.start) && scheduleTimePattern.test(w.end) && w.start !== w.end && w.selection !== undefined)
   return { enabled: draft.enabled, windows }
@@ -336,9 +371,9 @@ export function normalizeScheduleDraft(draft: ModelScheduleDraft): AgentTeamMemb
 /** True while any touched window is incomplete or the enabled schedule would demand nothing. */
 export function scheduleDraftInvalid(draft: ModelScheduleDraft): boolean {
   const partial = draft.windows.some(w => {
-    const start = w.start.trim()
-    const end = w.end.trim()
-    if (start === '' && end === '' && w.selection === undefined) return false
+    const start = normalizeScheduleTimeText(w.start)
+    const end = normalizeScheduleTimeText(w.end)
+    if (w.start.trim() === '' && w.end.trim() === '' && w.selection === undefined) return false
     return !scheduleTimePattern.test(start) || !scheduleTimePattern.test(end) || start === end || w.selection === undefined
   })
   return partial || (draft.enabled && normalizeScheduleDraft(draft).windows.length === 0)
@@ -382,6 +417,10 @@ export function ModelScheduleField({ draft, onChange, applied, loadModels, disab
       <ModelPickerField
         model={window.selection}
         fieldLabel={t('modelScheduleWindowLabel', { index: index + 1 })}
+        // A window must demand a concrete route (the ledger refuses a
+        // follow-default window), so the idle trigger reads as the missing
+        // choice instead of the primary picker's legitimate "follow default".
+        defaultLabel={t('modelSchedulePickModel')}
         onModelChange={choice => replaceAt(index, { selection: choice })}
         loadModels={loadModels}
         disabled={disabled}
@@ -393,6 +432,94 @@ export function ModelScheduleField({ draft, onChange, applied, loadModels, disab
     </div>)}
     {draft.windows.length < MODEL_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '', selection: undefined }] }) }}>{t('modelScheduleAdd')}</Button>}
     {scheduleDraftInvalid(draft) && <p className={createCss.error} role="alert">{t('modelScheduleInvalidRule')}</p>}
+  </div>
+}
+
+/** At most this many daily windows one Member stop schedule may carry (the Host commit rule). */
+export const STOP_SCHEDULE_WINDOW_MAX = 6
+
+/**
+ * One stop schedule under edit: minute-precision `HH:MM` strings in the Team
+ * zone (UTC+8) — a plain time span, no route. A wholly untouched window is a
+ * blank line, not a configuration draft, and drops out of the submitted
+ * schedule.
+ */
+export interface StopScheduleWindowDraft {
+  readonly start: string
+  readonly end: string
+}
+
+export interface StopScheduleDraft {
+  readonly enabled: boolean
+  readonly windows: readonly StopScheduleWindowDraft[]
+}
+
+/** The stored stop schedule (or absent) as an editable draft. */
+export function stopScheduleStoredDraft(stored: AgentTeamMemberStopSchedule | undefined): StopScheduleDraft {
+  if (stored === undefined) return { enabled: false, windows: [] }
+  return { enabled: stored.enabled, windows: stored.windows.map(w => ({ start: w.start, end: w.end })) }
+}
+
+/**
+ * Complete, well-formed windows only: an incomplete row (missing bound, bad
+ * format, or equal bounds) never reaches the ledger — the editor blocks
+ * submission while one exists, and the normalization drops it as a second
+ * guard so a stale draft can't smuggle a rejected commit.
+ */
+export function normalizeStopScheduleDraft(draft: StopScheduleDraft): AgentTeamMemberStopSchedule {
+  const windows = draft.windows
+    .map(w => ({ start: normalizeScheduleTimeText(w.start), end: normalizeScheduleTimeText(w.end) }))
+    .filter(w => scheduleTimePattern.test(w.start) && scheduleTimePattern.test(w.end) && w.start !== w.end)
+  return { enabled: draft.enabled, windows }
+}
+
+/** True while any touched window is incomplete or the enabled schedule would stop nothing. */
+export function stopScheduleDraftInvalid(draft: StopScheduleDraft): boolean {
+  const partial = draft.windows.some(w => {
+    const start = normalizeScheduleTimeText(w.start)
+    const end = normalizeScheduleTimeText(w.end)
+    if (w.start.trim() === '' && w.end.trim() === '') return false
+    return !scheduleTimePattern.test(start) || !scheduleTimePattern.test(end) || start === end
+  })
+  return partial || (draft.enabled && normalizeStopScheduleDraft(draft).windows.length === 0)
+}
+
+/**
+ * The stop-run schedule editor: the enable switch and one row per daily
+ * window (Team-zone start and end only — no route). Inside a window the
+ * Member must not run: the Host's stop-schedule monitor delivers the
+ * half-an-hour wrap-up heads-up, the boundary-stop reminder, and the resume
+ * notice with the ask-the-Manager instruction. This editor only writes the
+ * durable intent.
+ */
+export function StopScheduleField({ draft, onChange, disabled, t }: {
+  readonly draft: StopScheduleDraft
+  readonly onChange: (next: StopScheduleDraft) => void
+  readonly disabled: boolean
+  readonly t: TeamSidebarProps['t']
+}) {
+  const replaceAt = (index: number, patch: Partial<StopScheduleWindowDraft>): void => {
+    onChange({ ...draft, windows: draft.windows.map((window, entryIndex) => entryIndex === index ? { ...window, ...patch } : window) })
+  }
+  return <div className={createCss.field}>
+    <span>{t('stopScheduleTitle')}</span>
+    <small className={css.editHint}>{t('stopScheduleHint')}</small>
+    <Checkbox checked={draft.enabled} onChange={next => { onChange({ ...draft, enabled: next }) }} disabled={disabled} label={t('stopScheduleEnable')} />
+    {draft.windows.map((window, index) => <div key={index} className={createCss.scheduleRow}>
+      <label className={createCss.scheduleTime}>
+        <span>{t('stopScheduleStart')}</span>
+        <Input className={createCss.scheduleInput!} value={window.start} placeholder="22:00" inputMode="numeric" maxLength={5} aria-label={`${t('stopScheduleWindowLabel', { index: index + 1 })} ${t('stopScheduleStart')}`} onChange={event => replaceAt(index, { start: event.target.value })} disabled={disabled} />
+      </label>
+      <label className={createCss.scheduleTime}>
+        <span>{t('stopScheduleEnd')}</span>
+        <Input className={createCss.scheduleInput!} value={window.end} placeholder="08:00" inputMode="numeric" maxLength={5} aria-label={`${t('stopScheduleWindowLabel', { index: index + 1 })} ${t('stopScheduleEnd')}`} onChange={event => replaceAt(index, { end: event.target.value })} disabled={disabled} />
+      </label>
+      <button type="button" className={createCss.fallbackAction!} aria-label={t('stopScheduleRemove', { index: index + 1 })} disabled={disabled} onClick={() => { onChange({ ...draft, windows: draft.windows.filter((_, entryIndex) => entryIndex !== index) }) }}>
+        <IconCloseOutlineRegular size={14} />
+      </button>
+    </div>)}
+    {draft.windows.length < STOP_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '' }] }) }}>{t('stopScheduleAdd')}</Button>}
+    {stopScheduleDraftInvalid(draft) && <p className={createCss.error} role="alert">{t('stopScheduleInvalidRule')}</p>}
   </div>
 }
 
@@ -1045,6 +1172,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
   const [policy, setPolicy] = useState<'continue' | 'fresh'>(status.member.contextStartPolicy ?? 'continue')
   const [windowText, setWindowText] = useState(status.member.contextWindow === undefined ? '' : String(status.member.contextWindow))
   const [schedule, setSchedule] = useState<ModelScheduleDraft>(() => scheduleStoredDraft(status.member.modelSchedule))
+  const [stopSchedule, setStopSchedule] = useState<StopScheduleDraft>(() => stopScheduleStoredDraft(status.member.stopSchedule))
   const [capabilityText, setCapabilityText] = useState(status.member.capabilityScore === undefined ? '' : String(status.member.capabilityScore))
   const [autoAssessment, setAutoAssessment] = useState(status.member.autoCapabilityAssessment === true)
   const { saving, error, pendingRequest, save } = useEditDialogSave({
@@ -1061,6 +1189,10 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
   // A stored schedule must always be echoed (absent-clears); an absent one
   // is only sent once the draft actually differs from nothing.
   const scheduleSend = status.member.modelSchedule !== undefined || scheduleChanged
+  const stopScheduleInvalid = stopScheduleDraftInvalid(stopSchedule)
+  const stopSchedulePayload = normalizeStopScheduleDraft(stopSchedule)
+  const stopScheduleChanged = JSON.stringify(stopSchedulePayload) !== JSON.stringify(status.member.stopSchedule ?? { enabled: false, windows: [] })
+  const stopScheduleSend = status.member.stopSchedule !== undefined || stopScheduleChanged
   const storedCapability = status.member.capabilityScore
   const capabilityParsed = parseCapabilityScore(capabilityText, storedCapability)
   const capabilityInvalid = Number.isNaN(capabilityParsed)
@@ -1078,12 +1210,13 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
     || policy !== (status.member.contextStartPolicy ?? 'continue') || parsedWindow !== status.member.contextWindow
     || JSON.stringify(fallbacks) !== JSON.stringify(status.member.modelFallbacks ?? [])
     || scheduleChanged
+    || stopScheduleChanged
     || capabilityChanged || autoAssessmentChanged
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const normalizedHandle = handle.trim()
     const normalizedDescription = description.trim()
-    if (saving || !dirty || normalizedHandle.length === 0 || windowInvalid || scheduleInvalid || capabilityInvalid) return
+    if (saving || !dirty || normalizedHandle.length === 0 || windowInvalid || scheduleInvalid || stopScheduleInvalid || capabilityInvalid) return
     const payload = {
       memberId,
       handle: normalizedHandle,
@@ -1093,6 +1226,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       // (absent-clears, like `model`), a non-empty one rides in order.
       ...(fallbacks.length === 0 ? {} : { modelFallbacks: fallbacks }),
       ...(scheduleSend ? { modelSchedule: schedulePayload } : {}),
+      ...(stopScheduleSend ? { stopSchedule: stopSchedulePayload } : {}),
       ...capabilitySend,
       ...(autoAssessmentChanged ? { autoCapabilityAssessment: autoAssessment } : {}),
       // The editor owns no capabilities UI, but an absent field would clear a
@@ -1123,6 +1257,7 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       && pendingRequest.current.contextWindow === parsedWindow
       && (pendingRequest.current.leader ?? false) === leader
       && JSON.stringify(pendingRequest.current.modelSchedule ?? null) === JSON.stringify(scheduleSend ? schedulePayload : null)
+      && JSON.stringify(pendingRequest.current.stopSchedule ?? null) === JSON.stringify(stopScheduleSend ? stopSchedulePayload : null)
       && (pendingRequest.current.capabilityScore ?? undefined) === (capabilitySend as { capabilityScore?: number | null }).capabilityScore
       && (pendingRequest.current.autoCapabilityAssessment ?? undefined) === (autoAssessmentChanged ? autoAssessment : undefined)
     const request: AgentTeamUpdateMemberRequest = samePending ? pendingRequest.current! : {
@@ -1139,8 +1274,9 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
       title={t('editAgent')}
       description={`@${status.member.handle}`}
       closeLabel={t('close')}
+      className={createCss.dialogWide!}
       contentClassName={createCss.dialogContent!}
-      footer={<><Button variant="outline" disabled={saving} onClick={onClose}>{t('cancel')}</Button><Button type="submit" form="team-agent-edit-form" variant="primary" disabled={saving || !dirty || handle.trim().length === 0 || windowInvalid || scheduleInvalid || capabilityInvalid}>{saving ? t('editSaving') : t('editSave')}</Button></>}
+      footer={<><Button variant="outline" disabled={saving} onClick={onClose}>{t('cancel')}</Button><Button type="submit" form="team-agent-edit-form" variant="primary" disabled={saving || !dirty || handle.trim().length === 0 || windowInvalid || scheduleInvalid || stopScheduleInvalid || capabilityInvalid}>{saving ? t('editSaving') : t('editSave')}</Button></>}
     >
       <form id="team-agent-edit-form" className={createCss.form} onSubmit={event => { void submit(event) }}>
         <label className={createCss.field}>
@@ -1158,6 +1294,12 @@ export function AgentEditorDialog({ status, updateMember, loadPromptView, curate
           onChange={next => { pendingRequest.current = undefined; setSchedule(next) }}
           applied={status.member.scheduledModel}
           loadModels={loadModels}
+          disabled={saving}
+          t={t}
+        />
+        <StopScheduleField
+          draft={stopSchedule}
+          onChange={next => { pendingRequest.current = undefined; setStopSchedule(next) }}
           disabled={saving}
           t={t}
         />

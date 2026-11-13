@@ -580,6 +580,21 @@ describe('AgentTeam durable Thread Attention ledger', () => {
     expect(records.join('\n')).not.toContain('follow-changed')
   })
 
+  // The Remote edge builds the durable Member from the request's own fields;
+  // a field it forgets is silently lost at creation — the backup routes once
+  // were, and the editor then read an empty list back.
+  it('carries the pinned backup routes through addMember', async () => {
+    const test = await harness()
+    const member = await test.ctx.agentTeam.addMember({
+      requestId: requestId('member'), workspaceId: alpha, handle: 'reviewer', description: 'Reviews changes', presetId: 'team-member', channelRefs: [],
+      model: { provider: 'deepseek-official', model: 'deepseek-chat' },
+      modelFallbacks: [{ provider: 'deepseek-official', model: 'deepseek-reasoner' }],
+    })
+    expect(member.status.member.modelFallbacks).toEqual([{ provider: 'deepseek-official', model: 'deepseek-reasoner' }])
+    const roster = test.ctx.agentTeam.membersForClient({ workspaceId: alpha })
+    expect(roster.find(entry => entry.member.handle === 'reviewer')?.member.modelFallbacks).toEqual([{ provider: 'deepseek-official', model: 'deepseek-reasoner' }])
+  })
+
   it('opens a persisted Member with no initial Channels in a fresh Host', async () => {
     const first = await harness()
     const ledger = replayLedger(first)
@@ -3833,6 +3848,38 @@ describe('AgentTeam Member model schedule', () => {
     await expect(ledger.updateMember({ ...base, requestId: requestId('bad-time'), modelSchedule: { enabled: true, windows: [windowOf('9:00', '18:00')] } })).rejects.toThrow(/HH:MM/)
     await expect(ledger.updateMember({ ...base, requestId: requestId('degenerate'), modelSchedule: { enabled: true, windows: [windowOf('09:00', '09:00')] } })).rejects.toThrow(/must not equal/)
     await expect(ledger.updateMember({ ...base, requestId: requestId('too-many'), modelSchedule: { enabled: true, windows: Array.from({ length: 7 }, (_unused, i) => windowOf(`${String(i).padStart(2, '0')}:00`, `${String(i).padStart(2, '0')}:30`)) } })).rejects.toThrow(/at most 6/)
+  })
+
+  it('stores a stop schedule through a member edit, edits it absent-clears, and replays it', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:stop-sched', 'stop-sched')
+    const base = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    const night = { enabled: true, windows: [{ start: '22:00', end: '06:00' }] }
+    const stored = await ledger.updateMember({ ...base, requestId: requestId('stop-store'), stopSchedule: night })
+    expect(stored.value.member.stopSchedule).toEqual(night)
+    // An absent field clears the stored intent, like `modelSchedule`.
+    const cleared = await ledger.updateMember({ ...base, requestId: requestId('stop-clear') })
+    expect(cleared.value.member.stopSchedule).toBeUndefined()
+    await ledger.updateMember({ ...base, requestId: requestId('stop-restore'), stopSchedule: night })
+    const replay = replayLedger(test)
+    expect(replay.getMember('member:stop-sched' as never)?.stopSchedule).toEqual(night)
+    replay.validate()
+  })
+
+  it('rejects malformed stop schedules at the commit gate and collides a differing retry', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:stop-strict', 'stop-strict')
+    const base = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    await expect(ledger.updateMember({ ...base, requestId: requestId('stop-bad-time'), stopSchedule: { enabled: true, windows: [{ start: '9:00', end: '18:00' }] } })).rejects.toThrow(/HH:MM/)
+    await expect(ledger.updateMember({ ...base, requestId: requestId('stop-degenerate'), stopSchedule: { enabled: true, windows: [{ start: '09:00', end: '09:00' }] } })).rejects.toThrow(/must not equal/)
+    await expect(ledger.updateMember({ ...base, requestId: requestId('stop-too-many'), stopSchedule: { enabled: true, windows: Array.from({ length: 7 }, (_unused, i) => ({ start: `${String(i).padStart(2, '0')}:00`, end: `${String(i).padStart(2, '0')}:30` })) } })).rejects.toThrow(/at most 6/)
+    const day = { enabled: true, windows: [{ start: '09:00', end: '18:00' }] }
+    const night = { enabled: true, windows: [{ start: '22:00', end: '06:00' }] }
+    await ledger.updateMember({ ...base, requestId: requestId('stop-edit-once'), stopSchedule: day })
+    await ledger.updateMember({ ...base, requestId: requestId('stop-edit-once'), stopSchedule: day }) // idempotent replay
+    await expect(ledger.updateMember({ ...base, requestId: requestId('stop-edit-once'), stopSchedule: night })).rejects.toThrow(/reused with a different/)
   })
 
   it('collides a retried schedule edit carrying different intent', async () => {

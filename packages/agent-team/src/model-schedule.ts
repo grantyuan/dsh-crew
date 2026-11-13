@@ -31,7 +31,6 @@ import type {
   AgentTeamAgentMember,
   AgentTeamMemberId,
   AgentTeamMemberModelSchedule,
-  AgentTeamModelScheduleWindow,
   AgentTeamModelSelection,
 } from './types.ts'
 import { TEAM_ZONE_OFFSET_MINUTES } from './time-format.ts'
@@ -42,8 +41,9 @@ export const MODEL_SCHEDULE_PASS_INTERVAL_MS = 30 * 1000
 /** How far ahead a route-changing boundary earns a heads-up. */
 export const MODEL_SCHEDULE_NOTICE_AHEAD_MS = 10 * 60 * 1000
 
-const MINUTES_PER_DAY = 24 * 60
-const TEAM_ZONE_OFFSET_MS = TEAM_ZONE_OFFSET_MINUTES * 60_000
+/** Minutes in one day — the wrap-around modulus of every Team-zone minute computation. */
+export const MINUTES_PER_DAY = 24 * 60
+export const TEAM_ZONE_OFFSET_MS = TEAM_ZONE_OFFSET_MINUTES * 60_000
 
 /** Parse one `HH:MM` schedule bound into Team-zone day minutes (0..1439). */
 export function parseScheduleMinute(text: string): number {
@@ -62,8 +62,13 @@ export function teamAbsoluteMinute(epochMs: number): number {
   return Math.floor((epochMs + TEAM_ZONE_OFFSET_MS) / 60_000)
 }
 
-/** Whether one window covers the given Team-zone day minute (start inclusive, end exclusive, wrap allowed). */
-export function scheduleWindowCovers(window: AgentTeamModelScheduleWindow, minuteOfDay: number): boolean {
+/**
+ * Whether one window covers the given Team-zone day minute (start inclusive,
+ * end exclusive, wrap allowed). The bounds-only shape is the shared window
+ * arithmetic: the model schedule's routed windows and the stop schedule's
+ * plain spans both satisfy it.
+ */
+export function scheduleWindowCovers(window: { readonly start: string; readonly end: string }, minuteOfDay: number): boolean {
   const start = parseScheduleMinute(window.start)
   const end = parseScheduleMinute(window.end)
   if (start === end) return false

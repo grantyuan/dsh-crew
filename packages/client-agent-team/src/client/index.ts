@@ -196,6 +196,38 @@ function applyUi(ctx: ClientContext): void {
   // switching between Member Sessions keeps pointing at the Human's original
   // session — and each departed Member session is remembered (runtime-only) so
   // the next Team entry can reopen the conversation the Human last had open.
+  /**
+   * The right column itself must not move when a Member takes the main seat.
+   * The shipped Sidebar keeps one layout per Session and a Session's surface
+   * starts collapsed, so the swap would otherwise collapse a column the Human
+   * holds open (and seed nothing inside it). Only the conversation's own tabs
+   * — the files opened through it, its subagent views — follow the Member;
+   * the held open state is carried onto the arriving surface, and a closed
+   * column stays closed. The restore waits one frame past the swap's commit:
+   * the arriving seat adopts its Sidebar store during that commit, and the
+   * write refuses (and the read answers collapsed) until then.
+   */
+  const holdSidebarRightAcrossMemberSwap = (heldOpen: boolean): void => {
+    // A plain environment (wiring tests run outside a browser) has no frame
+    // clock; a timer stands in, and the write itself stays the readiness check.
+    const schedule = (fn: () => void): void => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fn)
+      else setTimeout(fn, 16)
+    }
+    const step = (attempts: number): void => {
+      if (attempts <= 0) return
+      schedule(() => {
+        try {
+          if (ctx.sidebarRight.isExpanded() !== heldOpen) ctx.sidebarRight.toggleExpanded()
+        } catch {
+          // The arriving seat has not adopted its store yet; try the next frame.
+          step(attempts - 1)
+        }
+      })
+    }
+    step(10)
+  }
+
   let lastMemberSessionId: AgentTeamClientMemberStatus['member']['sessionId'] | undefined
   const openMemberSessionImpl = (sessionId: AgentTeamClientMemberStatus['member']['sessionId']): void => {
     const snapshot = navigation.getSnapshot()
@@ -204,8 +236,14 @@ function applyUi(ctx: ClientContext): void {
     openedMemberSessions.set(ctx, memberSessions)
     memberSessions.add(sessionId)
     const returnTo = snapshot.memberSessionId === undefined && current !== undefined && current !== sessionId && !memberSessions.has(current) ? current : undefined
+    // A wiring state without a full Sidebar face (the shipped commands throw
+    // there too) has no column state to hold; the restore tolerates it the
+    // same way.
+    let heldOpen = false
+    try { heldOpen = ctx.sidebarRight.isExpanded() } catch { /* no Sidebar face mounted */ }
     navigation.actions().enterMemberSession(sessionId, returnTo)
     ctx.uiWorkspace.openSession(sessionId)
+    holdSidebarRightAcrossMemberSwap(heldOpen)
   }
 
   // The one restore owner: leaving an embedded Member Session view must

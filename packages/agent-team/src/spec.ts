@@ -49,6 +49,8 @@ export const MEMBER_CONTEXT_WINDOW_FLOOR = 8192
 export const MEMBER_MODEL_FALLBACK_MAX = 4
 /** Daily time windows one Member's model schedule may carry at most. */
 export const MEMBER_MODEL_SCHEDULE_WINDOW_MAX = 6
+/** Daily time windows one Member's stop schedule may carry at most. */
+export const MEMBER_STOP_SCHEDULE_WINDOW_MAX = 6
 /**
  * Half-open wall-clock time in the Team coordination zone (UTC+8): a
  * schedule window stamps `HH:MM` on a 24-hour day with no date component.

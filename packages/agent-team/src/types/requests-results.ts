@@ -21,6 +21,7 @@ import type {
   AgentTeamMemberModelSchedule,
   AgentTeamMentionRedirect,
   AgentTeamMemberPromptProfile,
+  AgentTeamMemberStopSchedule,
   AgentTeamMemberWatch,
   AgentTeamMemberWatchRef,
   AgentTeamMessage,
@@ -163,6 +164,13 @@ export interface AgentTeamUpdateMemberRequest {
    * through a context reset on its next pass.
    */
   readonly modelSchedule?: AgentTeamMemberModelSchedule
+  /**
+   * Absent clears the stop-run schedule back to no stop intent, matching
+   * `model`. Editing the schedule commits intent only: the stop-schedule
+   * monitor delivers its wrap-up, stop, and resume notices on the window
+   * boundaries, and never forces a running turn down.
+   */
+  readonly stopSchedule?: AgentTeamMemberStopSchedule
   /** Absent clears any capability override, matching `model`. */
   readonly capabilities?: AgentTeamMemberCapabilities
   /** Absent clears any prompt-profile override, matching `model`. */

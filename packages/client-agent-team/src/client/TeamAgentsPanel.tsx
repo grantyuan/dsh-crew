@@ -273,6 +273,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, loadMemberTasks, sub
         onClose={closeForm}
         title={t('addAgent')}
         closeLabel={t('close')}
+        className={createCss.dialogWide!}
         contentClassName={createCss.dialogContent!}
         footer={<><Button variant="outline" disabled={creating} onClick={closeForm}>{t('cancel')}</Button>{!importing && <Button type="submit" form="team-agent-create-form" variant="primary" disabled={creating || handle.trim().length === 0 || windowInvalid}>{creating ? t('creatingAgent') : t('createAgent')}</Button>}</>}
       >

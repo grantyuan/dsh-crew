@@ -56,10 +56,17 @@ async function bench(persisted: string | null = null) {
   // shipped Sidebar behind them.
   const openResource = vi.fn()
   const openTab = vi.fn()
+  // `isExpanded`/`toggleExpanded` are part of the shipped face the Member
+  // session swap reads to hold the column's open state; the bench answers
+  // collapsed so the restore path has nothing to do.
+  const isExpanded = vi.fn(() => false)
+  const toggleExpanded = vi.fn()
   ctx.provide('sidebarRight', {
     openResource,
     openTab,
     mounted: { getSnapshot: () => undefined, subscribe: () => () => {} },
+    isExpanded,
+    toggleExpanded,
   } as never)
   const tabTypes: { id: string; kind: string }[] = []
   ctx.provide('sidebarRightTabs', {

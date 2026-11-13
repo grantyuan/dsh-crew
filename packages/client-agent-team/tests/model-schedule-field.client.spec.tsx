@@ -40,7 +40,7 @@ describe('model schedule draft normalization', () => {
     expect(normalizeScheduleDraft(scheduleStoredDraft(stored))).toEqual(stored)
   })
 
-  it('drops blank and incomplete windows from the submitted schedule', () => {
+  it('pads lenient time inputs to the stored HH:MM and drops blank and incomplete windows', () => {
     const draft: ModelScheduleDraft = {
       enabled: true,
       windows: [
@@ -48,9 +48,17 @@ describe('model schedule draft normalization', () => {
         { start: '', end: '', selection: undefined },
         { start: '18:00', end: '23:00', selection: undefined },
         { start: '9:00', end: '18:00', selection: qwen },
+        { start: '9:5', end: '18:00', selection: qwen },
+        { start: '24:00', end: '18:00', selection: qwen },
       ],
     }
-    expect(normalizeScheduleDraft(draft)).toEqual({ enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek }] })
+    // `9:00` is what a Human naturally types; the ledger stores strict HH:MM,
+    // so the editor pads it instead of refusing it. Malformed bounds (`9:5`,
+    // `24:00`) still drop.
+    expect(normalizeScheduleDraft(draft)).toEqual({ enabled: true, windows: [
+      { start: '09:00', end: '18:00', selection: deepseek },
+      { start: '09:00', end: '18:00', selection: qwen },
+    ] })
   })
 
   it('flags incomplete windows, equal bounds, and an enabled schedule that demands nothing', () => {
@@ -58,6 +66,9 @@ describe('model schedule draft normalization', () => {
     expect(scheduleDraftInvalid({ enabled: true, windows: [] })).toBe(true)
     expect(scheduleDraftInvalid({ enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek }] })).toBe(false)
     expect(scheduleDraftInvalid({ enabled: false, windows: [{ start: '09:00', end: '09:00', selection: deepseek }] })).toBe(true)
+    // Equal bounds compare padded: `9:00` and `09:00` are the same instant.
+    expect(scheduleDraftInvalid({ enabled: false, windows: [{ start: '9:00', end: '09:00', selection: deepseek }] })).toBe(true)
+    expect(scheduleDraftInvalid({ enabled: false, windows: [{ start: '9:00', end: '18:00', selection: deepseek }] })).toBe(false)
     expect(scheduleDraftInvalid({ enabled: false, windows: [{ start: '09:00', end: '18:00', selection: undefined }] })).toBe(true)
     expect(scheduleDraftInvalid({ enabled: true, windows: [{ start: '', end: '', selection: undefined }] })).toBe(true)
   })
@@ -101,12 +112,25 @@ describe('ModelScheduleField surface', () => {
   })
 
   it('surfaces the rule alert while the draft is invalid and hides it once complete', () => {
-    const { rerender } = renderField({ enabled: true, windows: [{ start: '9:00', end: '18:00', selection: deepseek }] })
+    // The lenient `9:00` input pads to a valid bound now, so the invalid
+    // draft here is the missing model — the rule the picker cannot satisfy
+    // on its own.
+    const { rerender } = renderField({ enabled: true, windows: [{ start: '9:00', end: '18:00', selection: undefined }] })
     expect(screen.getByRole('alert').textContent).toContain('每个时间窗需要 HH:MM')
     rerender(
       <ModelScheduleField draft={{ enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek }] }} onChange={vi.fn()} applied={undefined} loadModels={catalogOk} disabled={false} t={t} />,
     )
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('reads the untouched window picker as the missing choice, never as a follow-default option', () => {
+    // The ledger refuses a follow-default window, so the idle trigger must not
+    // borrow the primary picker's legitimate "跟随全局默认" — it names the
+    // pick the row still owes, and only a chosen model satisfies the rule.
+    renderField({ enabled: true, windows: [{ start: '09:00', end: '18:00', selection: undefined }] })
+    const trigger = screen.getByRole('button', { name: '时间窗 #1' })
+    expect(trigger.textContent).toContain('选择模型…')
+    expect(trigger.textContent).not.toContain('跟随全局默认')
   })
 })
 

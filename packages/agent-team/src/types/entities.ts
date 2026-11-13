@@ -172,6 +172,37 @@ export interface AgentTeamMemberModelSchedule {
 }
 
 /**
+ * One daily stop-run window of a Member. Bounds follow the model-schedule
+ * window shape: `HH:MM` wall-clock times in the fixed Team coordination zone
+ * (UTC+8), `start` inclusive and `end` exclusive, wrapping past midnight when
+ * `end` is at or before `start` (the equal case is forbidden).
+ */
+export interface AgentTeamMemberStopWindow {
+  /** Team-zone wall-clock start `HH:MM` (inclusive). */
+  readonly start: string
+  /** Team-zone wall-clock end `HH:MM` (exclusive; wraps past midnight when ≤ start). */
+  readonly end: string
+}
+
+/**
+ * Durable stop-run intent of one Member: when enabled, the Member must not
+ * run inside the daily windows — half an hour before each window the Team
+ * Assistant tells a running Member to wrap its work up (handover document,
+ * progress-and-wrap-up report to the Manager before finishing, stating the
+ * stop interval), a Member still working once the window starts is told to
+ * stop, and after the window ends the Assistant tells it to start and ask
+ * the Manager how to carry on. Notifications only: the Host never kills a
+ * turn mid-flight, because the orderly wrap-up the notice asks for IS the
+ * contract. Hours no window covers carry no stop expectation. Windows are
+ * evaluated independently — overlapping windows share one stop meaning, and
+ * a resume notice fires once per window end.
+ */
+export interface AgentTeamMemberStopSchedule {
+  readonly enabled: boolean
+  readonly windows: readonly AgentTeamMemberStopWindow[]
+}
+
+/**
  * Durable capability intent of one Member, carried verbatim on the Member
  * entity through every lifecycle operation. Pure intent: names are not
  * validated against any known-tool list at commit time, so a Harness upgrade
@@ -241,6 +272,11 @@ export interface AgentTeamAgentMember {
    * Members written before the schedule existed omit the field.
    */
   readonly modelSchedule?: AgentTeamMemberModelSchedule | undefined
+  /**
+   * Durable stop-run intent; see AgentTeamMemberStopSchedule. Members written
+   * before the stop schedule existed omit the field.
+   */
+  readonly stopSchedule?: AgentTeamMemberStopSchedule | undefined
   /**
    * Route currently applied by the model schedule — never Human-authored,
    * written only by the `team/member-model-scheduled` operation the Host

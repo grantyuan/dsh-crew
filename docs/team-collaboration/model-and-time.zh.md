@@ -31,3 +31,13 @@ Member 可以携带 `modelSchedule`：一组按顺序解析的每日 `HH:MM` 时
 Host 的 model-schedule monitor 每个 pass 重新派生期望路由，并与持久化的已应用路由（Member entity 上的 `scheduledModel`，只由 monitor 以受托 Human authority 提交的 `team/member-model-scheduled` operation 移动）比较。每一次真实变更都经共享的 context-renewal 路径落地——与 Human 菜单的「重置」同一条路径——因此切换总是开启一个以新路由激活的全新 generation。turn 进行中的 Member 把切换推迟到第一个安静边界；跨边界宕机的 Host 在下一个 pass 收敛；持久化比较就是幂等性，切换绝不重复。
 
 在改变路由的边界前 10 分钟，monitor 以 Team Assistant 的口吻向该 Member 发出一条预告，点名即将到来的路由与切换时刻，让它来得及交接——把进行中的状态发进 Thread、把该留的笔记写进 private memory——然后重置才会清空其上下文。预告闩锁与其他 watcher 一致是 process-local 的：重启后的 Host 可能把一条预告再放行一次，但绝不会出现第二次切换。
+
+## 时间区间停止运行
+
+Member 可以携带 `stopSchedule`：一组每日 `HH:MM` 时间窗（Team 协调时区 UTC+8），窗口内该 Member 不得运行。窗口边界与 model schedule 的窗口形状一致——`start` 含端点、`end` 不含端点，`end` 早于或等于 `start` 时跨午夜——intent 通过同一个 `updateMember` Remote 编辑，与 `modelSchedule` 一样挂在 Member entity 上。
+
+Host 的 stop-schedule monitor 只把窗口转化为 Team Assistant 的通知。进入窗口前 30 分钟，Session 仍在的 Member 收到收尾通知：窗口开始时停止运行，完成或妥善停靠进行中的工作，把交接文档写进 private memory，并在完成前向 Manager（指定的 Leader）汇报工作进展与收尾情况，说明自己的停止区间。
+
+窗口开始后，仍在 turn 中的 Member 收到边界提醒，被要求停止且不开启新工作；窗口结束后一小时内，Member 收到恢复通知，被要求重新启动并向 Manager 获取后续工作的开展安排。
+
+Host 从不强行终止进行中的 turn——通知所要求的有序收尾本身就是契约，强行终止恰好会砍断那份 Manager 汇报。每条通知按边界只发一次；闩锁与其他 watcher 一致是 process-local 的，重启后的 Host 可能把一条通知再放行一次。未被窗口覆盖的小时没有停止要求。

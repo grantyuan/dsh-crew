@@ -67,6 +67,7 @@ import type {
   AgentTeamMemberInterruptResolvedOperation,
   AgentTeamMemberModelSchedule,
   AgentTeamMemberModelScheduledOperation,
+  AgentTeamMemberStopSchedule,
   AgentTeamMemberCapabilityChangedOperation,
   AgentTeamQuestionAnalyzedOperation,
   AgentTeamModelScheduleWindow,
@@ -177,7 +178,7 @@ import type {
   AgentTeamView,
   AgentTeamViewRequest,
 } from './types.ts'
-import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX, MEMBER_MODEL_SCHEDULE_WINDOW_MAX, MODEL_SCHEDULE_TIME_PATTERN } from './spec.ts'
+import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX, MEMBER_MODEL_SCHEDULE_WINDOW_MAX, MEMBER_STOP_SCHEDULE_WINDOW_MAX, MODEL_SCHEDULE_TIME_PATTERN } from './spec.ts'
 import { formatTeamTimestamp } from './time-format.ts'
 import { resolveBodyMentions, scanBodyHandles } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
@@ -828,6 +829,20 @@ function freezeModelSchedule(schedule: AgentTeamMemberModelSchedule | undefined)
   }
 }
 
+/** Deep-freeze a Member stop schedule overlay; absent stays absent. */
+function freezeStopSchedule(schedule: AgentTeamMemberStopSchedule | undefined): { stopSchedule?: AgentTeamMemberStopSchedule } {
+  if (schedule === undefined) return {}
+  return {
+    stopSchedule: Object.freeze({
+      enabled: schedule.enabled,
+      windows: Object.freeze(schedule.windows.map(window => Object.freeze({
+        start: window.start,
+        end: window.end,
+      }))),
+    }),
+  }
+}
+
 /** The custom role paragraph is bounded in UTF-8 bytes, so CJK prose costs what it ships. */
 const MEMBER_PROMPT_MAX_BYTES = 8192
 
@@ -1082,6 +1097,7 @@ export class AgentTeamLedger {
       this.assertModelSelection(request.model)
       this.assertModelFallbacks(request.modelFallbacks, request.model)
       this.assertModelSchedule(request.modelSchedule)
+      this.assertStopSchedule(request.stopSchedule)
       this.assertCapabilities(request.capabilities)
       this.assertContextControl(request.contextStartPolicy, request.contextWindow)
       this.assertPromptProfile(request.prompt)
@@ -1096,7 +1112,7 @@ export class AgentTeamLedger {
       // value when omitted (like `leader`): the Leader's `team_rate` and the
       // automatic assessment write the same fields, and an edit that does
       // not mention them must not wipe them.
-      const { model: _priorModel, modelFallbacks: _priorFallbacks, modelSchedule: _priorSchedule, capabilityScore: _priorScore, autoCapabilityAssessment: _priorAssessment, capabilities: _priorCapabilities, prompt: _priorPrompt, contextStartPolicy: _priorPolicy, contextWindow: _priorWindow, ...priorWithoutOverlays } = prior
+      const { model: _priorModel, modelFallbacks: _priorFallbacks, modelSchedule: _priorSchedule, stopSchedule: _priorStopSchedule, capabilityScore: _priorScore, autoCapabilityAssessment: _priorAssessment, capabilities: _priorCapabilities, prompt: _priorPrompt, contextStartPolicy: _priorPolicy, contextWindow: _priorWindow, ...priorWithoutOverlays } = prior
       const nextScore = request.capabilityScore === undefined ? prior.capabilityScore
         : request.capabilityScore === null ? undefined
         : request.capabilityScore
@@ -1105,6 +1121,7 @@ export class AgentTeamLedger {
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
         ...(request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? {} : { modelFallbacks: Object.freeze(request.modelFallbacks.map(fallback => Object.freeze({ ...fallback }))) }),
         ...freezeModelSchedule(request.modelSchedule),
+        ...freezeStopSchedule(request.stopSchedule),
         ...freezeCapabilities(request.capabilities),
         ...freezePromptProfile(normalizePromptProfile(request.prompt)),
         ...(request.contextStartPolicy === undefined ? {} : { contextStartPolicy: request.contextStartPolicy }),
@@ -6381,6 +6398,23 @@ export class AgentTeamLedger {
   }
 
   /**
+   * Stop schedule commit rule: the same window shape and bounds as the model
+   * schedule, with no route to assert — a stop window is a plain time span.
+   */
+  private assertStopSchedule(schedule: AgentTeamUpdateMemberRequest['stopSchedule']): void {
+    if (schedule === undefined) return
+    if (schedule.windows.length > MEMBER_STOP_SCHEDULE_WINDOW_MAX) {
+      throw new Error(`a Member stop schedule may carry at most ${MEMBER_STOP_SCHEDULE_WINDOW_MAX} windows`)
+    }
+    for (const window of schedule.windows) {
+      if (!MODEL_SCHEDULE_TIME_PATTERN.test(window.start) || !MODEL_SCHEDULE_TIME_PATTERN.test(window.end)) {
+        throw new Error('member stop schedule window bounds must be HH:MM times')
+      }
+      if (window.start === window.end) throw new Error('a member stop schedule window start must not equal its end')
+    }
+  }
+
+  /**
    * Capability allow-list entries are exact identifiers (skill names,
    * reserved tool names); only whitespace-only values are rejected. Unknown
    * names are intent, not errors — committing must stay replayable across
@@ -6511,6 +6545,7 @@ export class AgentTeamLedger {
       // window list is a distinct stored shape from an absent schedule.
       || !isDeepStrictEqual(operation.data.member.modelFallbacks ?? undefined, (request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? undefined : request.modelFallbacks))
       || !isDeepStrictEqual(operation.data.member.modelSchedule ?? undefined, request.modelSchedule ?? undefined)
+      || !isDeepStrictEqual(operation.data.member.stopSchedule ?? undefined, request.stopSchedule ?? undefined)
       || !isDeepStrictEqual(operation.data.member.capabilityScore ?? undefined, request.capabilityScore === undefined ? (operation.data.member.capabilityScore ?? undefined) : (request.capabilityScore === null ? undefined : request.capabilityScore))
       || (operation.data.member.autoCapabilityAssessment ?? undefined) !== (request.autoCapabilityAssessment ?? undefined)
       || !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.capabilities ?? undefined)

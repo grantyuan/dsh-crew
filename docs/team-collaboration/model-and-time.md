@@ -41,3 +41,13 @@ The Host's model-schedule monitor re-derives the desired route each pass and com
 A mid-turn Member defers the switch to its first quiet boundary, and a Host that was down across a boundary converges on the next pass; the durable comparison is the idempotence, so a switch never duplicates.
 
 Ten minutes before a route-changing boundary the monitor posts one heads-up in the Team Assistant's voice, addressed to the Member with the incoming route and the switch moment, so it can hand its work over — post in-flight state to the Threads, write durable notes to private memory — before the reset empties its context. The reminder latch is process-local like every watcher's: a restarted Host may let one heads-up through a second time, never a second switch.
+
+## Time-interval stop-run scheduling
+
+A Member may carry a `stopSchedule`: an ordered list of daily `HH:MM` windows in the Team coordination zone UTC+8 during which the Member must not run. Bounds follow the model-schedule window shape — `start` inclusive, `end` exclusive, wrapping past midnight when `end` is at or before `start` — and the intent edits through the same `updateMember` Remote, riding the Member entity like `modelSchedule`.
+
+The Host's stop-schedule monitor turns the windows into Team Assistant notifications only. Half an hour before a window opens, a Member whose Session is live receives the wrap-up notice: stop running when the window starts, finish or park the in-flight work, write the handover document into private memory, and report progress and wrap-up status to the Manager (the designated Leader) before finishing, stating the stop interval.
+
+Once the window has started, a Member still mid-turn receives the boundary reminder to stop and start nothing new; within an hour after the window ends, the Member receives the resume notice telling it to start again and ask the Manager how to carry out the follow-up work.
+
+The Host never forces a running turn down — the orderly wrap-up the notice asks for is the contract, and a killed turn would cut exactly that Manager report short. Notices fire once per boundary; the latch is process-local like every watcher's, so a restarted Host may let one notice through a second time. Hours no window covers carry no stop expectation.

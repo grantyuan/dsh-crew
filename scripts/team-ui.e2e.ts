@@ -670,6 +670,35 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await expect.poll(async () => await editSave.isDisabled()).toBe(true)
   await agentEditor.getByRole('button', { name: '关闭', exact: true }).click()
 
+  // The stop-run schedule rides the editor as its own field: an untouched
+  // Member renders the enable switch and the add action, a drawn window
+  // validates locally, and the save commits the durable intent through the
+  // real Host — the reopen echoes it back.
+  await builderRow.hover()
+  await builderRow.getByRole('button', { name: 'builder 的操作' }).click()
+  await page.getByRole('menuitem', { name: '编辑 Agent' }).click()
+  const stopEditor = page.getByRole('dialog', { name: '编辑 Agent' })
+  await stopEditor.getByRole('button', { name: '添加停止区间' }).waitFor()
+  await expect.poll(async () => await editSave.isDisabled()).toBe(true)
+  await stopEditor.getByRole('button', { name: '添加停止区间' }).click()
+  await stopEditor.getByLabel('停止区间 #1 开始').fill('9:00')
+  await stopEditor.getByText('每个停止区间需要 HH:MM(UTC+8) 的开始与结束时间;开始与结束不能相同;启用日程至少需要一个完整区间。').waitFor()
+  await expect.poll(async () => await editSave.isDisabled()).toBe(true)
+  await stopEditor.getByLabel('停止区间 #1 开始').fill('22:00')
+  await stopEditor.getByLabel('停止区间 #1 结束').fill('06:00')
+  await expect.poll(() => stopEditor.getByText('每个停止区间需要 HH:MM(UTC+8) 的开始与结束时间;开始与结束不能相同;启用日程至少需要一个完整区间。').count()).toBe(0)
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule.png'), fullPage: true })
+  await editSave.click()
+  await expect.poll(() => page.getByRole('dialog', { name: '编辑 Agent' }).count()).toBe(0, { timeout: 30_000 })
+  await builderRow.hover()
+  await builderRow.getByRole('button', { name: 'builder 的操作' }).click()
+  await page.getByRole('menuitem', { name: '编辑 Agent' }).click()
+  const stopReopen = page.getByRole('dialog', { name: '编辑 Agent' })
+  await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 开始').inputValue()).toBe('22:00')
+  await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 结束').inputValue()).toBe('06:00')
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-echo.png'), fullPage: true })
+  await stopReopen.getByRole('button', { name: '关闭', exact: true }).click()
+
   // The custom role paragraph rides the editor as its own durable dialog: a
   // fresh memberPromptView read fills the textarea, the live UTF-8 counter
   // mirrors the Host ceiling, and the save commits one echo-complete member
@@ -2232,8 +2261,8 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   expect(narrowFit.rowHeight).toBeLessThanOrEqual(60)
   await settleAnimations(page)
   await page.screenshot({ path: join(UI07_SHOTS, 'inbox-page-narrow.png'), fullPage: true })
-  // The expanded seat above is the side effect of the rail icon being a
-  // destination; on a phone the ordinary reading state is the collapsed rail,
+  // The expanded seat above is the side effect of the drawer card being a
+  // destination; on a phone the ordinary reading state is the collapsed drawer,
   // so the queue gets that face too — and there the row keeps its compact shape
   // rather than the folded one the crushed seat forces. The breakpoint may
   // already have folded the column back by now, so the collapse is taken from
