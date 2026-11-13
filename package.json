@@ -1,6 +1,6 @@
 {
   "name": "@grantyuan/dsh-crew",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "license": "MIT",
   "description": "A persistent agent team for long-running collaboration in DeepSeek Harness",
   "repository": {
