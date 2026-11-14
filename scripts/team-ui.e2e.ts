@@ -719,13 +719,27 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周一' }).getAttribute('aria-pressed')).toBe('true')
   await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周五' }).getAttribute('aria-pressed')).toBe('true')
   await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周二' }).getAttribute('aria-pressed')).toBe('false')
+  // The dialog body scrolls internally, so every recurrence capture scrolls the
+  // line into view first — a full-page shot of the untouched scroll state would
+  // only show the dialog header. The keyboard walk ahead of the echo shot is
+  // the focus proof: four Tabs from the start bound land on the pressed chip,
+  // whose ring stays visible over its already-brand resting border.
+  await stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).scrollIntoViewIfNeeded()
+  await stopReopen.getByLabel('停止区间 #1 开始').focus()
+  await page.keyboard.press('Tab')
+  await page.keyboard.press('Tab')
+  await page.keyboard.press('Tab')
+  await page.keyboard.press('Tab')
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('停止区间 #1 周一')
+  await settleAnimations(page)
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-chip-focus.png'), fullPage: true })
+  // The echo capture shows the resting state, not the focus walk's ring.
+  await stopReopen.getByLabel('停止区间 #1 开始').focus()
+  await stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).scrollIntoViewIfNeeded()
   await settleAnimations(page)
   await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-echo.png'), fullPage: true })
   // The recurrence line rides the 390 breakpoint too: the dropdown, the chips,
   // and the time fields wrap inside the viewport without horizontal overflow.
-  // The dialog body scrolls internally, so the capture scrolls the recurrence
-  // line into view first — a full-page shot of the untouched scroll state would
-  // only show the dialog header.
   await page.setViewportSize({ width: 390, height: 844 })
   await settleLayout(page)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
