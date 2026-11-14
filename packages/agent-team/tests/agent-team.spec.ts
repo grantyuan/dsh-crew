@@ -3974,6 +3974,52 @@ describe('AgentTeam Member model schedule', () => {
     })).resolves.toBeDefined()
   })
 
+  it('rejects a stored ledger whose recurrence drifts past the replay shape', async () => {
+    const pool = new MemoryMediaPool()
+    const first = await harness(pool)
+    const ledger = replayLedger(first)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:recurrence-durable', 'recurrence-durable')
+    const base = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    await ledger.updateMember({
+      ...base, requestId: requestId('recurrence-durable-store'),
+      modelSchedule: { enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek, recurrence: { kind: 'workdays' } }] },
+      stopSchedule: { enabled: true, windows: [{ start: '22:00', end: '06:00', recurrence: { kind: 'everyDays', intervalDays: 3, anchorDate: '2026-11-10' } }] },
+    })
+    const records = [...pool.media.get('agent_team')!.tables.get('operations')!.entries()]
+    await first.fiber.dispose()
+    cleanups.pop()
+    // Control: the untouched records reopen cleanly, so the rejections below
+    // are the recurrence's doing, not the forging's.
+    const control = await harness(storedPool(structuredClone(records)))
+    expect(replayLedger(control).getMember(member.memberId)?.modelSchedule).toBeDefined()
+    await control.fiber.dispose()
+    cleanups.pop()
+    // The replay schema must stay at least as strict as the commit gate: a
+    // record carrying a recurrence the gate would refuse must fail the next
+    // domain open, on both schedule surfaces, never silently load.
+    const recurrenceOf = (value: unknown): AgentTeamScheduleRecurrence => value as AgentTeamScheduleRecurrence
+    const forgedWith = (bad: AgentTeamScheduleRecurrence): Array<[string, unknown]> =>
+      structuredClone(records).map(([key, operation]) => {
+        if (typeof operation !== 'object' || operation === null || (operation as AgentTeamOperation).kind !== 'team/member-updated') return [key, operation] as [string, unknown]
+        const updated = operation as Extract<AgentTeamOperation, { kind: 'team/member-updated' }>
+        const member = updated.data.member
+        const model = member.modelSchedule
+        const stop = member.stopSchedule
+        return [key, { ...updated, data: { ...updated.data, member: {
+          ...member,
+          ...(model === undefined ? {} : { modelSchedule: { ...model, windows: model.windows.map(window => ({ ...window, recurrence: bad })) } }),
+          ...(stop === undefined ? {} : { stopSchedule: { ...stop, windows: stop.windows.map(window => ({ ...window, recurrence: bad })) } }),
+        } } }] as [string, unknown]
+      })
+    for (const bad of [
+      recurrenceOf({ kind: 'weekdays' }),
+      recurrenceOf({ kind: 'everyDays', intervalDays: 0, anchorDate: '2026-11-10' }),
+      recurrenceOf({ kind: 'yearly', month: 2, day: 30 }),
+    ]) {
+      await expect(harness(storedPool(forgedWith(bad)))).rejects.toThrow(/does not match its schema/)
+    }
+  })
+
   it('lands the applied route as an auditable operation with idempotent retries and cold convergence', async () => {
     const test = await harness()
     const ledger = replayLedger(test)
