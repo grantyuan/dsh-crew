@@ -271,44 +271,48 @@ export function describeRecurrence(recurrence: AgentTeamScheduleRecurrence | und
  * parameters must be integers in their declared ranges and dates must be
  * real calendar shapes (the yearly February cap allows 29; a concrete anchor
  * date must exist in its own year). What a shape MEANS on a non-leap-year
- * February 29th — silence, no window — is intent, never an error.
+ * February 29th — silence, no window — is intent, never an error. The family
+ * prefixes the rejection (`member model schedule recurrence …`) so a Human
+ * editing both schedules in one request can tell the two apart, like the
+ * window bounds errors do.
  */
-export function assertScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined): void {
+export function assertScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined, family: 'model schedule' | 'stop schedule'): void {
   if (recurrence === undefined) return
+  const label = `member ${family} recurrence`
   switch (recurrence.kind) {
     case 'daily':
     case 'workdays':
       return
     case 'everyDays':
       if (!Number.isInteger(recurrence.intervalDays) || recurrence.intervalDays < 1 || recurrence.intervalDays > 366) {
-        throw new Error('schedule recurrence intervalDays must be an integer from 1 to 366')
+        throw new Error(`${label} intervalDays must be an integer from 1 to 366, an interval spanning at most one leap year`)
       }
       if (!isValidCalendarDateText(recurrence.anchorDate)) {
-        throw new Error('schedule recurrence anchorDate must be a YYYY-MM-DD calendar date')
+        throw new Error(`${label} anchorDate must be a YYYY-MM-DD calendar date`)
       }
       return
     case 'weekly':
-      if (recurrence.weekdays.length === 0) throw new Error('schedule recurrence weekdays must list at least one weekday')
+      if (recurrence.weekdays.length === 0) throw new Error(`${label} weekdays must list at least one weekday`)
       if (recurrence.weekdays.some(weekday => !Number.isInteger(weekday) || weekday < 1 || weekday > 7)) {
-        throw new Error('schedule recurrence weekdays must be ISO weekdays 1 (Monday) through 7 (Sunday)')
+        throw new Error(`${label} weekdays must be ISO weekdays 1 (Monday) through 7 (Sunday)`)
       }
       if (new Set(recurrence.weekdays).size !== recurrence.weekdays.length) {
-        throw new Error('schedule recurrence weekdays must not repeat a weekday')
+        throw new Error(`${label} weekdays must not repeat a weekday`)
       }
       return
     case 'monthly':
       if (!Number.isInteger(recurrence.dayOfMonth) || recurrence.dayOfMonth < 1 || recurrence.dayOfMonth > 31) {
-        throw new Error('schedule recurrence dayOfMonth must be an integer from 1 to 31')
+        throw new Error(`${label} dayOfMonth must be an integer from 1 to 31`)
       }
       return
     case 'yearly':
       if (!Number.isInteger(recurrence.month) || recurrence.month < 1 || recurrence.month > 12) {
-        throw new Error('schedule recurrence yearly month must be an integer from 1 to 12')
+        throw new Error(`${label} yearly month must be an integer from 1 to 12`)
       }
       if (!isValidYearlyDay(recurrence.month, recurrence.day)) {
-        throw new Error('schedule recurrence yearly day must exist in the month (February allows 29)')
+        throw new Error(`${label} yearly day must exist in the month (February allows 29)`)
       }
       return
   }
-  throw new Error('schedule recurrence kind must be one of daily, workdays, everyDays, weekly, monthly, yearly')
+  throw new Error(`${label} kind must be one of daily, workdays, everyDays, weekly, monthly, yearly`)
 }

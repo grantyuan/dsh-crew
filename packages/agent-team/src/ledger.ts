@@ -832,6 +832,10 @@ function freezeScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence): Agen
     case 'yearly':
       return Object.freeze({ kind: 'yearly', month: recurrence.month, day: recurrence.day })
   }
+  // The commit gate rejects anything outside the declared kinds before a
+  // freeze can run; a fall-through here would store a parameterless
+  // recurrence instead of failing loudly.
+  throw new Error('cannot freeze a recurrence whose kind is not one of the declared six')
 }
 
 /** Deep-freeze a Member model schedule overlay; absent stays absent. */
@@ -6416,7 +6420,7 @@ export class AgentTeamLedger {
         throw new Error('member model schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member model schedule window start must not equal its end')
-      assertScheduleRecurrence(window.recurrence)
+      assertScheduleRecurrence(window.recurrence, 'model schedule')
       this.assertModelSelection(window.selection)
     }
   }
@@ -6436,7 +6440,7 @@ export class AgentTeamLedger {
         throw new Error('member stop schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member stop schedule window start must not equal its end')
-      assertScheduleRecurrence(window.recurrence)
+      assertScheduleRecurrence(window.recurrence, 'stop schedule')
     }
   }
 

@@ -157,7 +157,9 @@ export type AgentTeamScheduleRecurrence =
   /**
    * Every N days counting from the anchor date: the anchor day itself is
    * effective, then every `intervalDays`-th day after it; days before the
-   * anchor never match.
+   * anchor never match. The 366-day cap bounds one interval at a single
+   * leap year, so the window recurs at least once a year — a longer cadence
+   * is the `yearly` kind's job, not a wider interval.
    */
   | { readonly kind: 'everyDays'; readonly intervalDays: number; readonly anchorDate: string }
   /** The listed ISO weekdays (1 = Monday … 7 = Sunday); at least one. */

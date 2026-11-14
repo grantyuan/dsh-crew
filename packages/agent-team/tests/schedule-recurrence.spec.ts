@@ -199,53 +199,66 @@ describe('describeRecurrence (the notice phrase)', () => {
 })
 
 describe('assertScheduleRecurrence (the commit shape rule)', () => {
-  it('accepts the six kinds with valid parameters', () => {
-    expect(() => assertScheduleRecurrence(daily())).not.toThrow()
-    expect(() => assertScheduleRecurrence(workdays())).not.toThrow()
-    expect(() => assertScheduleRecurrence(everyDays(1, '2026-11-10'))).not.toThrow()
-    expect(() => assertScheduleRecurrence(everyDays(366, '2024-02-29'))).not.toThrow()
-    expect(() => assertScheduleRecurrence(weekly(1, 4, 7))).not.toThrow()
-    expect(() => assertScheduleRecurrence(monthly(31))).not.toThrow()
-    expect(() => assertScheduleRecurrence(yearly(2, 29))).not.toThrow()
+  // The ledger calls the rule once per schedule family; the family names the
+  // rejection so a Human editing both schedules in one request can tell them apart.
+  const assertModelRecurrence = (recurrence?: AgentTeamScheduleRecurrence): void => assertScheduleRecurrence(recurrence, 'model schedule')
+  const assertStopRecurrence = (recurrence?: AgentTeamScheduleRecurrence): void => assertScheduleRecurrence(recurrence, 'stop schedule')
+
+  it('accepts the six kinds with valid parameters, either family', () => {
+    expect(() => assertModelRecurrence(daily())).not.toThrow()
+    expect(() => assertModelRecurrence(workdays())).not.toThrow()
+    expect(() => assertModelRecurrence(everyDays(1, '2026-11-10'))).not.toThrow()
+    expect(() => assertModelRecurrence(everyDays(366, '2024-02-29'))).not.toThrow()
+    expect(() => assertModelRecurrence(weekly(1, 4, 7))).not.toThrow()
+    expect(() => assertModelRecurrence(monthly(31))).not.toThrow()
+    expect(() => assertModelRecurrence(yearly(2, 29))).not.toThrow()
+    expect(() => assertStopRecurrence(yearly(2, 29))).not.toThrow()
   })
 
   it('rejects an unknown kind', () => {
-    expect(() => assertScheduleRecurrence({ kind: 'weekdays' } as never)).toThrow(/kind/)
+    expect(() => assertModelRecurrence({ kind: 'weekdays' } as never)).toThrow(/kind/)
   })
 
   it('rejects an everyDays interval outside 1..366 or a non-integer one', () => {
-    expect(() => assertScheduleRecurrence(everyDays(0, '2026-11-10'))).toThrow(/intervalDays/)
-    expect(() => assertScheduleRecurrence(everyDays(367, '2026-11-10'))).toThrow(/intervalDays/)
-    expect(() => assertScheduleRecurrence(everyDays(2.5, '2026-11-10'))).toThrow(/intervalDays/)
+    expect(() => assertModelRecurrence(everyDays(0, '2026-11-10'))).toThrow(/intervalDays/)
+    expect(() => assertModelRecurrence(everyDays(367, '2026-11-10'))).toThrow(/intervalDays/)
+    expect(() => assertModelRecurrence(everyDays(2.5, '2026-11-10'))).toThrow(/intervalDays/)
   })
 
   it('rejects an everyDays anchor that is not a real calendar date', () => {
-    expect(() => assertScheduleRecurrence(everyDays(3, '2026-02-30'))).toThrow(/anchorDate/)
-    expect(() => assertScheduleRecurrence(everyDays(3, '2026-13-01'))).toThrow(/anchorDate/)
-    expect(() => assertScheduleRecurrence(everyDays(3, '20261110'))).toThrow(/anchorDate/)
-    expect(() => assertScheduleRecurrence(everyDays(3, '2026-11-10T00:00'))).toThrow(/anchorDate/)
+    expect(() => assertModelRecurrence(everyDays(3, '2026-02-30'))).toThrow(/anchorDate/)
+    expect(() => assertModelRecurrence(everyDays(3, '2026-13-01'))).toThrow(/anchorDate/)
+    expect(() => assertModelRecurrence(everyDays(3, '20261110'))).toThrow(/anchorDate/)
+    expect(() => assertModelRecurrence(everyDays(3, '2026-11-10T00:00'))).toThrow(/anchorDate/)
   })
 
   it('rejects weekly weekday lists that are empty, out of range, or repeated', () => {
     const raw = (value: unknown): AgentTeamScheduleRecurrence => value as AgentTeamScheduleRecurrence
-    expect(() => assertScheduleRecurrence(weekly())).toThrow(/weekday/)
-    expect(() => assertScheduleRecurrence(raw({ kind: 'weekly', weekdays: [0, 1] }))).toThrow(/weekday/)
-    expect(() => assertScheduleRecurrence(raw({ kind: 'weekly', weekdays: [1, 8] }))).toThrow(/weekday/)
-    expect(() => assertScheduleRecurrence(raw({ kind: 'weekly', weekdays: [3, 3] }))).toThrow(/weekday/)
+    expect(() => assertModelRecurrence(weekly())).toThrow(/weekday/)
+    expect(() => assertModelRecurrence(raw({ kind: 'weekly', weekdays: [0, 1] }))).toThrow(/weekday/)
+    expect(() => assertModelRecurrence(raw({ kind: 'weekly', weekdays: [1, 8] }))).toThrow(/weekday/)
+    expect(() => assertModelRecurrence(raw({ kind: 'weekly', weekdays: [3, 3] }))).toThrow(/weekday/)
   })
 
   it('rejects a monthly day outside 1..31', () => {
-    expect(() => assertScheduleRecurrence(monthly(0))).toThrow(/dayOfMonth/)
-    expect(() => assertScheduleRecurrence(monthly(32))).toThrow(/dayOfMonth/)
-    expect(() => assertScheduleRecurrence(monthly(1.5))).toThrow(/dayOfMonth/)
+    expect(() => assertModelRecurrence(monthly(0))).toThrow(/dayOfMonth/)
+    expect(() => assertModelRecurrence(monthly(32))).toThrow(/dayOfMonth/)
+    expect(() => assertModelRecurrence(monthly(1.5))).toThrow(/dayOfMonth/)
   })
 
   it('rejects a yearly date outside its month or 02-30, accepting 02-29', () => {
-    expect(() => assertScheduleRecurrence(yearly(0, 15))).toThrow(/yearly/)
-    expect(() => assertScheduleRecurrence(yearly(13, 15))).toThrow(/yearly/)
-    expect(() => assertScheduleRecurrence(yearly(2, 30))).toThrow(/yearly/)
-    expect(() => assertScheduleRecurrence(yearly(4, 31))).toThrow(/yearly/)
-    expect(() => assertScheduleRecurrence(yearly(2, 29))).not.toThrow() // pattern rule: February caps at 29
+    expect(() => assertModelRecurrence(yearly(0, 15))).toThrow(/yearly/)
+    expect(() => assertModelRecurrence(yearly(13, 15))).toThrow(/yearly/)
+    expect(() => assertModelRecurrence(yearly(2, 30))).toThrow(/yearly/)
+    expect(() => assertModelRecurrence(yearly(4, 31))).toThrow(/yearly/)
+    expect(() => assertModelRecurrence(yearly(2, 29))).not.toThrow() // pattern rule: February caps at 29
+  })
+
+  it('names the schedule family in every rejection, like the window bounds errors', () => {
+    expect(() => assertScheduleRecurrence(everyDays(0, '2026-11-10'), 'model schedule')).toThrow(/member model schedule recurrence intervalDays/)
+    expect(() => assertScheduleRecurrence(everyDays(0, '2026-11-10'), 'stop schedule')).toThrow(/member stop schedule recurrence intervalDays/)
+    expect(() => assertScheduleRecurrence({ kind: 'weekdays' } as never, 'stop schedule')).toThrow(/member stop schedule recurrence kind/)
+    expect(() => assertScheduleRecurrence(yearly(2, 30), 'model schedule')).toThrow(/member model schedule recurrence yearly day/)
   })
 })
 
