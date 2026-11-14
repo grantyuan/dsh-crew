@@ -37,18 +37,11 @@ import type {
 import {
   MINUTES_PER_DAY,
   MS_PER_MINUTE,
-  TEAM_ZONE_OFFSET_MS,
   describeRecurrence,
   parseScheduleMinute,
   teamAbsoluteMinute,
-  teamMinuteOfDay,
   windowOccurrencesAround,
 } from './schedule-recurrence.ts'
-
-// The Team-zone minute primitives and the window-bounds parser live in the
-// recurrence authority (both schedules and the candidate-day expansion share
-// them); this module keeps them importable from their historical path.
-export { MINUTES_PER_DAY, TEAM_ZONE_OFFSET_MS, parseScheduleMinute, teamAbsoluteMinute, teamMinuteOfDay }
 
 /** How often the monitor re-derives desired routes; matches the watch/liaison cadence. */
 export const MODEL_SCHEDULE_PASS_INTERVAL_MS = 30 * 1000
@@ -57,10 +50,12 @@ export const MODEL_SCHEDULE_PASS_INTERVAL_MS = 30 * 1000
 export const MODEL_SCHEDULE_NOTICE_AHEAD_MS = 10 * 60 * 1000
 
 /**
- * Whether one window covers the given Team-zone day minute (start inclusive,
- * end exclusive, wrap allowed). The bounds-only shape is the shared window
- * arithmetic: the model schedule's routed windows and the stop schedule's
- * plain spans both satisfy it.
+ * The retained pre-recurrence bounds-only cover test (start inclusive, end
+ * exclusive, wrap allowed). It knows nothing about recurrences — testing a
+ * recurrence-bearing window with it would silently ignore the effective days
+ * — so it survives only for the legacy {@link resolveScheduleRoute} call
+ * shape. The live coverage authority both schedules consume is
+ * {@link windowOccurrencesOn} in `src/schedule-recurrence.ts`.
  */
 export function scheduleWindowCovers(window: { readonly start: string; readonly end: string }, minuteOfDay: number): boolean {
   const start = parseScheduleMinute(window.start)
@@ -96,7 +91,9 @@ export function resolveScheduleRouteAt(schedule: AgentTeamMemberModelSchedule, e
  * exactly what {@link resolveScheduleRouteAt} answers on any day (the modular
  * bounds test and the expanded occurrences agree minute for minute). A window
  * carrying a recurrence has no day-independent answer; callers resolving real
- * moments must use {@link resolveScheduleRouteAt}.
+ * moments must use {@link resolveScheduleRouteAt}. No live production call
+ * site remains — the monitor resolves instants — so this survives as the
+ * legacy contract and the equivalence oracle the tests pin.
  */
 export function resolveScheduleRoute(schedule: AgentTeamMemberModelSchedule, minuteOfDay: number): AgentTeamModelSelection | undefined {
   if (!schedule.enabled) return undefined

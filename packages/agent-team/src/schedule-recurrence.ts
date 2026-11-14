@@ -34,7 +34,7 @@ export const MS_PER_MINUTE = 60_000
 /** Parse one `HH:MM` schedule bound into Team-zone day minutes (0..1439). */
 export function parseScheduleMinute(text: string): number {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(text)
-  if (match === null) throw new Error(`invalid model schedule time '${text}'`)
+  if (match === null) throw new Error(`invalid schedule window time '${text}'`)
   return Number(match[1]) * 60 + Number(match[2])
 }
 

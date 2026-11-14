@@ -2,16 +2,15 @@ import { describe, expect, it } from 'vitest'
 import {
   ModelScheduleMonitor,
   modelScheduleSwitchNoticeText,
-  parseScheduleMinute,
   resolveScheduleRoute,
   sameScheduleRoute,
   scheduleRouteKey,
   scheduleWindowCovers,
-  teamMinuteOfDay,
   upcomingRouteChanges,
   MODEL_SCHEDULE_NOTICE_AHEAD_MS,
   type ModelScheduleBoundary,
 } from '../src/model-schedule.ts'
+import { parseScheduleMinute, teamMinuteOfDay } from '../src/schedule-recurrence.ts'
 import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamModelSelection } from '../src/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
