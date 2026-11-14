@@ -189,12 +189,12 @@ export interface AgentTeamModelScheduleWindow {
 /**
  * Durable time-interval model-routing intent of one Member: when enabled,
  * the Host's model-schedule monitor keeps the Member's live route on the
- * first covering window's selection, and every actual change of the
- * effective route is applied through a context reset (a fresh Session that
- * activates on the new route). Hours no window covers follow the Member's
- * pinned model (and the Host default) as before. Windows are evaluated in
- * order — the first cover wins; overlapping windows are allowed and never
- * silently merged.
+ * first covering window's selection on the days that window is effective,
+ * and every actual change of the effective route is applied through a
+ * context reset (a fresh Session that activates on the new route). Hours no
+ * window covers follow the Member's pinned model (and the Host default) as
+ * before. Windows are evaluated in order — the first cover wins; overlapping
+ * windows are allowed and never silently merged.
  */
 export interface AgentTeamMemberModelSchedule {
   readonly enabled: boolean
@@ -220,16 +220,16 @@ export interface AgentTeamMemberStopWindow {
 
 /**
  * Durable stop-run intent of one Member: when enabled, the Member must not
- * run inside the daily windows — half an hour before each window the Team
- * Assistant tells a running Member to wrap its work up (handover document,
- * progress-and-wrap-up report to the Manager before finishing, stating the
- * stop interval), a Member still working once the window starts is told to
- * stop, and after the window ends the Assistant tells it to start and ask
- * the Manager how to carry on. Notifications only: the Host never kills a
- * turn mid-flight, because the orderly wrap-up the notice asks for IS the
- * contract. Hours no window covers carry no stop expectation. Windows are
- * evaluated independently — overlapping windows share one stop meaning, and
- * a resume notice fires once per window end.
+ * run inside the windows on the days they are effective — half an hour before
+ * each window the Team Assistant tells a running Member to wrap its work up
+ * (handover document, progress-and-wrap-up report to the Manager before
+ * finishing, stating the stop interval), a Member still working once the
+ * window starts is told to stop, and after the window ends the Assistant
+ * tells it to start and ask the Manager how to carry on. Notifications only:
+ * the Host never kills a turn mid-flight, because the orderly wrap-up the
+ * notice asks for IS the contract. Hours no window covers carry no stop
+ * expectation. Windows are evaluated independently — overlapping windows
+ * share one stop meaning, and a resume notice fires once per window end.
  */
 export interface AgentTeamMemberStopSchedule {
   readonly enabled: boolean
