@@ -3971,6 +3971,7 @@ export default class AgentTeam extends TypertRemoteService {
         memberHandle: member.handle,
         whenText: formatTeamTimestamp(new Date(boundary.atMs).toISOString()),
         incoming: boundary.incoming,
+        recurrenceText: boundary.recurrenceText,
       }),
       recipients: [member.memberId],
       asTask: false,

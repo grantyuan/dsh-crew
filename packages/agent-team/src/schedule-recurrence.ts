@@ -29,7 +29,7 @@ import { TEAM_ZONE_OFFSET_MINUTES } from './time-format.ts'
 /** Minutes in one day — the wrap-around modulus of every Team-zone minute computation. */
 export const MINUTES_PER_DAY = 24 * 60
 export const TEAM_ZONE_OFFSET_MS = TEAM_ZONE_OFFSET_MINUTES * 60_000
-const MS_PER_MINUTE = 60_000
+export const MS_PER_MINUTE = 60_000
 
 /** Parse one `HH:MM` schedule bound into Team-zone day minutes (0..1439). */
 export function parseScheduleMinute(text: string): number {

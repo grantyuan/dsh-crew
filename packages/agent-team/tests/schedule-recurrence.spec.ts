@@ -8,7 +8,16 @@ import {
   windowOccurrencesAround,
   windowOccurrencesOn,
 } from '../src/schedule-recurrence.ts'
-import type { AgentTeamScheduleRecurrence } from '../src/types.ts'
+import {
+  ModelScheduleMonitor,
+  modelScheduleSwitchNoticeText,
+  resolveScheduleRoute,
+  resolveScheduleRouteAt,
+  upcomingRouteChanges,
+} from '../src/model-schedule.ts'
+import type { AgentTeamAgentMember, AgentTeamMemberModelSchedule, AgentTeamModelSelection, AgentTeamScheduleRecurrence } from '../src/types.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 
 // Team zone is UTC+8. Calendar facts used below (proleptic Gregorian, no DST
 // in a fixed offset): 2026-11-09 is a Monday, 2026-11-13 a Friday, 2026-11-14
@@ -227,5 +236,188 @@ describe('assertScheduleRecurrence (the commit shape rule)', () => {
     expect(() => assertScheduleRecurrence(yearly(2, 30))).toThrow(/yearly/)
     expect(() => assertScheduleRecurrence(yearly(4, 31))).toThrow(/yearly/)
     expect(() => assertScheduleRecurrence(yearly(2, 29))).not.toThrow() // pattern rule: February caps at 29
+  })
+})
+
+const deepseek = (): AgentTeamModelSelection => ({ provider: 'deepseek', model: 'deepseek-flash' })
+const qwen = (): AgentTeamModelSelection => ({ provider: 'qwen', model: 'qwen3.8-flash' })
+
+const modelWindow = (start: string, end: string, selection: AgentTeamModelSelection, recurrence?: AgentTeamScheduleRecurrence) =>
+  ({ start, end, selection, ...(recurrence === undefined ? {} : { recurrence }) })
+const scheduleOf = (enabled: boolean, ...windows: readonly AgentTeamMemberModelSchedule['windows']): AgentTeamMemberModelSchedule =>
+  ({ enabled, windows })
+
+function member(overrides: { readonly memberId: string } & Partial<Omit<AgentTeamAgentMember, 'memberId'>>): AgentTeamAgentMember {
+  return {
+    sessionId: SessionId(`session:${overrides.memberId}`),
+    workspaceId: WorkspaceId('workspace:alpha'),
+    handle: 'worker',
+    description: '',
+    presetId: 'team-member',
+    privateMemoryPath: '/tmp/x',
+    state: 'enabled',
+    ...overrides,
+    memberId: overrides.memberId as never,
+  } as AgentTeamAgentMember
+}
+
+describe('resolveScheduleRouteAt (coverage by expanded occurrences)', () => {
+  it('covers only the days the recurrence matches, list order deciding overlaps', () => {
+    const schedule = scheduleOf(true,
+      modelWindow('09:00', '18:00', deepseek(), workdays()),
+      modelWindow('09:00', '18:00', qwen(), weekly(6, 7)),
+    )
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-16T10:00'))).toEqual(deepseek()) // Monday: workdays window
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T10:00'))).toEqual(qwen()) // Saturday: weekend window
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T07:00'))).toBeUndefined() // outside the bounds both days
+  })
+
+  it('lets the FIRST covering window win against any later window, whatever its recurrence', () => {
+    const schedule = scheduleOf(true,
+      modelWindow('09:00', '12:00', deepseek(), weekly(1, 2, 3, 4, 5, 6, 7)),
+      modelWindow('09:00', '18:00', qwen()),
+    )
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T10:00'))).toEqual(deepseek())
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T13:00'))).toEqual(qwen())
+  })
+
+  it('anchors a cross-midnight workday window to its start day through the next morning', () => {
+    const schedule = scheduleOf(true, modelWindow('22:00', '08:00', deepseek(), workdays()))
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T02:00'))).toEqual(deepseek()) // Friday night's window, Saturday morning
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T07:59'))).toEqual(deepseek())
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T08:00'))).toBeUndefined() // end exclusive
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T22:30'))).toBeUndefined() // Saturday is not a start day
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-15T02:00'))).toBeUndefined() // nothing carries into Sunday
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-16T02:00'))).toBeUndefined() // nor into Monday before its own window
+  })
+
+  it('answers nothing for a disabled schedule and everything for plain daily windows', () => {
+    expect(resolveScheduleRouteAt(scheduleOf(false, modelWindow('09:00', '18:00', deepseek())), AT('2026-11-16T10:00'))).toBeUndefined()
+    const dailySchedule = scheduleOf(true, modelWindow('09:00', '18:00', deepseek()))
+    expect(resolveScheduleRouteAt(dailySchedule, AT('2026-11-14T10:00'))).toEqual(deepseek())
+    expect(resolveScheduleRouteAt(dailySchedule, AT('2026-11-14T18:00'))).toBeUndefined()
+  })
+
+  it('agrees minute for minute with the legacy daily resolver on every daily shape', () => {
+    const shapes = [
+      scheduleOf(true, modelWindow('09:00', '18:00', deepseek())),
+      scheduleOf(true, modelWindow('22:00', '06:00', deepseek())),
+      scheduleOf(true, modelWindow('09:00', '12:00', deepseek()), modelWindow('09:30', '18:00', qwen())),
+      scheduleOf(true, modelWindow('23:50', '00:10', deepseek())),
+      scheduleOf(true, modelWindow('18:00', '09:00', deepseek()), modelWindow('00:00', '23:59', qwen())),
+    ]
+    const dayStart = AT('2026-11-03T00:00')
+    for (const schedule of shapes) {
+      for (let minuteOfDay = 0; minuteOfDay < 24 * 60; minuteOfDay += 1) {
+        const epochMs = dayStart + minuteOfDay * 60_000
+        expect(resolveScheduleRouteAt(schedule, epochMs)).toEqual(resolveScheduleRoute(schedule, minuteOfDay))
+      }
+    }
+  })
+})
+
+describe('upcomingRouteChanges with recurrences', () => {
+  it('finds no boundary on a day the window does not match', () => {
+    const schedule = scheduleOf(true, modelWindow('09:00', '18:00', deepseek(), workdays()))
+    // Saturday 17:52 Team: a daily window would head for its 18:00 end eight
+    // minutes out; a workdays window has no Saturday, so nothing comes.
+    expect(upcomingRouteChanges(schedule, AT('2026-11-14T17:52'))).toEqual([])
+    // Saturday 08:52: a daily window would head for its 09:00 start; none comes on Saturday.
+    expect(upcomingRouteChanges(schedule, AT('2026-11-14T08:52'))).toEqual([])
+  })
+
+  it('still finds the ordinary workday boundaries', () => {
+    const schedule = scheduleOf(true, modelWindow('09:00', '18:00', deepseek(), workdays()))
+    const changes = upcomingRouteChanges(schedule, AT('2026-11-16T17:52')) // Monday
+    expect(changes).toHaveLength(1)
+    expect(changes[0]?.atMs).toBe(AT('2026-11-16T18:00'))
+    expect(changes[0]?.incoming).toBeUndefined()
+    expect(changes[0]?.recurrenceText).toBe('on workdays')
+  })
+
+  it('ends a yesterday-matched cross-midnight window this morning (the resume-shaped route change)', () => {
+    const schedule = scheduleOf(true, modelWindow('22:00', '06:00', deepseek(), workdays()))
+    const changes = upcomingRouteChanges(schedule, AT('2026-11-14T05:55')) // Saturday: Friday's window runs to 06:00
+    expect(changes).toHaveLength(1)
+    expect(changes[0]?.atMs).toBe(AT('2026-11-14T06:00'))
+    expect(changes[0]?.incoming).toBeUndefined()
+    expect(changes[0]?.recurrenceText).toBe('on workdays')
+    // Sunday morning: Saturday started nothing, so nothing ends.
+    expect(upcomingRouteChanges(schedule, AT('2026-11-15T05:55'))).toEqual([])
+  })
+
+  it('carries a late-evening window past midnight into the morning end boundary', () => {
+    const schedule = scheduleOf(true, modelWindow('23:45', '00:15', deepseek(), workdays()))
+    // Saturday 00:06: Friday's 23:45 window is still running and ends at 00:15.
+    const changes = upcomingRouteChanges(schedule, AT('2026-11-14T00:06'))
+    expect(changes).toHaveLength(1)
+    expect(changes[0]?.atMs).toBe(AT('2026-11-14T00:15'))
+    expect(changes[0]?.incoming).toBeUndefined()
+  })
+
+  it('announces a start that lands just after midnight on the next matched day', () => {
+    const schedule = scheduleOf(true, modelWindow('00:05', '00:15', deepseek(), weekly(6)))
+    const changes = upcomingRouteChanges(schedule, AT('2026-11-13T23:58')) // Friday 23:58: Saturday's 00:05 start is inside the horizon
+    expect(changes).toHaveLength(1)
+    expect(changes[0]?.atMs).toBe(AT('2026-11-14T00:05'))
+    expect(changes[0]?.incoming).toEqual(deepseek())
+    expect(changes[0]?.recurrenceText).toBe('on Sat')
+  })
+})
+
+describe('ModelScheduleMonitor passes with recurrences', () => {
+  it('keeps the Member pinned on a non-matching day and switches back from the schedule route', async () => {
+    let applied: AgentTeamModelSelection | undefined = deepseek() // left over from Friday's window
+    const members = (): readonly AgentTeamAgentMember[] => [member({
+      memberId: 'member:workdays',
+      modelSchedule: scheduleOf(true, modelWindow('09:00', '18:00', deepseek(), workdays())),
+      ...(applied === undefined ? {} : { scheduledModel: applied }),
+    })]
+    const switches: Array<{ readonly memberId: string; readonly desired: AgentTeamModelSelection | undefined }> = []
+    const reminders: unknown[] = []
+    const monitor = new ModelScheduleMonitor({
+      members,
+      applySwitch: async (_member, desired) => {
+        switches.push({ memberId: 'member:workdays', desired })
+        applied = desired
+        return true
+      },
+      remind: async (_member, boundary) => { reminders.push(boundary) },
+      log: () => {},
+    })
+    // Saturday noon: the workdays window does not exist, the pinned route stands again.
+    await monitor.runPass(AT('2026-11-14T12:00'))
+    expect(switches).toEqual([{ memberId: 'member:workdays', desired: undefined }])
+    expect(reminders).toEqual([])
+    // Converged: the next pass drives nothing.
+    await monitor.runPass(AT('2026-11-14T12:00') + 30_000)
+    expect(switches).toHaveLength(1)
+    // Monday 17:52: the window is live again — the route switches back onto the
+    // window's selection, and the 18:00 end earns the ordinary heads-up.
+    await monitor.runPass(AT('2026-11-16T17:52'))
+    expect(switches).toHaveLength(2)
+    expect(switches[1]).toEqual({ memberId: 'member:workdays', desired: deepseek() })
+    expect(reminders).toHaveLength(1)
+  })
+})
+
+describe('model schedule notice text with a recurrence phrase', () => {
+  it('names the recurrence on the schedule subject', () => {
+    const text = modelScheduleSwitchNoticeText({
+      memberHandle: 'worker',
+      whenText: '2026-11-16T18:00:00+08:00',
+      incoming: undefined,
+      recurrenceText: 'on workdays',
+    })
+    expect(text).toContain('your Team model schedule on workdays switches your model route')
+    expect(text).toContain('back onto its pinned route')
+  })
+
+  it('stays byte-identical for plain daily windows', () => {
+    const legacy = modelScheduleSwitchNoticeText({ memberHandle: 'worker', whenText: '2026-11-16T18:00:00+08:00', incoming: qwen() })
+    const daily = modelScheduleSwitchNoticeText({ memberHandle: 'worker', whenText: '2026-11-16T18:00:00+08:00', incoming: qwen(), recurrenceText: '' })
+    expect(daily).toBe(legacy)
+    expect(daily).toContain('your Team model schedule switches your model route onto qwen/qwen3.8-flash')
+    expect(daily).not.toContain('undefined')
   })
 })
