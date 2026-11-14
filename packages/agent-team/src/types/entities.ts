@@ -142,10 +142,38 @@ export interface AgentTeamModelSelection {
 }
 
 /**
- * One daily time window of a Member's model schedule. `start` and `end` are
+ * The recurrence one schedule window is effective on. The window expands only
+ * on the days its recurrence matches — a non-matching day carries no window at
+ * all (the Member stays pinned / free to run). Absent (or `daily`) means every
+ * day, so stored schedules written before recurrences existed need no
+ * migration and behave exactly as they did. All dates are interpreted in the
+ * fixed Team coordination zone (UTC+8). Matching arithmetic lives in
+ * `src/schedule-recurrence.ts` — the single authority both schedules share.
+ */
+export type AgentTeamScheduleRecurrence =
+  | { readonly kind: 'daily' }
+  /** Monday through Friday; no holiday exceptions (pure intent). */
+  | { readonly kind: 'workdays' }
+  /**
+   * Every N days counting from the anchor date: the anchor day itself is
+   * effective, then every `intervalDays`-th day after it; days before the
+   * anchor never match.
+   */
+  | { readonly kind: 'everyDays'; readonly intervalDays: number; readonly anchorDate: string }
+  /** The listed ISO weekdays (1 = Monday … 7 = Sunday); at least one. */
+  | { readonly kind: 'weekly'; readonly weekdays: readonly (1 | 2 | 3 | 4 | 5 | 6 | 7)[] }
+  /** The given day of every month (1..31); a month without that day stays silent. */
+  | { readonly kind: 'monthly'; readonly dayOfMonth: number }
+  /** The given month (1..12) and day (1..31) of every year; 02-29 exists only in leap years. */
+  | { readonly kind: 'yearly'; readonly month: number; readonly day: number }
+
+/**
+ * One time window of a Member's model schedule. `start` and `end` are
  * wall-clock times (`HH:MM`) in the fixed Team coordination zone (UTC+8),
  * `start` inclusive and `end` exclusive; a window whose `end` is at or before
- * its `start` (except the forbidden equal case) wraps past midnight.
+ * its `start` (except the forbidden equal case) wraps past midnight — anchored
+ * to its start day, so a wrap window that begins on a matched day runs to the
+ * next day's `end`.
  */
 export interface AgentTeamModelScheduleWindow {
   /** Team-zone wall-clock start `HH:MM` (inclusive). */
@@ -154,6 +182,8 @@ export interface AgentTeamModelScheduleWindow {
   readonly end: string
   /** The route this window demands while it is the covering window. */
   readonly selection: AgentTeamModelSelection
+  /** The days this window is effective on; absent = every day. */
+  readonly recurrence?: AgentTeamScheduleRecurrence
 }
 
 /**
@@ -172,16 +202,20 @@ export interface AgentTeamMemberModelSchedule {
 }
 
 /**
- * One daily stop-run window of a Member. Bounds follow the model-schedule
- * window shape: `HH:MM` wall-clock times in the fixed Team coordination zone
- * (UTC+8), `start` inclusive and `end` exclusive, wrapping past midnight when
- * `end` is at or before `start` (the equal case is forbidden).
+ * One stop-run window of a Member. Bounds follow the model-schedule window
+ * shape: `HH:MM` wall-clock times in the fixed Team coordination zone (UTC+8),
+ * `start` inclusive and `end` exclusive, wrapping past midnight when `end` is
+ * at or before `start` (the equal case is forbidden) — anchored to its start
+ * day, so a wrap window that begins on a matched day runs to the next day's
+ * `end`.
  */
 export interface AgentTeamMemberStopWindow {
   /** Team-zone wall-clock start `HH:MM` (inclusive). */
   readonly start: string
   /** Team-zone wall-clock end `HH:MM` (exclusive; wraps past midnight when ≤ start). */
   readonly end: string
+  /** The days this window is effective on; absent = every day. */
+  readonly recurrence?: AgentTeamScheduleRecurrence
 }
 
 /**

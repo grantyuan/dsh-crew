@@ -33,34 +33,25 @@ import type {
   AgentTeamMemberModelSchedule,
   AgentTeamModelSelection,
 } from './types.ts'
-import { TEAM_ZONE_OFFSET_MINUTES } from './time-format.ts'
+import {
+  MINUTES_PER_DAY,
+  TEAM_ZONE_OFFSET_MS,
+  parseScheduleMinute,
+  teamAbsoluteMinute,
+  teamMinuteOfDay,
+  windowOccurrencesAround,
+} from './schedule-recurrence.ts'
+
+// The Team-zone minute primitives and the window-bounds parser live in the
+// recurrence authority (both schedules and the candidate-day expansion share
+// them); this module keeps them importable from their historical path.
+export { MINUTES_PER_DAY, TEAM_ZONE_OFFSET_MS, parseScheduleMinute, teamAbsoluteMinute, teamMinuteOfDay }
 
 /** How often the monitor re-derives desired routes; matches the watch/liaison cadence. */
 export const MODEL_SCHEDULE_PASS_INTERVAL_MS = 30 * 1000
 
 /** How far ahead a route-changing boundary earns a heads-up. */
 export const MODEL_SCHEDULE_NOTICE_AHEAD_MS = 10 * 60 * 1000
-
-/** Minutes in one day — the wrap-around modulus of every Team-zone minute computation. */
-export const MINUTES_PER_DAY = 24 * 60
-export const TEAM_ZONE_OFFSET_MS = TEAM_ZONE_OFFSET_MINUTES * 60_000
-
-/** Parse one `HH:MM` schedule bound into Team-zone day minutes (0..1439). */
-export function parseScheduleMinute(text: string): number {
-  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(text)
-  if (match === null) throw new Error(`invalid model schedule time '${text}'`)
-  return Number(match[1]) * 60 + Number(match[2])
-}
-
-/** One epoch instant rendered as its Team-zone minute of the day (0..1439). */
-export function teamMinuteOfDay(epochMs: number): number {
-  return Math.floor(((epochMs + TEAM_ZONE_OFFSET_MS) % 86_400_000) / 60_000)
-}
-
-/** One epoch instant rendered as its absolute Team-zone minute (monotonic latch key). */
-export function teamAbsoluteMinute(epochMs: number): number {
-  return Math.floor((epochMs + TEAM_ZONE_OFFSET_MS) / 60_000)
-}
 
 /**
  * Whether one window covers the given Team-zone day minute (start inclusive,

@@ -1,0 +1,231 @@
+import { describe, expect, it } from 'vitest'
+import {
+  assertScheduleRecurrence,
+  describeRecurrence,
+  recurrenceMatchesDay,
+  teamDateParts,
+  windowCoversAt,
+  windowOccurrencesAround,
+  windowOccurrencesOn,
+} from '../src/schedule-recurrence.ts'
+import type { AgentTeamScheduleRecurrence } from '../src/types.ts'
+
+// Team zone is UTC+8. Calendar facts used below (proleptic Gregorian, no DST
+// in a fixed offset): 2026-11-09 is a Monday, 2026-11-13 a Friday, 2026-11-14
+// a Saturday, 2026-11-15 a Sunday; 2026 is not a leap year, 2024 and 2028 are.
+const AT = (teamIso: string): number => Date.parse(`${teamIso}:00+08:00`)
+
+/**
+ * An independent weekday oracle: the ISO weekday derived from the standard
+ * library's own calendar, so the module's date arithmetic is checked against
+ * something that does not share its implementation.
+ */
+function partsOf(year: number, month: number, day: number): { readonly year: number; readonly month: number; readonly day: number; readonly weekday: number } {
+  const weekday = ((new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7) + 1
+  return { year, month, day, weekday }
+}
+
+const daily = (): AgentTeamScheduleRecurrence => ({ kind: 'daily' })
+const workdays = (): AgentTeamScheduleRecurrence => ({ kind: 'workdays' })
+const everyDays = (intervalDays: number, anchorDate: string): AgentTeamScheduleRecurrence => ({ kind: 'everyDays', intervalDays, anchorDate })
+const weekly = (...weekdays: readonly (1 | 2 | 3 | 4 | 5 | 6 | 7)[]): AgentTeamScheduleRecurrence => ({ kind: 'weekly', weekdays })
+const monthly = (dayOfMonth: number): AgentTeamScheduleRecurrence => ({ kind: 'monthly', dayOfMonth })
+const yearly = (month: number, day: number): AgentTeamScheduleRecurrence => ({ kind: 'yearly', month, day })
+
+const windowOf = (start: string, end: string, recurrence?: AgentTeamScheduleRecurrence) => ({ start, end, ...(recurrence === undefined ? {} : { recurrence }) })
+
+describe('teamDateParts (the Team-zone calendar day)', () => {
+  it('reads the UTC+8 calendar day and ISO weekday, not the machine zone', () => {
+    expect(teamDateParts(Date.parse('2026-11-03T10:00:00Z'))).toEqual({ year: 2026, month: 11, day: 3, weekday: 2 }) // Tuesday
+    expect(teamDateParts(Date.parse('2026-11-09T02:00:00Z'))).toEqual({ year: 2026, month: 11, day: 9, weekday: 1 }) // Monday
+    expect(teamDateParts(Date.parse('2026-11-14T09:00:00Z'))).toEqual({ year: 2026, month: 11, day: 14, weekday: 6 }) // Saturday
+    expect(teamDateParts(Date.parse('2026-11-15T10:00:00Z'))).toEqual({ year: 2026, month: 11, day: 15, weekday: 7 }) // Sunday
+  })
+
+  it('rolls the Team day over at 16:00 UTC, where the fixed offset ends it', () => {
+    expect(teamDateParts(Date.parse('2026-11-03T15:59:00Z'))).toMatchObject({ month: 11, day: 3, weekday: 2 })
+    expect(teamDateParts(Date.parse('2026-11-03T16:00:00Z'))).toMatchObject({ month: 11, day: 4, weekday: 3 })
+  })
+})
+
+describe('recurrenceMatchesDay (the six kinds)', () => {
+  it('treats an absent recurrence and daily as every day', () => {
+    expect(recurrenceMatchesDay(undefined, partsOf(2026, 11, 14))).toBe(true)
+    expect(recurrenceMatchesDay(daily(), partsOf(2026, 11, 14))).toBe(true)
+    expect(recurrenceMatchesDay(daily(), partsOf(2026, 11, 15))).toBe(true)
+  })
+
+  it('matches workdays Monday through Friday only', () => {
+    expect(recurrenceMatchesDay(workdays(), partsOf(2026, 11, 9))).toBe(true) // Monday
+    expect(recurrenceMatchesDay(workdays(), partsOf(2026, 11, 13))).toBe(true) // Friday
+    expect(recurrenceMatchesDay(workdays(), partsOf(2026, 11, 14))).toBe(false) // Saturday
+    expect(recurrenceMatchesDay(workdays(), partsOf(2026, 11, 15))).toBe(false) // Sunday
+  })
+
+  it('matches every N days from the anchor day on, never before it', () => {
+    const kind = everyDays(3, '2026-11-10')
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 11, 10))).toBe(true) // the anchor day itself
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 11, 13))).toBe(true)
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 11, 16))).toBe(true)
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 11, 11))).toBe(false)
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 11, 12))).toBe(false)
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 11, 9))).toBe(false) // one day before the anchor
+    // A serial difference that is a negative multiple of N still never matches.
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 11, 7))).toBe(false)
+  })
+
+  it('keeps the every-N-day series aligned across month and year boundaries', () => {
+    const kind = everyDays(5, '2026-01-30')
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 1, 30))).toBe(true)
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 2, 4))).toBe(true)
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 3, 6))).toBe(true) // 35 days on, across a short month
+    expect(recurrenceMatchesDay(kind, partsOf(2026, 12, 31))).toBe(true) // 335 days on, across the year
+    expect(recurrenceMatchesDay(kind, partsOf(2027, 1, 5))).toBe(true) // 341 = 5 * 68
+    expect(recurrenceMatchesDay(kind, partsOf(2027, 1, 4))).toBe(false)
+  })
+
+  it('matches only the selected weekdays of a weekly recurrence', () => {
+    const weekend = weekly(6, 7)
+    expect(recurrenceMatchesDay(weekend, partsOf(2026, 11, 14))).toBe(true) // Saturday
+    expect(recurrenceMatchesDay(weekend, partsOf(2026, 11, 15))).toBe(true) // Sunday
+    expect(recurrenceMatchesDay(weekend, partsOf(2026, 11, 13))).toBe(false) // Friday
+    const mondayOnly = weekly(1)
+    expect(recurrenceMatchesDay(mondayOnly, partsOf(2026, 11, 9))).toBe(true)
+    expect(recurrenceMatchesDay(mondayOnly, partsOf(2026, 11, 10))).toBe(false)
+  })
+
+  it('matches monthly day-of-month and leaves short months silent', () => {
+    expect(recurrenceMatchesDay(monthly(15), partsOf(2026, 11, 15))).toBe(true)
+    expect(recurrenceMatchesDay(monthly(15), partsOf(2026, 11, 14))).toBe(false)
+    // The 31st simply never occurs in a 30-day month: no window, no error.
+    expect(recurrenceMatchesDay(monthly(31), partsOf(2026, 1, 31))).toBe(true)
+    expect(recurrenceMatchesDay(monthly(31), partsOf(2026, 4, 30))).toBe(false)
+    expect(recurrenceMatchesDay(monthly(29), partsOf(2026, 2, 28))).toBe(false) // 2026 has no Feb 29
+    expect(recurrenceMatchesDay(monthly(29), partsOf(2028, 2, 29))).toBe(true)
+  })
+
+  it('matches yearly month and day, with 02-29 alive only in leap years', () => {
+    expect(recurrenceMatchesDay(yearly(3, 15), partsOf(2026, 3, 15))).toBe(true)
+    expect(recurrenceMatchesDay(yearly(3, 15), partsOf(2026, 3, 14))).toBe(false)
+    expect(recurrenceMatchesDay(yearly(3, 15), partsOf(2026, 4, 15))).toBe(false)
+    expect(recurrenceMatchesDay(yearly(2, 29), partsOf(2028, 2, 29))).toBe(true) // leap year: the window exists
+    expect(recurrenceMatchesDay(yearly(2, 29), partsOf(2026, 2, 28))).toBe(false) // otherwise the month never grows the day
+    expect(recurrenceMatchesDay(yearly(12, 31), partsOf(2026, 12, 31))).toBe(true)
+  })
+})
+
+describe('windowOccurrencesOn (one matched day, expanded to an interval)', () => {
+  it('expands a plain window to [start, end) of the Team-zone day', () => {
+    const occurrences = windowOccurrencesOn(windowOf('09:00', '18:00', daily()), partsOf(2026, 11, 14))
+    expect(occurrences).toEqual([{ startMs: AT('2026-11-14T09:00'), endMs: AT('2026-11-14T18:00') }])
+  })
+
+  it('anchors a cross-midnight window to its start day: the end lands on the next day', () => {
+    const occurrences = windowOccurrencesOn(windowOf('22:00', '08:00', workdays()), partsOf(2026, 11, 13)) // Friday
+    expect(occurrences).toEqual([{ startMs: AT('2026-11-13T22:00'), endMs: AT('2026-11-14T08:00') }])
+  })
+
+  it('produces nothing on a day the recurrence does not match', () => {
+    expect(windowOccurrencesOn(windowOf('22:00', '08:00', workdays()), partsOf(2026, 11, 14))).toEqual([]) // Saturday
+  })
+
+  it('treats an absent recurrence as daily and a degenerate window as never covering', () => {
+    expect(windowOccurrencesOn(windowOf('09:00', '18:00'), partsOf(2026, 11, 14))).toEqual([{ startMs: AT('2026-11-14T09:00'), endMs: AT('2026-11-14T18:00') }])
+    expect(windowOccurrencesOn(windowOf('09:00', '09:00'), partsOf(2026, 11, 14))).toEqual([])
+  })
+})
+
+describe('windowOccurrencesAround (the candidate-day spread a monitor expands)', () => {
+  it('expands a daily window on each of the four candidate days around the instant', () => {
+    // Saturday 2026-11-14 morning: candidates are Thu 12, Fri 13, Sat 14, Sun 15.
+    const occurrences = windowOccurrencesAround(windowOf('09:00', '18:00'), AT('2026-11-14T02:00'))
+    expect(occurrences.map(occurrence => occurrence.startMs)).toEqual([
+      AT('2026-11-12T09:00'), AT('2026-11-13T09:00'), AT('2026-11-14T09:00'), AT('2026-11-15T09:00'),
+    ])
+  })
+
+  it('keeps the wrap window a workday anchored: Thursday and Friday both reach the morning, Saturday never starts', () => {
+    const occurrences = windowOccurrencesAround(windowOf('22:00', '08:00', workdays()), AT('2026-11-14T02:00'))
+    expect(occurrences).toEqual([
+      { startMs: AT('2026-11-12T22:00'), endMs: AT('2026-11-13T08:00') },
+      { startMs: AT('2026-11-13T22:00'), endMs: AT('2026-11-14T08:00') },
+    ])
+  })
+})
+
+describe('windowCoversAt (the per-window instant test)', () => {
+  it('sees a yesterday-started wrap window through this morning and nothing past it', () => {
+    const window = windowOf('22:00', '08:00', workdays())
+    expect(windowCoversAt(window, AT('2026-11-14T02:00'))).toBe(true) // Friday's window, Saturday morning
+    expect(windowCoversAt(window, AT('2026-11-14T08:00'))).toBe(false) // end is exclusive
+    expect(windowCoversAt(window, AT('2026-11-15T02:00'))).toBe(false) // Saturday start day never matched
+    expect(windowCoversAt(window, AT('2026-11-13T21:59'))).toBe(false)
+  })
+})
+
+describe('describeRecurrence (the notice phrase)', () => {
+  it('gives plain daily windows no phrase, so legacy notices stay byte-identical', () => {
+    expect(describeRecurrence(undefined)).toBe('')
+    expect(describeRecurrence(daily())).toBe('')
+  })
+
+  it('phrases the parameterized kinds', () => {
+    expect(describeRecurrence(workdays())).toBe('on workdays')
+    expect(describeRecurrence(everyDays(3, '2026-11-10'))).toBe('every 3 days')
+    expect(describeRecurrence(everyDays(1, '2026-11-10'))).toBe('every day')
+    expect(describeRecurrence(weekly(6, 7))).toBe('on Sat and Sun')
+    expect(describeRecurrence(weekly(1, 3, 5))).toBe('on Mon, Wed and Fri')
+    expect(describeRecurrence(monthly(15))).toBe('on day 15 of each month')
+    expect(describeRecurrence(yearly(2, 29))).toBe('each year on 02-29')
+  })
+})
+
+describe('assertScheduleRecurrence (the commit shape rule)', () => {
+  it('accepts the six kinds with valid parameters', () => {
+    expect(() => assertScheduleRecurrence(daily())).not.toThrow()
+    expect(() => assertScheduleRecurrence(workdays())).not.toThrow()
+    expect(() => assertScheduleRecurrence(everyDays(1, '2026-11-10'))).not.toThrow()
+    expect(() => assertScheduleRecurrence(everyDays(366, '2024-02-29'))).not.toThrow()
+    expect(() => assertScheduleRecurrence(weekly(1, 4, 7))).not.toThrow()
+    expect(() => assertScheduleRecurrence(monthly(31))).not.toThrow()
+    expect(() => assertScheduleRecurrence(yearly(2, 29))).not.toThrow()
+  })
+
+  it('rejects an unknown kind', () => {
+    expect(() => assertScheduleRecurrence({ kind: 'weekdays' } as never)).toThrow(/kind/)
+  })
+
+  it('rejects an everyDays interval outside 1..366 or a non-integer one', () => {
+    expect(() => assertScheduleRecurrence(everyDays(0, '2026-11-10'))).toThrow(/intervalDays/)
+    expect(() => assertScheduleRecurrence(everyDays(367, '2026-11-10'))).toThrow(/intervalDays/)
+    expect(() => assertScheduleRecurrence(everyDays(2.5, '2026-11-10'))).toThrow(/intervalDays/)
+  })
+
+  it('rejects an everyDays anchor that is not a real calendar date', () => {
+    expect(() => assertScheduleRecurrence(everyDays(3, '2026-02-30'))).toThrow(/anchorDate/)
+    expect(() => assertScheduleRecurrence(everyDays(3, '2026-13-01'))).toThrow(/anchorDate/)
+    expect(() => assertScheduleRecurrence(everyDays(3, '20261110'))).toThrow(/anchorDate/)
+    expect(() => assertScheduleRecurrence(everyDays(3, '2026-11-10T00:00'))).toThrow(/anchorDate/)
+  })
+
+  it('rejects weekly weekday lists that are empty, out of range, or repeated', () => {
+    expect(() => assertScheduleRecurrence(weekly())).toThrow(/weekday/)
+    expect(() => assertScheduleRecurrence(weekly(0, 1))).toThrow(/weekday/)
+    expect(() => assertScheduleRecurrence(weekly(1, 8))).toThrow(/weekday/)
+    expect(() => assertScheduleRecurrence(weekly(3, 3))).toThrow(/weekday/)
+  })
+
+  it('rejects a monthly day outside 1..31', () => {
+    expect(() => assertScheduleRecurrence(monthly(0))).toThrow(/dayOfMonth/)
+    expect(() => assertScheduleRecurrence(monthly(32))).toThrow(/dayOfMonth/)
+    expect(() => assertScheduleRecurrence(monthly(1.5))).toThrow(/dayOfMonth/)
+  })
+
+  it('rejects a yearly date outside its month or 02-30, accepting 02-29', () => {
+    expect(() => assertScheduleRecurrence(yearly(0, 15))).toThrow(/yearly/)
+    expect(() => assertScheduleRecurrence(yearly(13, 15))).toThrow(/yearly/)
+    expect(() => assertScheduleRecurrence(yearly(2, 30))).toThrow(/yearly/)
+    expect(() => assertScheduleRecurrence(yearly(4, 31))).toThrow(/yearly/)
+    expect(() => assertScheduleRecurrence(yearly(2, 29))).not.toThrow() // pattern rule: February caps at 29
+  })
+})
