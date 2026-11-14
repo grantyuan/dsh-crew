@@ -1,11 +1,12 @@
 /**
  * Team-owned time-interval stop-run scheduling.
  *
- * A Member may carry a `stopSchedule`: an ordered list of daily `HH:MM`
- * windows in the fixed Team coordination zone (UTC+8) during which the
- * Member must not run. This module owns the arithmetic — which window
- * covers the current minute, which boundaries sit inside the notice
- * horizon, and which boundary has just crossed — and the notice texts. It
+ * A Member may carry a `stopSchedule`: an ordered list of `HH:MM` windows in
+ * the fixed Team coordination zone (UTC+8) during which the Member must not
+ * run — each effective on the days its recurrence matches (absent = every
+ * day). This module owns the arithmetic — which window covers the current
+ * instant, which boundaries sit inside the notice horizon, and which
+ * boundary has just crossed — and the notice texts. It
  * owns no facts: the schedule is durable Human intent on the Member entity,
  * and the only consequences are Team Assistant notifications delivered at
  * the boundaries. The Host never forces a running turn down — the orderly

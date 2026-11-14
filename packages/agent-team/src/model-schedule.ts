@@ -1,11 +1,12 @@
 /**
  * Team-owned time-interval model routing.
  *
- * A Member may carry a `modelSchedule`: an ordered list of daily `HH:MM`
- * windows in the fixed Team coordination zone (UTC+8), each demanding one
- * provider route. This module owns the arithmetic — which window covers the
- * current minute, which boundary in the next horizon actually changes the
- * effective route, and when a Member deserves its heads-up. It owns no
+ * A Member may carry a `modelSchedule`: an ordered list of `HH:MM` windows
+ * in the fixed Team coordination zone (UTC+8), each demanding one provider
+ * route on the days its recurrence matches (absent = every day). This module
+ * owns the arithmetic — which window covers the current instant, which
+ * boundary in the next horizon actually changes the effective route, and
+ * when a Member deserves its heads-up. It owns no
  * facts: the applied route lives on the Member entity (committed by the
  * Host through `team/member-model-scheduled`), and the Host applies every
  * effective-route change through the shared context-renewal path — the same

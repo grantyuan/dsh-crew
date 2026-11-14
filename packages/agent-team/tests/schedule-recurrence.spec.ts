@@ -291,6 +291,14 @@ describe('resolveScheduleRouteAt (coverage by expanded occurrences)', () => {
     expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T13:00'))).toEqual(qwen())
   })
 
+  it('sees a near-24-hour wrap window through the day after its start day, two candidate days back', () => {
+    // everyDays(2) from Thursday: occurrences [Thu 23:59, Fri 23:58) and [Sat 23:59, Sun 23:58).
+    const schedule = scheduleOf(true, modelWindow('23:59', '23:58', deepseek(), everyDays(2, '2026-11-12')))
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-13T12:00'))).toEqual(deepseek()) // Friday noon: Thursday's window still runs
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T12:00'))).toBeUndefined() // Friday's window: gap day, nothing runs
+    expect(resolveScheduleRouteAt(schedule, AT('2026-11-13T23:58'))).toBeUndefined() // end exclusive, and Saturday starts nothing until 23:59
+  })
+
   it('anchors a cross-midnight workday window to its start day through the next morning', () => {
     const schedule = scheduleOf(true, modelWindow('22:00', '08:00', deepseek(), workdays()))
     expect(resolveScheduleRouteAt(schedule, AT('2026-11-14T02:00'))).toEqual(deepseek()) // Friday night's window, Saturday morning
@@ -445,6 +453,14 @@ describe('upcomingStopBoundaries with recurrences', () => {
     expect(upcomingStopBoundaries(schedule, AT('2026-11-14T21:30'))).toEqual([])
   })
 
+  it('offers the wrap-up heads-up for a start that lands just after midnight on the next matched day', () => {
+    const schedule = stopScheduleOf(true, stopWindow('00:05', '00:15', weekly(6)))
+    // Friday 23:40 Team: Saturday's 00:05 start is twenty-five minutes ahead.
+    const boundaries = upcomingStopBoundaries(schedule, AT('2026-11-13T23:40'))
+    expect(boundaries).toHaveLength(1)
+    expect(boundaries[0]).toMatchObject({ kind: 'stop', atMs: AT('2026-11-14T00:05') })
+  })
+
   it('anchors an everyDays stop window to its first day', () => {
     const schedule = stopScheduleOf(true, stopWindow('22:00', '06:00', everyDays(3, '2026-11-13')))
     expect(upcomingStopBoundaries(schedule, AT('2026-11-13T21:30'))).toHaveLength(1) // the anchor day itself
@@ -481,6 +497,15 @@ describe('crossedStopBoundaries with recurrences', () => {
     expect(boundaries[0]).toMatchObject({ kind: 'stop', atMs: AT('2026-11-13T22:00') })
     // Sunday 03:00: no occurrence covers it, and none just crossed.
     expect(crossedStopBoundaries(schedule, AT('2026-11-15T03:00'))).toEqual([])
+  })
+
+  it('resumes a near-24-hour wrap window whose end fell late last night, two candidate days back', () => {
+    // everyDays(2) from Thursday: Thursday's occurrence ends Friday 23:58; the
+    // next one starts Saturday 23:59 — so Saturday 00:30 is covered by nothing.
+    const schedule = stopScheduleOf(true, stopWindow('23:59', '23:58', everyDays(2, '2026-11-12')))
+    const boundaries = crossedStopBoundaries(schedule, AT('2026-11-14T00:30'))
+    expect(boundaries).toHaveLength(1)
+    expect(boundaries[0]).toMatchObject({ kind: 'resume', atMs: AT('2026-11-13T23:58') })
   })
 
   it('never resumes a window that covers the moment through its next day', () => {
