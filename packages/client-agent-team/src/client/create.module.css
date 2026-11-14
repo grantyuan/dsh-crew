@@ -359,3 +359,64 @@
 .scheduleAdd {
   justify-self: start;
 }
+
+/* One schedule row's recurrence line: the kind dropdown plus the parameters
+   that kind demands, spanning the whole row under its first line and wrapping
+   as a unit so the 390px dialog reads it in order (dropdown, then parameters). */
+.scheduleRecurrence {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  grid-column: 1 / -1;
+}
+.recurrenceTrigger {
+  flex: none;
+  min-width: 96px;
+}
+.recurrenceWeekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.recurrenceChip {
+  align-items: center;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm, 6px);
+  box-sizing: border-box;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  justify-content: center;
+  line-height: 18px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0 8px;
+}
+.recurrenceChip:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.recurrenceChip:focus-visible {
+  border-color: var(--dsw-alias-brand-primary);
+  outline: none;
+}
+.recurrenceChip:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.recurrenceChipOn,
+.recurrenceChipOn:hover {
+  background: var(--dsw-alias-interactive-bg-selected);
+  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-brand-primary);
+}
+.recurrenceChipOn:focus-visible {
+  outline: none;
+}
+.recurrenceChipOn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}

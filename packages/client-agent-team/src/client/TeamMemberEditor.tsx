@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AgentTeamClientMemberStatus, AgentTeamCurateMemberPromptProposal, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamMemberPromptProfile, AgentTeamMemberPromptSectionEntry, AgentTeamMemberPromptView, AgentTeamMemberStopSchedule, AgentTeamModelScheduleWindow, AgentTeamModelSelection, AgentTeamUpdateMemberRequest } from '@grantyuan/dsh-crew/types'
+import type { AgentTeamClientMemberStatus, AgentTeamCurateMemberPromptProposal, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamMemberPromptProfile, AgentTeamMemberPromptSectionEntry, AgentTeamMemberPromptView, AgentTeamMemberStopSchedule, AgentTeamMemberStopWindow, AgentTeamModelScheduleWindow, AgentTeamModelSelection, AgentTeamUpdateMemberRequest } from '@grantyuan/dsh-crew/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TeamModelCatalog, TeamModelEffortOption, TeamModelProviderGroup, TeamSidebarProps } from './slots.ts'
 import { Button, Checkbox, IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconCloseOutlineRegular, Input, Menu, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import { mintRequestId } from './requests.ts'
 import { useEditDialogSave } from './team-dialog-save.ts'
+import { RecurrenceField, normalizeRecurrenceDraft, recurrenceDraftInvalid, recurrenceStoredDraft } from './schedule-recurrence-field.tsx'
+import type { RecurrenceDraft } from './schedule-recurrence-field.tsx'
 import createCss from './create.module.css'
 import css from './sidebar.module.css'
 
@@ -320,14 +322,16 @@ const scheduleTimePattern = /^([01]\d|2[0-3]):[0-5]\d$/
 
 /**
  * One schedule window under edit: minute-precision `HH:MM` strings in the
- * Team zone (UTC+8) plus the route the window demands. A wholly untouched
- * window is a blank line, not a configuration draft, and drops out of the
- * submitted schedule.
+ * Team zone (UTC+8), the route the window demands, and the days the window is
+ * effective on (the shared recurrence draft; `daily` sends no field). A
+ * wholly untouched window is a blank line, not a configuration draft, and
+ * drops out of the submitted schedule.
  */
 export interface ModelScheduleWindowDraft {
   readonly start: string
   readonly end: string
   readonly selection: AgentTeamModelSelection | undefined
+  readonly recurrence: RecurrenceDraft
 }
 
 export interface ModelScheduleDraft {
@@ -338,7 +342,7 @@ export interface ModelScheduleDraft {
 /** The stored schedule (or absent) as an editable draft. */
 export function scheduleStoredDraft(stored: AgentTeamMemberModelSchedule | undefined): ModelScheduleDraft {
   if (stored === undefined) return { enabled: false, windows: [] }
-  return { enabled: stored.enabled, windows: stored.windows.map(w => ({ start: w.start, end: w.end, selection: w.selection })) }
+  return { enabled: stored.enabled, windows: stored.windows.map(w => ({ start: w.start, end: w.end, selection: w.selection, recurrence: recurrenceStoredDraft(w.recurrence) })) }
 }
 
 /**
@@ -354,36 +358,63 @@ function normalizeScheduleTimeText(text: string): string {
 
 /**
  * Complete, well-formed windows only: an incomplete row (missing bound, bad
- * format, equal bounds, or no model) never reaches the ledger — the editor
- * blocks submission while one exists, and the normalization drops it as a
- * second guard so a stale draft can't smuggle a rejected commit. Lenient
- * time inputs (`9:00`) pad to the stored `HH:MM` first, so the Host-side
- * strict pattern measures only what it defined.
+ * format, equal bounds, no model, or incomplete recurrence parameters) never
+ * reaches the ledger — the editor blocks submission while one exists, and the
+ * normalization drops it as a second guard so a stale draft can't smuggle a
+ * rejected commit. Lenient inputs (`9:00`, `2026-1-5`) pad to the stored
+ * shapes first, so the Host-side strict patterns measure only what they
+ * defined. A `daily` recurrence sends no field, keeping stored schedules
+ * byte-identical under the dialog's JSON compare.
  */
 export function normalizeScheduleDraft(draft: ModelScheduleDraft): AgentTeamMemberModelSchedule {
-  const windows: readonly AgentTeamModelScheduleWindow[] = draft.windows
-    .map(w => ({ start: normalizeScheduleTimeText(w.start), end: normalizeScheduleTimeText(w.end), selection: w.selection }))
-    .filter((w): w is { readonly start: string; readonly end: string; readonly selection: AgentTeamModelSelection } =>
-      scheduleTimePattern.test(w.start) && scheduleTimePattern.test(w.end) && w.start !== w.end && w.selection !== undefined)
+  const windows: AgentTeamModelScheduleWindow[] = []
+  for (const w of draft.windows) {
+    const start = normalizeScheduleTimeText(w.start)
+    const end = normalizeScheduleTimeText(w.end)
+    if (!scheduleTimePattern.test(start) || !scheduleTimePattern.test(end) || start === end) continue
+    if (w.selection === undefined || recurrenceDraftInvalid(w.recurrence)) continue
+    const recurrence = normalizeRecurrenceDraft(w.recurrence)
+    windows.push({ start, end, selection: w.selection, ...(recurrence === undefined ? {} : { recurrence }) })
+  }
   return { enabled: draft.enabled, windows }
+}
+
+/**
+ * True while any touched window's time bounds or route are incomplete, or the
+ * enabled schedule would carry no window at all. A row counts as complete
+ * here once its times and model stand — its recurrence parameters are the
+ * recurrence rule's business, so an everyDays row missing its interval
+ * reports that rule, not this one.
+ */
+export function scheduleTimesInvalid(draft: ModelScheduleDraft): boolean {
+  const complete = (w: ModelScheduleWindowDraft): boolean => {
+    const start = normalizeScheduleTimeText(w.start)
+    const end = normalizeScheduleTimeText(w.end)
+    return scheduleTimePattern.test(start) && scheduleTimePattern.test(end) && start !== end && w.selection !== undefined
+  }
+  const partial = draft.windows.some(w => {
+    if (w.start.trim() === '' && w.end.trim() === '' && w.selection === undefined && w.recurrence.kind === 'daily') return false
+    return !complete(w)
+  })
+  return partial || (draft.enabled && !draft.windows.some(complete))
+}
+
+/** True while any touched window's recurrence parameters are missing or invalid (a `daily` row carries none). */
+export function scheduleRecurrenceInvalid(draft: ModelScheduleDraft): boolean {
+  return draft.windows.some(w => w.recurrence.kind !== 'daily' && recurrenceDraftInvalid(w.recurrence))
 }
 
 /** True while any touched window is incomplete or the enabled schedule would demand nothing. */
 export function scheduleDraftInvalid(draft: ModelScheduleDraft): boolean {
-  const partial = draft.windows.some(w => {
-    const start = normalizeScheduleTimeText(w.start)
-    const end = normalizeScheduleTimeText(w.end)
-    if (w.start.trim() === '' && w.end.trim() === '' && w.selection === undefined) return false
-    return !scheduleTimePattern.test(start) || !scheduleTimePattern.test(end) || start === end || w.selection === undefined
-  })
-  return partial || (draft.enabled && normalizeScheduleDraft(draft).windows.length === 0)
+  return scheduleTimesInvalid(draft) || scheduleRecurrenceInvalid(draft)
 }
 
 /**
  * The time-interval model schedule editor: the enable switch, one row per
- * daily window (Team-zone start and end, then the route the window demands
- * through the shared picker), and the applied-route line that shows what
- * the schedule currently overrides. The row order is the resolution
+ * window (Team-zone start and end, the route the window demands through the
+ * shared picker, and the days it is effective on through the shared
+ * recurrence editor), and the applied-route line that shows what the
+ * schedule currently overrides. The row order is the resolution
  * priority — the first covering window wins — and a window whose end is at
  * or before its start wraps past midnight. Every actual switch lands through
  * the agent's 重置 on the Host; this editor only writes the durable intent.
@@ -429,9 +460,17 @@ export function ModelScheduleField({ draft, onChange, applied, loadModels, disab
       <button type="button" className={createCss.fallbackAction!} aria-label={t('modelScheduleRemove', { index: index + 1 })} disabled={disabled} onClick={() => { onChange({ ...draft, windows: draft.windows.filter((_, entryIndex) => entryIndex !== index) }) }}>
         <IconCloseOutlineRegular size={14} />
       </button>
+      <RecurrenceField
+        draft={window.recurrence}
+        onChange={next => replaceAt(index, { recurrence: next })}
+        windowLabel={t('modelScheduleWindowLabel', { index: index + 1 })}
+        disabled={disabled}
+        t={t}
+      />
     </div>)}
-    {draft.windows.length < MODEL_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '', selection: undefined }] }) }}>{t('modelScheduleAdd')}</Button>}
-    {scheduleDraftInvalid(draft) && <p className={createCss.error} role="alert">{t('modelScheduleInvalidRule')}</p>}
+    {draft.windows.length < MODEL_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '', selection: undefined, recurrence: { kind: 'daily' } }] }) }}>{t('modelScheduleAdd')}</Button>}
+    {scheduleTimesInvalid(draft) && <p className={createCss.error} role="alert">{t('modelScheduleInvalidRule')}</p>}
+    {scheduleRecurrenceInvalid(draft) && <p className={createCss.error} role="alert">{t('recurrenceInvalidRule')}</p>}
   </div>
 }
 
@@ -440,13 +479,15 @@ export const STOP_SCHEDULE_WINDOW_MAX = 6
 
 /**
  * One stop schedule under edit: minute-precision `HH:MM` strings in the Team
- * zone (UTC+8) — a plain time span, no route. A wholly untouched window is a
- * blank line, not a configuration draft, and drops out of the submitted
- * schedule.
+ * zone (UTC+8) — a plain time span, no route — plus the days the window is
+ * effective on (the shared recurrence draft; `daily` sends no field). A
+ * wholly untouched window is a blank line, not a configuration draft, and
+ * drops out of the submitted schedule.
  */
 export interface StopScheduleWindowDraft {
   readonly start: string
   readonly end: string
+  readonly recurrence: RecurrenceDraft
 }
 
 export interface StopScheduleDraft {
@@ -457,36 +498,62 @@ export interface StopScheduleDraft {
 /** The stored stop schedule (or absent) as an editable draft. */
 export function stopScheduleStoredDraft(stored: AgentTeamMemberStopSchedule | undefined): StopScheduleDraft {
   if (stored === undefined) return { enabled: false, windows: [] }
-  return { enabled: stored.enabled, windows: stored.windows.map(w => ({ start: w.start, end: w.end })) }
+  return { enabled: stored.enabled, windows: stored.windows.map(w => ({ start: w.start, end: w.end, recurrence: recurrenceStoredDraft(w.recurrence) })) }
 }
 
 /**
  * Complete, well-formed windows only: an incomplete row (missing bound, bad
- * format, or equal bounds) never reaches the ledger — the editor blocks
- * submission while one exists, and the normalization drops it as a second
- * guard so a stale draft can't smuggle a rejected commit.
+ * format, equal bounds, or incomplete recurrence parameters) never reaches
+ * the ledger — the editor blocks submission while one exists, and the
+ * normalization drops it as a second guard so a stale draft can't smuggle a
+ * rejected commit. A `daily` recurrence sends no field, keeping stored
+ * schedules byte-identical under the dialog's JSON compare.
  */
 export function normalizeStopScheduleDraft(draft: StopScheduleDraft): AgentTeamMemberStopSchedule {
-  const windows = draft.windows
-    .map(w => ({ start: normalizeScheduleTimeText(w.start), end: normalizeScheduleTimeText(w.end) }))
-    .filter(w => scheduleTimePattern.test(w.start) && scheduleTimePattern.test(w.end) && w.start !== w.end)
+  const windows: AgentTeamMemberStopWindow[] = []
+  for (const w of draft.windows) {
+    const start = normalizeScheduleTimeText(w.start)
+    const end = normalizeScheduleTimeText(w.end)
+    if (!scheduleTimePattern.test(start) || !scheduleTimePattern.test(end) || start === end) continue
+    if (recurrenceDraftInvalid(w.recurrence)) continue
+    const recurrence = normalizeRecurrenceDraft(w.recurrence)
+    windows.push({ start, end, ...(recurrence === undefined ? {} : { recurrence }) })
+  }
   return { enabled: draft.enabled, windows }
+}
+
+/**
+ * True while any touched window's time bounds are incomplete, or the enabled
+ * schedule would stop nothing. A row counts as complete here once its times
+ * stand — its recurrence parameters are the recurrence rule's business.
+ */
+export function stopScheduleTimesInvalid(draft: StopScheduleDraft): boolean {
+  const complete = (w: StopScheduleWindowDraft): boolean => {
+    const start = normalizeScheduleTimeText(w.start)
+    const end = normalizeScheduleTimeText(w.end)
+    return scheduleTimePattern.test(start) && scheduleTimePattern.test(end) && start !== end
+  }
+  const partial = draft.windows.some(w => {
+    if (w.start.trim() === '' && w.end.trim() === '' && w.recurrence.kind === 'daily') return false
+    return !complete(w)
+  })
+  return partial || (draft.enabled && !draft.windows.some(complete))
+}
+
+/** True while any touched window's recurrence parameters are missing or invalid (a `daily` row carries none). */
+export function stopScheduleRecurrenceInvalid(draft: StopScheduleDraft): boolean {
+  return draft.windows.some(w => w.recurrence.kind !== 'daily' && recurrenceDraftInvalid(w.recurrence))
 }
 
 /** True while any touched window is incomplete or the enabled schedule would stop nothing. */
 export function stopScheduleDraftInvalid(draft: StopScheduleDraft): boolean {
-  const partial = draft.windows.some(w => {
-    const start = normalizeScheduleTimeText(w.start)
-    const end = normalizeScheduleTimeText(w.end)
-    if (w.start.trim() === '' && w.end.trim() === '') return false
-    return !scheduleTimePattern.test(start) || !scheduleTimePattern.test(end) || start === end
-  })
-  return partial || (draft.enabled && normalizeStopScheduleDraft(draft).windows.length === 0)
+  return stopScheduleTimesInvalid(draft) || stopScheduleRecurrenceInvalid(draft)
 }
 
 /**
- * The stop-run schedule editor: the enable switch and one row per daily
- * window (Team-zone start and end only — no route). Inside a window the
+ * The stop-run schedule editor: the enable switch and one row per window
+ * (Team-zone start and end only — no route — plus the days the window is
+ * effective on through the shared recurrence editor). Inside a window the
  * Member must not run: the Host's stop-schedule monitor delivers the
  * half-an-hour wrap-up heads-up, the boundary-stop reminder, and the resume
  * notice with the ask-the-Manager instruction. This editor only writes the
@@ -517,9 +584,17 @@ export function StopScheduleField({ draft, onChange, disabled, t }: {
       <button type="button" className={createCss.fallbackAction!} aria-label={t('stopScheduleRemove', { index: index + 1 })} disabled={disabled} onClick={() => { onChange({ ...draft, windows: draft.windows.filter((_, entryIndex) => entryIndex !== index) }) }}>
         <IconCloseOutlineRegular size={14} />
       </button>
+      <RecurrenceField
+        draft={window.recurrence}
+        onChange={next => replaceAt(index, { recurrence: next })}
+        windowLabel={t('stopScheduleWindowLabel', { index: index + 1 })}
+        disabled={disabled}
+        t={t}
+      />
     </div>)}
-    {draft.windows.length < STOP_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '' }] }) }}>{t('stopScheduleAdd')}</Button>}
-    {stopScheduleDraftInvalid(draft) && <p className={createCss.error} role="alert">{t('stopScheduleInvalidRule')}</p>}
+    {draft.windows.length < STOP_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '', recurrence: { kind: 'daily' } }] }) }}>{t('stopScheduleAdd')}</Button>}
+    {stopScheduleTimesInvalid(draft) && <p className={createCss.error} role="alert">{t('stopScheduleInvalidRule')}</p>}
+    {stopScheduleRecurrenceInvalid(draft) && <p className={createCss.error} role="alert">{t('recurrenceInvalidRule')}</p>}
   </div>
 }
 
