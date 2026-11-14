@@ -7,6 +7,7 @@ import {
   windowCoversAt,
   windowOccurrencesAround,
   windowOccurrencesOn,
+  type TeamDateParts,
 } from '../src/schedule-recurrence.ts'
 import {
   ModelScheduleMonitor,
@@ -23,7 +24,6 @@ import {
   stopScheduleWrapUpNoticeText,
   upcomingStopBoundaries,
 } from '../src/stop-schedule.ts'
-import type { TeamDateParts } from '../src/schedule-recurrence.ts'
 import type { AgentTeamAgentMember, AgentTeamMemberModelSchedule, AgentTeamModelSelection, AgentTeamScheduleRecurrence } from '../src/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
