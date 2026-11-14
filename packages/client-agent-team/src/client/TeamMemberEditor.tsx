@@ -6,7 +6,7 @@ import { Button, Checkbox, IconChevronDownOutlineRegular, IconChevronUpOutlineRe
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import { mintRequestId } from './requests.ts'
 import { useEditDialogSave } from './team-dialog-save.ts'
-import { RecurrenceField, normalizeRecurrenceDraft, recurrenceDraftInvalid, recurrenceStoredDraft } from './schedule-recurrence-field.tsx'
+import { RecurrenceField, anyRecurrenceInvalid, normalizeRecurrenceDraft, recurrenceDraftInvalid, recurrenceStoredDraft } from './schedule-recurrence-field.tsx'
 import type { RecurrenceDraft } from './schedule-recurrence-field.tsx'
 import createCss from './create.module.css'
 import css from './sidebar.module.css'
@@ -399,14 +399,9 @@ export function scheduleTimesInvalid(draft: ModelScheduleDraft): boolean {
   return partial || (draft.enabled && !draft.windows.some(complete))
 }
 
-/** True while any touched window's recurrence parameters are missing or invalid (a `daily` row carries none). */
-export function scheduleRecurrenceInvalid(draft: ModelScheduleDraft): boolean {
-  return draft.windows.some(w => w.recurrence.kind !== 'daily' && recurrenceDraftInvalid(w.recurrence))
-}
-
 /** True while any touched window is incomplete or the enabled schedule would demand nothing. */
 export function scheduleDraftInvalid(draft: ModelScheduleDraft): boolean {
-  return scheduleTimesInvalid(draft) || scheduleRecurrenceInvalid(draft)
+  return scheduleTimesInvalid(draft) || anyRecurrenceInvalid(draft.windows)
 }
 
 /**
@@ -470,7 +465,7 @@ export function ModelScheduleField({ draft, onChange, applied, loadModels, disab
     </div>)}
     {draft.windows.length < MODEL_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '', selection: undefined, recurrence: { kind: 'daily' } }] }) }}>{t('modelScheduleAdd')}</Button>}
     {scheduleTimesInvalid(draft) && <p className={createCss.error} role="alert">{t('modelScheduleInvalidRule')}</p>}
-    {scheduleRecurrenceInvalid(draft) && <p className={createCss.error} role="alert">{t('recurrenceInvalidRule')}</p>}
+    {anyRecurrenceInvalid(draft.windows) && <p className={createCss.error} role="alert">{t('recurrenceInvalidRule')}</p>}
   </div>
 }
 
@@ -540,14 +535,9 @@ export function stopScheduleTimesInvalid(draft: StopScheduleDraft): boolean {
   return partial || (draft.enabled && !draft.windows.some(complete))
 }
 
-/** True while any touched window's recurrence parameters are missing or invalid (a `daily` row carries none). */
-export function stopScheduleRecurrenceInvalid(draft: StopScheduleDraft): boolean {
-  return draft.windows.some(w => w.recurrence.kind !== 'daily' && recurrenceDraftInvalid(w.recurrence))
-}
-
 /** True while any touched window is incomplete or the enabled schedule would stop nothing. */
 export function stopScheduleDraftInvalid(draft: StopScheduleDraft): boolean {
-  return stopScheduleTimesInvalid(draft) || stopScheduleRecurrenceInvalid(draft)
+  return stopScheduleTimesInvalid(draft) || anyRecurrenceInvalid(draft.windows)
 }
 
 /**
@@ -594,7 +584,7 @@ export function StopScheduleField({ draft, onChange, disabled, t }: {
     </div>)}
     {draft.windows.length < STOP_SCHEDULE_WINDOW_MAX && <Button variant="outline" className={createCss.scheduleAdd!} disabled={disabled} onClick={() => { onChange({ ...draft, windows: [...draft.windows, { start: '', end: '', recurrence: { kind: 'daily' } }] }) }}>{t('stopScheduleAdd')}</Button>}
     {stopScheduleTimesInvalid(draft) && <p className={createCss.error} role="alert">{t('stopScheduleInvalidRule')}</p>}
-    {stopScheduleRecurrenceInvalid(draft) && <p className={createCss.error} role="alert">{t('recurrenceInvalidRule')}</p>}
+    {anyRecurrenceInvalid(draft.windows) && <p className={createCss.error} role="alert">{t('recurrenceInvalidRule')}</p>}
   </div>
 }
 

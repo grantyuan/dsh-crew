@@ -50,12 +50,24 @@ const MONTH_LENGTHS_CAPPED = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as
 
 /** The stored recurrence (or absent = every day) as an editable draft. */
 export function recurrenceStoredDraft(stored: AgentTeamScheduleRecurrence | undefined): RecurrenceDraft {
-  if (stored === undefined || stored.kind === 'daily') return { kind: 'daily' }
-  if (stored.kind === 'workdays') return { kind: 'workdays' }
-  if (stored.kind === 'everyDays') return { kind: 'everyDays', intervalDays: String(stored.intervalDays), anchorDate: stored.anchorDate }
-  if (stored.kind === 'weekly') return { kind: 'weekly', weekdays: [...new Set(stored.weekdays)].sort((a, b) => a - b) }
-  if (stored.kind === 'monthly') return { kind: 'monthly', dayOfMonth: String(stored.dayOfMonth) }
-  return { kind: 'yearly', month: String(stored.month), day: String(stored.day) }
+  if (stored === undefined) return { kind: 'daily' }
+  switch (stored.kind) {
+    case 'daily':
+      return { kind: 'daily' }
+    case 'workdays':
+      return { kind: 'workdays' }
+    case 'everyDays':
+      return { kind: 'everyDays', intervalDays: String(stored.intervalDays), anchorDate: stored.anchorDate }
+    case 'weekly':
+      return { kind: 'weekly', weekdays: [...new Set(stored.weekdays)].sort((a, b) => a - b) }
+    case 'monthly':
+      return { kind: 'monthly', dayOfMonth: String(stored.dayOfMonth) }
+    case 'yearly':
+      return { kind: 'yearly', month: String(stored.month), day: String(stored.day) }
+    // A future union kind must fail this client build here, not render garbage.
+    default:
+      return stored satisfies never
+  }
 }
 
 /** The fresh draft one kind starts from; everyDays anchors on today so its first interval begins immediately. */
@@ -169,6 +181,11 @@ export function normalizeRecurrenceDraft(draft: RecurrenceDraft): AgentTeamSched
   }
 }
 
+/** True while any window of one schedule family carries incomplete or invalid recurrence parameters. */
+export function anyRecurrenceInvalid(windows: readonly { readonly recurrence: RecurrenceDraft }[]): boolean {
+  return windows.some(w => recurrenceDraftInvalid(w.recurrence))
+}
+
 /**
  * The per-window recurrence editor both schedule fields share: the kind
  * dropdown (每天 / 工作日 / 每几天 / 每周 / 每月 / 每年) plus the parameters that
@@ -230,7 +247,7 @@ export function RecurrenceField({ draft, onChange, windowLabel, disabled, t }: {
           inputMode="numeric"
           maxLength={3}
           aria-label={`${windowLabel} ${t('recurrenceEveryDaysInterval')}`}
-          onChange={event => onChange({ kind: 'everyDays', intervalDays: event.target.value, anchorDate: draft.anchorDate })}
+          onChange={event => onChange({ ...draft, intervalDays: event.target.value })}
           disabled={disabled}
         />
       </label>
@@ -243,7 +260,7 @@ export function RecurrenceField({ draft, onChange, windowLabel, disabled, t }: {
           inputMode="numeric"
           maxLength={10}
           aria-label={`${windowLabel} ${t('recurrenceEveryDaysAnchor')}`}
-          onChange={event => onChange({ kind: 'everyDays', intervalDays: draft.intervalDays, anchorDate: event.target.value })}
+          onChange={event => onChange({ ...draft, anchorDate: event.target.value })}
           disabled={disabled}
         />
       </label>
@@ -254,7 +271,7 @@ export function RecurrenceField({ draft, onChange, windowLabel, disabled, t }: {
         return <button
           key={weekday}
           type="button"
-          className={pressed ? createCss.recurrenceChipOn! : createCss.recurrenceChip!}
+          className={`${createCss.recurrenceChip!} ${pressed ? createCss.recurrenceChipOn! : ''}`.trim()}
           aria-pressed={pressed}
           aria-label={`${windowLabel} ${names[index] ?? String(weekday)}`}
           disabled={disabled}
@@ -262,7 +279,7 @@ export function RecurrenceField({ draft, onChange, windowLabel, disabled, t }: {
             const next = pressed
               ? draft.weekdays.filter(entry => entry !== weekday)
               : [...draft.weekdays, weekday]
-            onChange({ kind: 'weekly', weekdays: next })
+            onChange({ ...draft, weekdays: next })
           }}
         >{chips[index] ?? String(weekday)}</button>
       })}
@@ -276,7 +293,7 @@ export function RecurrenceField({ draft, onChange, windowLabel, disabled, t }: {
         inputMode="numeric"
         maxLength={2}
         aria-label={`${windowLabel} ${t('recurrenceMonthlyDay')}`}
-        onChange={event => onChange({ kind: 'monthly', dayOfMonth: event.target.value })}
+        onChange={event => onChange({ ...draft, dayOfMonth: event.target.value })}
         disabled={disabled}
       />
     </label>}
@@ -290,7 +307,7 @@ export function RecurrenceField({ draft, onChange, windowLabel, disabled, t }: {
           inputMode="numeric"
           maxLength={2}
           aria-label={`${windowLabel} ${t('recurrenceYearlyMonth')}`}
-          onChange={event => onChange({ kind: 'yearly', month: event.target.value, day: draft.day })}
+          onChange={event => onChange({ ...draft, month: event.target.value })}
           disabled={disabled}
         />
       </label>
@@ -303,7 +320,7 @@ export function RecurrenceField({ draft, onChange, windowLabel, disabled, t }: {
           inputMode="numeric"
           maxLength={2}
           aria-label={`${windowLabel} ${t('recurrenceYearlyDay')}`}
-          onChange={event => onChange({ kind: 'yearly', month: draft.month, day: event.target.value })}
+          onChange={event => onChange({ ...draft, day: event.target.value })}
           disabled={disabled}
         />
       </label>

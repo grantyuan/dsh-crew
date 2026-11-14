@@ -413,7 +413,10 @@
   border-color: var(--dsw-alias-brand-primary);
   color: var(--dsw-alias-brand-primary);
 }
+/* A pressed chip's resting border is already brand, so border-color cannot
+   signal focus; the ring carries it instead. */
 .recurrenceChipOn:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary);
   outline: none;
 }
 .recurrenceChipOn:disabled {
