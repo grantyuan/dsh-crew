@@ -23,6 +23,7 @@ import {
   stopScheduleWrapUpNoticeText,
   upcomingStopBoundaries,
 } from '../src/stop-schedule.ts'
+import type { TeamDateParts } from '../src/schedule-recurrence.ts'
 import type { AgentTeamAgentMember, AgentTeamMemberModelSchedule, AgentTeamModelSelection, AgentTeamScheduleRecurrence } from '../src/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -37,9 +38,9 @@ const AT = (teamIso: string): number => Date.parse(`${teamIso}:00+08:00`)
  * library's own calendar, so the module's date arithmetic is checked against
  * something that does not share its implementation.
  */
-function partsOf(year: number, month: number, day: number): { readonly year: number; readonly month: number; readonly day: number; readonly weekday: number } {
+function partsOf(year: number, month: number, day: number): TeamDateParts {
   const weekday = ((new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7) + 1
-  return { year, month, day, weekday }
+  return { year, month, day, weekday: weekday as TeamDateParts['weekday'] }
 }
 
 const daily = (): AgentTeamScheduleRecurrence => ({ kind: 'daily' })
@@ -226,10 +227,11 @@ describe('assertScheduleRecurrence (the commit shape rule)', () => {
   })
 
   it('rejects weekly weekday lists that are empty, out of range, or repeated', () => {
+    const raw = (value: unknown): AgentTeamScheduleRecurrence => value as AgentTeamScheduleRecurrence
     expect(() => assertScheduleRecurrence(weekly())).toThrow(/weekday/)
-    expect(() => assertScheduleRecurrence(weekly(0, 1))).toThrow(/weekday/)
-    expect(() => assertScheduleRecurrence(weekly(1, 8))).toThrow(/weekday/)
-    expect(() => assertScheduleRecurrence(weekly(3, 3))).toThrow(/weekday/)
+    expect(() => assertScheduleRecurrence(raw({ kind: 'weekly', weekdays: [0, 1] }))).toThrow(/weekday/)
+    expect(() => assertScheduleRecurrence(raw({ kind: 'weekly', weekdays: [1, 8] }))).toThrow(/weekday/)
+    expect(() => assertScheduleRecurrence(raw({ kind: 'weekly', weekdays: [3, 3] }))).toThrow(/weekday/)
   })
 
   it('rejects a monthly day outside 1..31', () => {
@@ -252,7 +254,7 @@ const qwen = (): AgentTeamModelSelection => ({ provider: 'qwen', model: 'qwen3.8
 
 const modelWindow = (start: string, end: string, selection: AgentTeamModelSelection, recurrence?: AgentTeamScheduleRecurrence) =>
   ({ start, end, selection, ...(recurrence === undefined ? {} : { recurrence }) })
-const scheduleOf = (enabled: boolean, ...windows: readonly AgentTeamMemberModelSchedule['windows']): AgentTeamMemberModelSchedule =>
+const scheduleOf = (enabled: boolean, ...windows: AgentTeamMemberModelSchedule['windows']): AgentTeamMemberModelSchedule =>
   ({ enabled, windows })
 
 function member(overrides: { readonly memberId: string } & Partial<Omit<AgentTeamAgentMember, 'memberId'>>): AgentTeamAgentMember {

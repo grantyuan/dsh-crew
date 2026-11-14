@@ -20,7 +20,7 @@ import AgentTeam, { AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID,
 import { AgentTeamLedger, agentTeamAssistantActor, agentTeamHumanActor, isThreadReadSnapshot, MAX_PENDING_INTERRUPTS } from '../src/ledger.ts'
 import { agentTeamDomainSpec } from '../src/spec.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
-import type { AgentTeamAgentMember, AgentTeamChannelRef, AgentTeamContextCheckpointRef, AgentTeamMemberActor, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadReadData, AgentTeamThreadReadOperation, AgentTeamThreadReadReceipt, AgentTeamThreadReadResult, AgentTeamThreadRef } from '../src/types.ts'
+import type { AgentTeamAgentMember, AgentTeamChannelRef, AgentTeamContextCheckpointRef, AgentTeamMemberActor, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamMemberStopSchedule, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId, AgentTeamScheduleRecurrence, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadReadData, AgentTeamThreadReadOperation, AgentTeamThreadReadReceipt, AgentTeamThreadReadResult, AgentTeamThreadRef } from '../src/types.ts'
 
 interface TeamHarness {
   readonly ctx: Context
@@ -3892,6 +3892,86 @@ describe('AgentTeam Member model schedule', () => {
     await ledger.updateMember({ ...edit, requestId: requestId('edit-once'), modelSchedule: day })
     await ledger.updateMember({ ...edit, requestId: requestId('edit-once'), modelSchedule: day }) // idempotent replay
     await expect(ledger.updateMember({ ...edit, requestId: requestId('edit-once'), modelSchedule: night })).rejects.toThrow(/reused with a different/)
+  })
+
+  it('stores every recurrence kind, freezes them deep, and replays them across a restart', async () => {
+    const pool = new MemoryMediaPool()
+    const first = await harness(pool)
+    const ledger = replayLedger(first)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:recurrent', 'recurrent')
+    const base = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    const modelSchedule: AgentTeamMemberModelSchedule = { enabled: true, windows: [
+      { start: '09:00', end: '18:00', selection: deepseek, recurrence: { kind: 'daily' } },
+      { start: '09:00', end: '18:00', selection: deepseek, recurrence: { kind: 'workdays' } },
+      { start: '22:00', end: '06:00', selection: qwen, recurrence: { kind: 'everyDays', intervalDays: 3, anchorDate: '2024-02-29' } },
+      { start: '10:00', end: '16:00', selection: qwen, recurrence: { kind: 'weekly', weekdays: [1, 3, 5] } },
+      { start: '10:00', end: '12:00', selection: deepseek, recurrence: { kind: 'monthly', dayOfMonth: 31 } },
+      { start: '10:00', end: '12:00', selection: deepseek, recurrence: { kind: 'yearly', month: 2, day: 29 } },
+    ] }
+    const stopSchedule: AgentTeamMemberStopSchedule = { enabled: true, windows: [{ start: '22:00', end: '06:00', recurrence: { kind: 'workdays' } }] }
+    const stored = await ledger.updateMember({ ...base, requestId: requestId('recurrence-store'), modelSchedule, stopSchedule })
+    expect(stored.value.member.modelSchedule).toEqual(modelSchedule)
+    expect(stored.value.member.stopSchedule).toEqual(stopSchedule)
+    // The commit freezes the recurrence shapes deep: every window's recurrence
+    // object, and the weekly weekday list inside it, is immutable intent.
+    const storedModel = ledger.getMember(member.memberId)?.modelSchedule
+    const storedStop = ledger.getMember(member.memberId)?.stopSchedule
+    for (const window of storedModel?.windows ?? []) expect(Object.isFrozen(window.recurrence)).toBe(true)
+    const weeklyWindow = storedModel?.windows.find(window => window.recurrence?.kind === 'weekly')
+    if (weeklyWindow?.recurrence?.kind !== 'weekly') throw new Error('expected the weekly recurrence window to be stored')
+    expect(Object.isFrozen(weeklyWindow.recurrence.weekdays)).toBe(true)
+    expect(Object.isFrozen(storedStop?.windows[0]?.recurrence)).toBe(true)
+    // Restart over the same medium: the fresh domain open replays the
+    // recurrence-carrying records through the durable schema — both schedules.
+    await first.fiber.dispose()
+    cleanups.pop()
+    const second = await harness(pool)
+    const revived = replayLedger(second)
+    expect(revived.getMember(member.memberId)?.modelSchedule).toEqual(modelSchedule)
+    expect(revived.getMember(member.memberId)?.stopSchedule).toEqual(stopSchedule)
+    revived.validate()
+  })
+
+  it('rejects malformed recurrences at the commit gate for both schedules', async () => {
+    const test = await harness()
+    const ledger = replayLedger(test)
+    const { member } = await addLedgerMember(ledger, undefined, 'member:recurrence-strict', 'recurrence-strict')
+    const base = { handle: member.handle, description: member.description, actor: agentTeamHumanActor(), memberId: member.memberId }
+    const recurrenceOf = (value: unknown): AgentTeamScheduleRecurrence => value as AgentTeamScheduleRecurrence
+    const badRecurrences: readonly { readonly recurrence: AgentTeamScheduleRecurrence; readonly message: RegExp }[] = [
+      { recurrence: recurrenceOf({ kind: 'weekdays' }), message: /kind/ },
+      { recurrence: recurrenceOf({ kind: 'everyDays', intervalDays: 0, anchorDate: '2026-11-10' }), message: /intervalDays/ },
+      { recurrence: recurrenceOf({ kind: 'everyDays', intervalDays: 367, anchorDate: '2026-11-10' }), message: /intervalDays/ },
+      { recurrence: recurrenceOf({ kind: 'everyDays', intervalDays: 2.5, anchorDate: '2026-11-10' }), message: /intervalDays/ },
+      { recurrence: recurrenceOf({ kind: 'everyDays', intervalDays: 3, anchorDate: '2026-02-30' }), message: /anchorDate/ },
+      { recurrence: recurrenceOf({ kind: 'everyDays', intervalDays: 3, anchorDate: '20261110' }), message: /anchorDate/ },
+      { recurrence: recurrenceOf({ kind: 'weekly', weekdays: [] }), message: /weekday/ },
+      { recurrence: recurrenceOf({ kind: 'weekly', weekdays: [0, 1] }), message: /weekday/ },
+      { recurrence: recurrenceOf({ kind: 'weekly', weekdays: [1, 8] }), message: /weekday/ },
+      { recurrence: recurrenceOf({ kind: 'weekly', weekdays: [3, 3] }), message: /weekday/ },
+      { recurrence: recurrenceOf({ kind: 'monthly', dayOfMonth: 0 }), message: /dayOfMonth/ },
+      { recurrence: recurrenceOf({ kind: 'monthly', dayOfMonth: 32 }), message: /dayOfMonth/ },
+      { recurrence: recurrenceOf({ kind: 'yearly', month: 0, day: 15 }), message: /yearly/ },
+      { recurrence: recurrenceOf({ kind: 'yearly', month: 13, day: 15 }), message: /yearly/ },
+      { recurrence: recurrenceOf({ kind: 'yearly', month: 2, day: 30 }), message: /yearly/ },
+      { recurrence: recurrenceOf({ kind: 'yearly', month: 4, day: 31 }), message: /yearly/ },
+    ]
+    for (const [index, bad] of badRecurrences.entries()) {
+      await expect(ledger.updateMember({
+        ...base, requestId: requestId(`recurrence-model-${index}`),
+        modelSchedule: { enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek, recurrence: bad.recurrence }] },
+      })).rejects.toThrow(bad.message)
+      await expect(ledger.updateMember({
+        ...base, requestId: requestId(`recurrence-stop-${index}`),
+        stopSchedule: { enabled: true, windows: [{ start: '09:00', end: '18:00', recurrence: bad.recurrence }] },
+      })).rejects.toThrow(bad.message)
+    }
+    // The pattern rule, not the intent rule: 02-29 commits and merely stays
+    // silent in non-leap years (the arithmetic tests own that behavior).
+    await expect(ledger.updateMember({
+      ...base, requestId: requestId('recurrence-leap-day'),
+      modelSchedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', selection: deepseek, recurrence: { kind: 'yearly', month: 2, day: 29 } }] },
+    })).resolves.toBeDefined()
   })
 
   it('lands the applied route as an auditable operation with idempotent retries and cold convergence', async () => {

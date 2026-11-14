@@ -71,6 +71,7 @@ import type {
   AgentTeamMemberCapabilityChangedOperation,
   AgentTeamQuestionAnalyzedOperation,
   AgentTeamModelScheduleWindow,
+  AgentTeamScheduleRecurrence,
   AgentTeamMemberPromptProfile,
   AgentTeamMemberRemovedOperation,
   AgentTeamMemberResumedOperation,
@@ -179,6 +180,7 @@ import type {
   AgentTeamViewRequest,
 } from './types.ts'
 import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX, MEMBER_MODEL_SCHEDULE_WINDOW_MAX, MEMBER_STOP_SCHEDULE_WINDOW_MAX, MODEL_SCHEDULE_TIME_PATTERN } from './spec.ts'
+import { assertScheduleRecurrence } from './schedule-recurrence.ts'
 import { formatTeamTimestamp } from './time-format.ts'
 import { resolveBodyMentions, scanBodyHandles } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
@@ -814,6 +816,24 @@ function freezePromptProfile(prompt: AgentTeamMemberPromptProfile | undefined): 
   }
 }
 
+/** Deep-freeze one window recurrence; the weekday list freezes with it. */
+function freezeScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence): AgentTeamScheduleRecurrence {
+  switch (recurrence.kind) {
+    case 'daily':
+      return Object.freeze({ kind: 'daily' })
+    case 'workdays':
+      return Object.freeze({ kind: 'workdays' })
+    case 'everyDays':
+      return Object.freeze({ kind: 'everyDays', intervalDays: recurrence.intervalDays, anchorDate: recurrence.anchorDate })
+    case 'weekly':
+      return Object.freeze({ kind: 'weekly', weekdays: Object.freeze([...recurrence.weekdays]) })
+    case 'monthly':
+      return Object.freeze({ kind: 'monthly', dayOfMonth: recurrence.dayOfMonth })
+    case 'yearly':
+      return Object.freeze({ kind: 'yearly', month: recurrence.month, day: recurrence.day })
+  }
+}
+
 /** Deep-freeze a Member model schedule overlay; absent stays absent. */
 function freezeModelSchedule(schedule: AgentTeamMemberModelSchedule | undefined): { modelSchedule?: AgentTeamMemberModelSchedule } {
   if (schedule === undefined) return {}
@@ -824,6 +844,7 @@ function freezeModelSchedule(schedule: AgentTeamMemberModelSchedule | undefined)
         start: window.start,
         end: window.end,
         selection: Object.freeze({ ...window.selection }),
+        ...(window.recurrence === undefined ? {} : { recurrence: freezeScheduleRecurrence(window.recurrence) }),
       }))),
     }),
   }
@@ -838,6 +859,7 @@ function freezeStopSchedule(schedule: AgentTeamMemberStopSchedule | undefined): 
       windows: Object.freeze(schedule.windows.map(window => Object.freeze({
         start: window.start,
         end: window.end,
+        ...(window.recurrence === undefined ? {} : { recurrence: freezeScheduleRecurrence(window.recurrence) }),
       }))),
     }),
   }
@@ -6376,11 +6398,12 @@ export class AgentTeamLedger {
 
   /**
    * Schedule commit rule: `HH:MM` window bounds in the Team zone, a bounded
-   * ordered window list, and a non-degenerate window — `start` equals `end`
+   * ordered window list, a non-degenerate window — `start` equals `end`
    * would be both always-covering and never-covering depending on reading,
-   * so the Human must express an all-day window as two half-open windows.
-   * Route strings follow the same pure-intent rule as `model` and fallbacks:
-   * non-blank names only, catalog existence is asserted at the Remote edge
+   * so the Human must express an all-day window as two half-open windows —
+   * and a valid recurrence shape when the window carries one. Route strings
+   * follow the same pure-intent rule as `model` and fallbacks: non-blank
+   * names only, catalog existence is asserted at the Remote edge
    * (`assertModelRoute`) and re-derived at activation, never persisted.
    */
   private assertModelSchedule(schedule: AgentTeamUpdateMemberRequest['modelSchedule']): void {
@@ -6393,13 +6416,15 @@ export class AgentTeamLedger {
         throw new Error('member model schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member model schedule window start must not equal its end')
+      assertScheduleRecurrence(window.recurrence)
       this.assertModelSelection(window.selection)
     }
   }
 
   /**
-   * Stop schedule commit rule: the same window shape and bounds as the model
-   * schedule, with no route to assert — a stop window is a plain time span.
+   * Stop schedule commit rule: the same window shape, bounds, and recurrence
+   * shape as the model schedule, with no route to assert — a stop window is
+   * a plain time span.
    */
   private assertStopSchedule(schedule: AgentTeamUpdateMemberRequest['stopSchedule']): void {
     if (schedule === undefined) return
@@ -6411,6 +6436,7 @@ export class AgentTeamLedger {
         throw new Error('member stop schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member stop schedule window start must not equal its end')
+      assertScheduleRecurrence(window.recurrence)
     }
   }
 
