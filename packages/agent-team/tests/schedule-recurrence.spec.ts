@@ -15,6 +15,14 @@ import {
   resolveScheduleRouteAt,
   upcomingRouteChanges,
 } from '../src/model-schedule.ts'
+import {
+  StopScheduleMonitor,
+  crossedStopBoundaries,
+  stopScheduleBoundaryNoticeText,
+  stopScheduleResumeNoticeText,
+  stopScheduleWrapUpNoticeText,
+  upcomingStopBoundaries,
+} from '../src/stop-schedule.ts'
 import type { AgentTeamAgentMember, AgentTeamMemberModelSchedule, AgentTeamModelSelection, AgentTeamScheduleRecurrence } from '../src/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -419,5 +427,124 @@ describe('model schedule notice text with a recurrence phrase', () => {
     expect(daily).toBe(legacy)
     expect(daily).toContain('your Team model schedule switches your model route onto qwen/qwen3.8-flash')
     expect(daily).not.toContain('undefined')
+  })
+})
+
+const stopWindow = (start: string, end: string, recurrence?: AgentTeamScheduleRecurrence) => ({ start, end, ...(recurrence === undefined ? {} : { recurrence }) })
+const stopScheduleOf = (enabled: boolean, ...windows: readonly ReturnType<typeof stopWindow>[]) => ({ enabled, windows })
+
+describe('upcomingStopBoundaries with recurrences', () => {
+  it('offers the wrap-up heads-up only on a day the window starts', () => {
+    const schedule = stopScheduleOf(true, stopWindow('22:00', '06:00', workdays()))
+    const friday = upcomingStopBoundaries(schedule, AT('2026-11-13T21:30'))
+    expect(friday).toHaveLength(1)
+    expect(friday[0]).toMatchObject({ kind: 'stop', atMs: AT('2026-11-13T22:00') })
+    // Saturday 21:30: a daily window would head for its 22:00 start; a workdays window has no Saturday.
+    expect(upcomingStopBoundaries(schedule, AT('2026-11-14T21:30'))).toEqual([])
+  })
+
+  it('anchors an everyDays stop window to its first day', () => {
+    const schedule = stopScheduleOf(true, stopWindow('22:00', '06:00', everyDays(3, '2026-11-13')))
+    expect(upcomingStopBoundaries(schedule, AT('2026-11-13T21:30'))).toHaveLength(1) // the anchor day itself
+    expect(upcomingStopBoundaries(schedule, AT('2026-11-12T21:30'))).toEqual([]) // before the anchor
+    expect(upcomingStopBoundaries(schedule, AT('2026-11-14T21:30'))).toEqual([]) // one day after: not a multiple of 3
+    expect(upcomingStopBoundaries(schedule, AT('2026-11-16T21:30'))).toHaveLength(1) // three days on
+  })
+})
+
+describe('crossedStopBoundaries with recurrences', () => {
+  it('resumes a yesterday-matched cross-midnight window this morning, inside the freshness bound', () => {
+    const schedule = stopScheduleOf(true, stopWindow('22:00', '06:00', workdays()))
+    // Saturday 06:30: Friday's window ended forty minutes ago.
+    const boundaries = crossedStopBoundaries(schedule, AT('2026-11-14T06:30'))
+    expect(boundaries).toHaveLength(1)
+    expect(boundaries[0]).toMatchObject({ kind: 'resume', atMs: AT('2026-11-14T06:00') })
+    // Ninety minutes past the end it is history, not an event.
+    expect(crossedStopBoundaries(schedule, AT('2026-11-14T07:30'))).toEqual([])
+    // Sunday 06:30: Saturday started nothing, so nothing ended.
+    expect(crossedStopBoundaries(schedule, AT('2026-11-15T06:30'))).toEqual([])
+  })
+
+  it('resumes a same-day window that ended late the previous evening', () => {
+    const schedule = stopScheduleOf(true, stopWindow('22:00', '23:50', workdays()))
+    const boundaries = crossedStopBoundaries(schedule, AT('2026-11-14T00:30')) // Saturday: Friday's window ended 40 minutes ago
+    expect(boundaries).toHaveLength(1)
+    expect(boundaries[0]).toMatchObject({ kind: 'resume', atMs: AT('2026-11-13T23:50') })
+  })
+
+  it('keeps the stop expectation standing while a Friday-started window still covers Saturday', () => {
+    const schedule = stopScheduleOf(true, stopWindow('22:00', '06:00', workdays()))
+    const boundaries = crossedStopBoundaries(schedule, AT('2026-11-14T03:00')) // Saturday 03:00, inside Friday's wrap window
+    expect(boundaries).toHaveLength(1)
+    expect(boundaries[0]).toMatchObject({ kind: 'stop', atMs: AT('2026-11-13T22:00') })
+    // Sunday 03:00: no occurrence covers it, and none just crossed.
+    expect(crossedStopBoundaries(schedule, AT('2026-11-15T03:00'))).toEqual([])
+  })
+
+  it('never resumes a window that covers the moment through its next day', () => {
+    // The 23:59-long window covers 00:30 through today's own occurrence, so
+    // yesterday's end — although inside the freshness bound — earns nothing.
+    const schedule = stopScheduleOf(true, stopWindow('00:00', '23:59'))
+    expect(crossedStopBoundaries(schedule, AT('2026-11-14T00:30'))).toHaveLength(1)
+    expect(crossedStopBoundaries(schedule, AT('2026-11-14T00:30'))[0]?.kind).toBe('stop')
+  })
+})
+
+describe('StopScheduleMonitor passes with recurrences', () => {
+  it('delivers wrap-up, stop, and resume only around matched days, latched per boundary minute', async () => {
+    const members = (): readonly AgentTeamAgentMember[] => [member({
+      memberId: 'member:workdays-stop',
+      stopSchedule: stopScheduleOf(true, stopWindow('22:00', '06:00', workdays())),
+    })]
+    const notices: Array<{ readonly memberId: string; readonly body: string }> = []
+    const monitor = new StopScheduleMonitor({
+      members,
+      isRunning: () => true,
+      isMidTurn: () => true,
+      notify: async (_memberId, body) => { notices.push({ memberId: 'member:workdays-stop', body }) },
+      formatWhen: atMs => new Date(atMs).toISOString(),
+      log: () => {},
+    })
+    const kindOf = (body: string): string => body.includes('Stop-run notice') ? 'wrap-up' : body.includes('stop running now') ? 'stop' : body.includes('Stop window ended') ? 'resume' : 'other'
+    // Friday 21:30: the wrap-up heads-up for the 22:00 start.
+    await monitor.runPass(AT('2026-11-13T21:30'))
+    expect(notices.map(notice => kindOf(notice.body))).toEqual(['wrap-up'])
+    expect(notices[0]?.body).toContain('on workdays')
+    // Saturday 03:00: still inside Friday's wrap window — the boundary-stop notice.
+    await monitor.runPass(AT('2026-11-14T03:00'))
+    expect(notices.map(notice => kindOf(notice.body))).toEqual(['wrap-up', 'stop'])
+    // Saturday 06:30: the window ended forty minutes ago — the resume notice.
+    await monitor.runPass(AT('2026-11-14T06:30'))
+    expect(notices.map(notice => kindOf(notice.body))).toEqual(['wrap-up', 'stop', 'resume'])
+    expect(notices[2]?.body).toContain('on workdays')
+    // Latched: the same boundaries earn nothing again.
+    await monitor.runPass(AT('2026-11-14T03:00') + 30_000)
+    expect(notices).toHaveLength(3)
+    // Saturday 21:30: no Saturday window, no wrap-up heads-up.
+    await monitor.runPass(AT('2026-11-14T21:30'))
+    expect(notices).toHaveLength(3)
+  })
+})
+
+describe('stop schedule notice texts with a recurrence phrase', () => {
+  it('qualifies the window with its recurrence', () => {
+    const wrapUp = stopScheduleWrapUpNoticeText({ memberHandle: 'worker', whenText: '2026-11-13T22:00:00+08:00', window: stopWindow('22:00', '06:00', workdays()) })
+    expect(wrapUp).toContain('(22:00–06:00 Team time, on workdays)')
+    expect(wrapUp).toContain('in 30 minutes you must stop running')
+    const boundary = stopScheduleBoundaryNoticeText({ memberHandle: 'worker', window: stopWindow('22:00', '06:00', weekly(6)) })
+    expect(boundary).toContain('(22:00–06:00 Team time, on Sat)')
+    const resume = stopScheduleResumeNoticeText({ memberHandle: 'worker', window: stopWindow('22:00', '06:00', everyDays(3, '2026-11-13')) })
+    expect(resume).toContain('(22:00–06:00 Team time, every 3 days)')
+  })
+
+  it('stays byte-identical for plain daily windows', () => {
+    const legacy = stopScheduleWrapUpNoticeText({ memberHandle: 'worker', whenText: '2026-11-13T22:00:00+08:00', window: stopWindow('22:00', '06:00') })
+    const dailyText = stopScheduleWrapUpNoticeText({ memberHandle: 'worker', whenText: '2026-11-13T22:00:00+08:00', window: stopWindow('22:00', '06:00', daily()) })
+    expect(dailyText).toBe(legacy)
+    expect(dailyText).toContain('(22:00–06:00 Team time) starts at')
+    expect(stopScheduleBoundaryNoticeText({ memberHandle: 'worker', window: stopWindow('22:00', '06:00', daily()) }))
+      .toBe(stopScheduleBoundaryNoticeText({ memberHandle: 'worker', window: stopWindow('22:00', '06:00') }))
+    expect(stopScheduleResumeNoticeText({ memberHandle: 'worker', window: stopWindow('22:00', '06:00', daily()) }))
+      .toBe(stopScheduleResumeNoticeText({ memberHandle: 'worker', window: stopWindow('22:00', '06:00') }))
   })
 })

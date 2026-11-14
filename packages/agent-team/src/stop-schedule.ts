@@ -29,7 +29,14 @@ import type {
   AgentTeamMemberStopSchedule,
   AgentTeamMemberStopWindow,
 } from './types.ts'
-import { MINUTES_PER_DAY, TEAM_ZONE_OFFSET_MS, parseScheduleMinute, scheduleWindowCovers, teamAbsoluteMinute, teamMinuteOfDay } from './model-schedule.ts'
+import {
+  MINUTES_PER_DAY,
+  MS_PER_MINUTE,
+  describeRecurrence,
+  teamAbsoluteMinute,
+  windowCoversAt,
+  windowOccurrencesAround,
+} from './schedule-recurrence.ts'
 
 /** How often the monitor re-derives the boundary picture; matches the watch/liaison cadence. */
 export const STOP_SCHEDULE_PASS_INTERVAL_MS = 30 * 1000
@@ -48,14 +55,14 @@ export const STOP_SCHEDULE_RESUME_STALE_MS = 60 * 60 * 1000
 /** What one boundary means: the window begins (stop) or ends (resume). */
 export type StopScheduleBoundaryKind = 'stop' | 'resume'
 
-/** One daily boundary of one stop window, resolved to an epoch instant. */
+/** One boundary of one stop window occurrence, resolved to an epoch instant. */
 export interface StopScheduleBoundary {
   /** The epoch instant the boundary sits on (aligned to the Team-zone minute). */
   readonly atMs: number
   /** Absolute Team-zone minute of the boundary — the once-per-boundary latch key part. */
   readonly absoluteMinute: number
   readonly kind: StopScheduleBoundaryKind
-  /** The window the boundary belongs to (the notice names its bounds). */
+  /** The window the boundary belongs to (the notice names its bounds and recurrence). */
   readonly window: AgentTeamMemberStopWindow
 }
 
@@ -63,66 +70,88 @@ export interface StopScheduleBoundary {
  * Window starts inside `(now, now + horizonMs]` — the moments a running
  * Member must be told (half an hour ahead) to wrap up. Window ends earn no
  * heads-up: the resume notice belongs AFTER the window, never before.
- * Deduplicated by absolute minute: overlapping windows starting together
- * earn one heads-up, naming the first window's bounds.
+ * Starts come from the candidate-day occurrence spread, so only a matched
+ * start day offers its boundary. Deduplicated by absolute minute:
+ * overlapping windows starting together earn one heads-up, naming the first
+ * window's bounds.
  */
 export function upcomingStopBoundaries(schedule: AgentTeamMemberStopSchedule, nowMs: number, horizonMs = STOP_SCHEDULE_NOTICE_AHEAD_MS): readonly StopScheduleBoundary[] {
   if (!schedule.enabled) return []
-  const minuteOfDay = teamMinuteOfDay(nowMs)
+  const nowMinute = teamAbsoluteMinute(nowMs)
   const byMinute = new Map<number, StopScheduleBoundary>()
   for (const window of schedule.windows) {
-    const startMinute = parseScheduleMinute(window.start)
-    const delta = (startMinute - minuteOfDay + MINUTES_PER_DAY) % MINUTES_PER_DAY
-    // delta === 0: the window is already running — the pass itself delivers
-    // the boundary-stop notice, a heads-up now would be a note after the fact.
-    if (delta === 0 || delta * 60_000 > horizonMs) continue
-    const atMs = nowMs - ((nowMs + TEAM_ZONE_OFFSET_MS) % 60_000) + delta * 60_000
-    const absoluteMinute = teamAbsoluteMinute(atMs)
-    if (!byMinute.has(absoluteMinute)) byMinute.set(absoluteMinute, { atMs, absoluteMinute, kind: 'stop', window })
+    for (const occurrence of windowOccurrencesAround(window, nowMs)) {
+      // Occurrence edges are exact Team-zone minute instants, so their
+      // absolute Team-zone minute is a whole number, and the distance to now
+      // is whole minutes on the same grid the latch keys use.
+      const absoluteMinute = teamAbsoluteMinute(occurrence.startMs)
+      const delta = absoluteMinute - nowMinute
+      // delta <= 0: the window is already running or the start is gone — the
+      // pass itself delivers the boundary-stop notice while the window stands,
+      // a heads-up now would be a note after the fact.
+      if (delta <= 0 || delta * MS_PER_MINUTE > horizonMs) continue
+      if (!byMinute.has(absoluteMinute)) byMinute.set(absoluteMinute, { atMs: occurrence.startMs, absoluteMinute, kind: 'stop', window })
+    }
   }
   return [...byMinute.values()].sort((a, b) => a.absoluteMinute - b.absoluteMinute)
 }
 
 /**
- * The most recent crossing of every window boundary (each window's start and
- * end, resolved to the occurrence that just passed — `delta` is the minutes
- * since it, always within one day). A stop boundary is included only while
- * its window still covers the current minute (inside the window, the stop
- * expectation stands); a resume boundary is included only once its window
- * no longer covers AND the crossing is recent (see
- * {@link STOP_SCHEDULE_RESUME_STALE_MS}). Deduplicated by absolute minute
- * and kind: overlapping windows crossing together earn one notice.
+ * The most recent crossing of every window boundary, resolved on the
+ * candidate-day occurrence spread. A stop boundary is the start of the
+ * occurrence that still covers the current minute (inside the window, the
+ * stop expectation stands; start inclusive, so the start minute itself
+ * counts); a resume boundary is the end of an occurrence that has just
+ * ended — within {@link STOP_SCHEDULE_RESUME_STALE_MS} — while the window
+ * no longer covers the moment through any occurrence. Deduplicated by
+ * absolute minute and kind: overlapping windows crossing together earn one
+ * notice.
  */
 export function crossedStopBoundaries(schedule: AgentTeamMemberStopSchedule, nowMs: number): readonly StopScheduleBoundary[] {
   if (!schedule.enabled) return []
-  const minuteOfDay = teamMinuteOfDay(nowMs)
+  const nowMinute = teamAbsoluteMinute(nowMs)
   const byKey = new Map<string, StopScheduleBoundary>()
   for (const window of schedule.windows) {
-    for (const kind of ['stop', 'resume'] as const) {
-      const boundaryMinute = kind === 'stop' ? parseScheduleMinute(window.start) : parseScheduleMinute(window.end)
-      const delta = (minuteOfDay - boundaryMinute + MINUTES_PER_DAY) % MINUTES_PER_DAY
-      // delta === 0 is the crossing minute itself: the window edge is
-      // exact now. A stop edge then covers (start inclusive); a resume
-      // edge does not (end exclusive) — the coverage check below keeps
-      // each kind honest, so both ride the same delta rule.
-      const covered = scheduleWindowCovers(window, minuteOfDay)
-      if (kind === 'stop' ? !covered : covered) continue
-      if (kind === 'resume' && delta * 60_000 > STOP_SCHEDULE_RESUME_STALE_MS) continue
-      const atMs = nowMs - ((nowMs + TEAM_ZONE_OFFSET_MS) % 60_000) - delta * 60_000
-      const boundary: StopScheduleBoundary = { atMs, absoluteMinute: teamAbsoluteMinute(atMs), kind, window }
-      const key = `${boundary.absoluteMinute}\u0000${kind}`
-      if (!byKey.has(key)) byKey.set(key, boundary)
+    const covering = windowCoversAt(window, nowMs)
+    for (const occurrence of windowOccurrencesAround(window, nowMs)) {
+      // The covering occurrence's start is the crossed stop edge — including
+      // the start minute itself, where the edge is exact now (start inclusive).
+      if (nowMs >= occurrence.startMs && nowMs < occurrence.endMs) {
+        const boundary: StopScheduleBoundary = { atMs: occurrence.startMs, absoluteMinute: teamAbsoluteMinute(occurrence.startMs), kind: 'stop', window }
+        const key = `${boundary.absoluteMinute}\u0000stop`
+        if (!byKey.has(key)) byKey.set(key, boundary)
+        continue
+      }
+      // An end just past, with the window no longer covering, is the resume
+      // crossing — including the end minute itself, where the edge is exact
+      // now (end exclusive).
+      const delta = nowMinute - teamAbsoluteMinute(occurrence.endMs)
+      if (!covering && delta >= 0 && delta * MS_PER_MINUTE <= STOP_SCHEDULE_RESUME_STALE_MS) {
+        const boundary: StopScheduleBoundary = { atMs: occurrence.endMs, absoluteMinute: teamAbsoluteMinute(occurrence.endMs), kind: 'resume', window }
+        const key = `${boundary.absoluteMinute}\u0000resume`
+        if (!byKey.has(key)) byKey.set(key, boundary)
+      }
     }
   }
   return [...byKey.values()].sort((a, b) => a.absoluteMinute - b.absoluteMinute)
 }
 
 /**
+ * The recurrence phrase inside the window parenthetical, e.g.
+ * `(22:00–06:00 Team time, on workdays)`. A plain daily window phrases as
+ * nothing, so pre-recurrence notices render byte-identically to before.
+ */
+function windowRecurrenceSuffix(window: AgentTeamMemberStopWindow): string {
+  const phrase = describeRecurrence(window.recurrence)
+  return phrase === '' ? '' : `, ${phrase}`
+}
+
+/**
  * The half-an-hour-ahead wrap-up notice: posted in the Team Assistant's
- * voice with the Member as the only explicit recipient, it names the window
- * and the moment, and carries the full wrap-up contract — finish or park the
- * work, write the handover document, report progress and wrap-up status to
- * the Manager before finishing, and state the stop interval.
+ * voice with the Member as the only explicit recipient, it names the window,
+ * its recurrence, and the moment, and carries the full wrap-up contract —
+ * finish or park the work, write the handover document, report progress and
+ * wrap-up status to the Manager before finishing, and state the stop interval.
  */
 export function stopScheduleWrapUpNoticeText(input: {
   readonly memberHandle: string
@@ -130,7 +159,7 @@ export function stopScheduleWrapUpNoticeText(input: {
   readonly window: AgentTeamMemberStopWindow
 }): string {
   const lines = [
-    `@${input.memberHandle} Stop-run notice: your stop-run window (${input.window.start}–${input.window.end} Team time) starts at ${input.whenText} — in 30 minutes you must stop running.`,
+    `@${input.memberHandle} Stop-run notice: your stop-run window (${input.window.start}–${input.window.end} Team time${windowRecurrenceSuffix(input.window)}) starts at ${input.whenText} — in 30 minutes you must stop running.`,
     `Before you stop: finish or safely park the work you are mid-way through (background jobs included); write a handover document into your private memory (current state, next steps, open risks, where everything lives); and before you finish, report your progress and wrap-up status to the Manager (your Team's designated leader), stating that you will be stopped from ${input.window.start} to ${input.window.end}.`,
   ]
   return lines.join('\n')
@@ -146,7 +175,7 @@ export function stopScheduleBoundaryNoticeText(input: {
   readonly window: AgentTeamMemberStopWindow
 }): string {
   const lines = [
-    `@${input.memberHandle} Stop window started: your stop-run window (${input.window.start}–${input.window.end} Team time) has started — stop running now.`,
+    `@${input.memberHandle} Stop window started: your stop-run window (${input.window.start}–${input.window.end} Team time${windowRecurrenceSuffix(input.window)}) has started — stop running now.`,
     'Complete only the essential wrap-up (the handover document and the Manager report from the earlier notice) and end your turn; do not start new work inside the window.',
   ]
   return lines.join('\n')
@@ -161,7 +190,7 @@ export function stopScheduleResumeNoticeText(input: {
   readonly window: AgentTeamMemberStopWindow
 }): string {
   const lines = [
-    `@${input.memberHandle} Stop window ended: your stop-run window (${input.window.start}–${input.window.end} Team time) has ended — you may start again.`,
+    `@${input.memberHandle} Stop window ended: your stop-run window (${input.window.start}–${input.window.end} Team time${windowRecurrenceSuffix(input.window)}) has ended — you may start again.`,
     'Before resuming work, ask the Manager how to carry out the follow-up work: they hold your wrap-up report and the Team\'s current priorities.',
   ]
   return lines.join('\n')
