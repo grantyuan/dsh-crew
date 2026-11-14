@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useState } from 'react'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import type { AgentTeamModelSelection, AgentTeamScheduleRecurrence } from '@grantyuan/dsh-crew/types'
+import type { AgentTeamClientMemberStatus, AgentTeamMemberPromptView, AgentTeamMemberResult, AgentTeamModelSelection, AgentTeamScheduleRecurrence, AgentTeamUpdateMemberRequest } from '@grantyuan/dsh-crew/types'
 import {
+  AgentEditorDialog,
   ModelScheduleField,
   normalizeScheduleDraft,
   scheduleDraftInvalid,
@@ -18,6 +19,7 @@ import {
   recurrenceStoredDraft,
   teamTodayText,
 } from '../src/client/schedule-recurrence-field.tsx'
+import createCss from '../src/client/create.module.css'
 import { zh } from '../src/client/locales.ts'
 import type { TeamModelCatalog } from '../src/client/slots.ts'
 
@@ -163,6 +165,8 @@ describe('recurrence draft normalization', () => {
     expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '0', anchorDate: today })).toBe(true)
     expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '367', anchorDate: today })).toBe(true)
     expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '2.5', anchorDate: today })).toBe(true)
+    expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '1', anchorDate: today })).toBe(false)
+    expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '366', anchorDate: today })).toBe(false)
     expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '3', anchorDate: '' })).toBe(true)
     expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '3', anchorDate: '2026-1-5' })).toBe(false)
     // weekly: at least one weekday.
@@ -185,6 +189,14 @@ describe('recurrence draft normalization', () => {
     // everyDays anchor: a concrete date must exist in its own year.
     expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '3', anchorDate: '2026-02-29' })).toBe(true)
     expect(recurrenceDraftInvalid({ kind: 'everyDays', intervalDays: '3', anchorDate: '2024-02-29' })).toBe(false)
+  })
+
+  it('resolves the Team-zone calendar day across the UTC+8 midnight rollover', () => {
+    // The anchor default must not lean on the browser's own zone: 15:00 UTC is
+    // still 2026-01-14 at 23:00 in UTC+8, and 16:00 UTC has already rolled to
+    // 2026-01-15 at midnight there.
+    expect(teamTodayText(Date.UTC(2026, 0, 14, 15, 0))).toBe('2026-01-14')
+    expect(teamTodayText(Date.UTC(2026, 0, 14, 16, 0))).toBe('2026-01-15')
   })
 })
 
@@ -277,6 +289,14 @@ describe('ModelScheduleField recurrence control', () => {
     fireEvent.click(screen.getByRole('button', { name: '时间窗 #1 周六' }))
     fireEvent.click(screen.getByRole('button', { name: '时间窗 #1 周日' }))
     expect(screen.getByRole('button', { name: '时间窗 #1 周六' }).getAttribute('aria-pressed')).toBe('true')
+    // A pressed chip keeps the base chip chrome and only adds the on-modifier,
+    // so its shape (radius, padding, height) never diverges from the rest.
+    const pressed = screen.getByRole('button', { name: '时间窗 #1 周六' })
+    expect(pressed.className).toContain(createCss.recurrenceChip!)
+    expect(pressed.className).toContain(createCss.recurrenceChipOn!)
+    const idle = screen.getByRole('button', { name: '时间窗 #1 周一' })
+    expect(idle.className).toContain(createCss.recurrenceChip!)
+    expect(idle.className).not.toContain(createCss.recurrenceChipOn!)
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
@@ -316,6 +336,68 @@ describe('ModelScheduleField recurrence control', () => {
     expect(screen.getAllByRole('alert').some(alert => alert.textContent.includes('周期参数'))).toBe(true)
     fireEvent.change(screen.getByLabelText('时间窗 #1 每年日'), { target: { value: '29' } })
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('AgentEditorDialog model schedule commit', () => {
+  function statusWith(overrides: Record<string, unknown>): AgentTeamClientMemberStatus {
+    return {
+      member: {
+        memberId: 'member:builder', workspaceId: 'w1', handle: 'builder', description: 'builder description',
+        presetId: 'team-member', state: 'enabled', sessionId: 'session:builder',
+        ...overrides,
+      },
+      workspaceIds: ['w1'],
+      availability: 'active',
+      presence: 'available',
+    } as unknown as AgentTeamClientMemberStatus
+  }
+
+  function renderEditor(status: AgentTeamClientMemberStatus) {
+    // The dialog only reads the result's ok/error here; the typed Remote shapes
+    // ride the real Host, so the mock answers the narrow shape through casts.
+    const updateMember = vi.fn(async () => ({ ok: true as const, value: { receipt: {}, status } })) as unknown as
+      (request: AgentTeamUpdateMemberRequest) => Promise<RemoteResult<AgentTeamMemberResult>>
+    const loadPromptView = vi.fn(async (): Promise<RemoteResult<AgentTeamMemberPromptView>> => {
+      throw new Error('not used')
+    })
+    const view = render(
+      <AgentEditorDialog
+        status={status}
+        updateMember={updateMember}
+        loadPromptView={loadPromptView}
+        curateMemberPrompt={loadPromptView as never}
+        loadModels={catalogOk}
+        onCommitted={vi.fn()}
+        onClose={vi.fn()}
+        t={t}
+      />,
+    )
+    return { updateMember, view }
+  }
+
+  it('commits a drawn weekly window with the sorted weekday set through the echo-complete update', async () => {
+    const { updateMember } = renderEditor(statusWith({}))
+    fireEvent.click(screen.getByRole('checkbox', { name: '启用时间日程' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加时间窗' }))
+    fireEvent.change(screen.getByLabelText('时间窗 #1 开始'), { target: { value: '9:00' } })
+    fireEvent.change(screen.getByLabelText('时间窗 #1 结束'), { target: { value: '18:00' } })
+    // The window must demand a concrete route before the row completes; the
+    // row picker mounts once the shared catalog read resolves.
+    fireEvent.click(await screen.findByRole('button', { name: '时间窗 #1' }))
+    fireEvent.click(await within(document.body).findByRole('menuitem', { name: 'DeepSeek Flash' }))
+    // The recurrence rides the same window: an untouched weekly pick gates the
+    // save on the recurrence rule until one weekday chip is pressed.
+    fireEvent.click(screen.getByRole('button', { name: '时间窗 #1 周期' }))
+    fireEvent.click(await within(document.body).findByRole('menuitem', { name: '每周' }))
+    expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '时间窗 #1 周一' }))
+    const save = screen.getByRole('button', { name: '保存' }) as HTMLButtonElement
+    expect(save.disabled).toBe(false)
+    fireEvent.click(save)
+    await waitFor(() => expect(updateMember).toHaveBeenCalledWith(expect.objectContaining({
+      modelSchedule: { enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek, recurrence: { kind: 'weekly', weekdays: [1] } }] },
+    })))
   })
 })
 
