@@ -293,6 +293,20 @@ describe('ModelScheduleField recurrence control', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('renders the monthly day input for 每月 and no parameters for 每天工作日 and 工作日', async () => {
+    render(<ControlledModelScheduleField initial={{ enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek, recurrence: { kind: 'daily' } }] }} />)
+    fireEvent.click(screen.getByRole('button', { name: '时间窗 #1 周期' }))
+    fireEvent.click(await within(document.body).findByRole('menuitem', { name: '每月' }))
+    // The monthly kind wants exactly one parameter: the day of month.
+    expect(screen.getByLabelText('时间窗 #1 每月几号')).toBeTruthy()
+    expect(screen.queryByLabelText('时间窗 #1 起始日')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '时间窗 #1 周期' }))
+    fireEvent.click(await within(document.body).findByRole('menuitem', { name: '工作日' }))
+    // Parameter-less kinds render only the dropdown — nothing to fill.
+    expect(screen.queryByLabelText('时间窗 #1 每月几号')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('blocks an invalid yearly calendar day (2 月 30 日) and accepts 2 月 29 日', async () => {
     render(<ControlledModelScheduleField initial={{ enabled: true, windows: [{ start: '09:00', end: '18:00', selection: deepseek, recurrence: { kind: 'daily' } }] }} />)
     fireEvent.click(screen.getByRole('button', { name: '时间窗 #1 周期' }))
