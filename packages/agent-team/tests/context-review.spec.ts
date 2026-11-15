@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { rollupGeneration } from '../src/context/generation.ts'
 import { reviewContext } from '../src/context/review.ts'
 import { ContextStore } from '../src/context/store.ts'
 import type { ContextUnitInput } from '../src/context/types.ts'
@@ -57,6 +58,22 @@ describe('context review', () => {
     const result = reviewContext(store, 'm1', { topic: '方案', includeSuperseded: false }, [{ ref: 'cu:s1:2' }])
     expect(result.clusters[0]!.decisions).toHaveLength(1)
     expect(result.clusters[0]!.decisions[0]).toMatchObject({ ref: 'cu:s1:2', status: 'active' })
+  })
+
+  it('includes the L3 generation rollup of the clusters it came from', () => {
+    const store = openStore()
+    store.writeUnit(makeUnit({ seq: 1, text: '决定：采用 alpha 方案。' }))
+    rollupGeneration(store, 'm1', 's1', { now: NOW() })
+
+    const result = reviewContext(store, 'm1', { topic: '方案' }, [{ ref: 'cu:s1:1' }])
+    expect(result.clusters[0]!.generations).toMatchObject([{
+      ref: 'gen:s1',
+      sessionId: 's1',
+      confidence: 0.6,
+      segments: [],
+    }])
+    expect(result.clusters[0]!.generations[0]!.summary).toContain('采用 alpha 方案。')
+    expect(result.narrative).toContain('1 generation(s)')
   })
 
   it('reports that a query is needed when neither topic nor around is given', () => {

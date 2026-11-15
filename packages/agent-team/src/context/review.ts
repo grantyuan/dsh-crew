@@ -1,8 +1,10 @@
 import type { ContextStore, StoredContextUnit } from './store.ts'
+import { readGenerationSummaries } from './generation.ts'
 import type {
   ContextReviewCluster,
   ContextReviewDecision,
   ContextReviewEdge,
+  ContextReviewGeneration,
   ContextReviewRequest,
   ContextReviewResult,
 } from './types.ts'
@@ -14,7 +16,8 @@ export interface ContextReviewSeed {
 
 /**
  * Build a read-only "what was decided and what changed" view from the graph.
- * Generation (L3) summaries are not produced yet, so that field stays empty.
+ * L3 generation rollups are read from the derived graph when the pipeline has
+ * produced them; review never writes them itself.
  */
 export function reviewContext(
   store: ContextStore,
@@ -42,6 +45,10 @@ export function reviewContext(
     .map(ref => store.getUnit(ref))
     .filter((unit): unit is StoredContextUnit => unit !== undefined)
   const statuses = store.unitStatuses(memberId, units.map(unit => unit.unitId))
+  const generations = new Map<string, ContextReviewGeneration>()
+  for (const generation of readGenerationSummaries(store, memberId, units.map(unit => unit.sessionId))) {
+    generations.set(generation.sessionId, generation)
+  }
 
   const clusters = new Map<string, StoredContextUnit[]>()
   for (const unit of units) {
@@ -86,22 +93,34 @@ export function reviewContext(
     }
     clusterDecisions.sort((left, right) => left.validFrom.localeCompare(right.validFrom))
     decisions.push(...clusterDecisions)
+    const clusterGenerations: ContextReviewGeneration[] = []
+    for (const sessionId of new Set(members.map(unit => unit.sessionId))) {
+      const generation = generations.get(sessionId)
+      if (generation === undefined) continue
+      clusterGenerations.push({
+        ...generation,
+        segments: generation.segments.filter(segment => segments.has(segment)),
+      })
+    }
+    clusterGenerations.sort((left, right) => left.validFrom.localeCompare(right.validFrom))
     rendered.push({
       topic: label,
       decisions: clusterDecisions,
       openQuestions,
       segments: [...segments].sort(),
-      generations: [],
+      generations: clusterGenerations,
     })
   }
 
   const edges = renderEdges(store, memberId, units)
   const superseded = decisions.filter(decision => decision.status === 'superseded').length
+  const generationCount = rendered.reduce((sum, cluster) => sum + cluster.generations.length, 0)
   const narrative = units.length === 0
     ? 'No indexed context matched this review.'
     : `Reviewed ${units.length} unit(s) across ${rendered.length} topic cluster(s): `
       + `${decisions.length} decision(s), ${superseded} superseded, `
-      + `${rendered.reduce((sum, cluster) => sum + cluster.openQuestions.length, 0)} open question(s), ${edges.length} edge(s).`
+      + `${rendered.reduce((sum, cluster) => sum + cluster.openQuestions.length, 0)} open question(s), `
+      + `${generationCount} generation(s), ${edges.length} edge(s).`
   return { clusters: rendered, edges, narrative, includeSuperseded, degraded }
 }
 

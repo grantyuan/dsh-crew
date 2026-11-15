@@ -19,6 +19,7 @@ import type {
   ContextEdgeRecord,
   ContextEpochRecord,
   ContextFacet,
+  ContextGenerationRecord,
   ContextGraphHit,
   ContextImportance,
   ContextKeyword,
@@ -853,6 +854,39 @@ export class ContextStore {
     const rows = this.statement('SELECT * FROM context_commitment WHERE segment_id = ? ORDER BY kind, created_at, commitment_id')
       .all(segmentId) as unknown as CommitmentRow[]
     return rows.map(toStoredCommitment)
+  }
+
+  /**
+   * L3 generation rollups for the supplied Sessions. The summary is the node
+   * label (a bounded, deterministic digest); `derived_from` edges resolve the
+   * L2 segment refs the rollup was built from.
+   */
+  generationSummaries(memberId: string, sessionIds: readonly string[]): ContextGenerationRecord[] {
+    const unique = [...new Set(sessionIds)]
+    if (unique.length === 0) return []
+    const placeholders = unique.map(() => '?').join(', ')
+    const rows = this.statement(`SELECT * FROM memory_node
+      WHERE member_id = ? AND level = 'L3' AND kind = 'generation'
+        AND status <> 'retired' AND session_id IN (${placeholders})
+      ORDER BY valid_from, node_id`).all(memberId, ...unique) as unknown as NodeRow[]
+    return rows.map(row => {
+      const edges = this.statement(`SELECT dst_id FROM memory_edge
+        WHERE member_id = ? AND src_id = ? AND kind = 'derived_from' AND valid_to IS NULL
+        ORDER BY dst_id`).all(memberId, row.node_id) as unknown as { dst_id: string }[]
+      const segments: string[] = []
+      for (const edge of edges) {
+        const node = this.getNode(edge.dst_id)
+        if (node !== undefined && node.level === 'L2') segments.push(node.ref)
+      }
+      return {
+        ref: row.ref,
+        sessionId: row.session_id,
+        summary: row.label,
+        confidence: row.confidence,
+        validFrom: row.valid_from,
+        segments,
+      }
+    })
   }
 
   /** Units of one Session in ascending seq order, optionally bounded. */

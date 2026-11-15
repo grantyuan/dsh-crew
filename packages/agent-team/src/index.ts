@@ -6443,6 +6443,7 @@ export default class AgentTeam extends TypertRemoteService {
     void pipeline.drainEmbeddings(memberId)
     void pipeline.drainEnrichment()
     void pipeline.prepare(memberId, sessionId)
+    pipeline.rollupGeneration(memberId, sessionId)
   }
 
   /** Pre-step commit: consumes a prepared digest, never calls a model. */

@@ -1880,12 +1880,20 @@ export interface AgentTeamContextReviewDecision {
   readonly supersededBy?: string
 }
 
+export interface AgentTeamContextReviewGeneration {
+  readonly ref: string
+  readonly sessionId: string
+  readonly summary: string
+  readonly confidence: number
+  readonly segments: readonly string[]
+}
+
 export interface AgentTeamContextReviewCluster {
   readonly topic: string
   readonly decisions: readonly AgentTeamContextReviewDecision[]
   readonly openQuestions: readonly string[]
   readonly segments: readonly string[]
-  readonly generations: readonly string[]
+  readonly generations: readonly AgentTeamContextReviewGeneration[]
 }
 
 export interface AgentTeamContextReviewEdge {

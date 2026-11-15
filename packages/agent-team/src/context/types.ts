@@ -318,6 +318,16 @@ export interface ContextCommitmentRecord extends Omit<ContextCommitmentInput, 'n
   readonly createdAt: string
 }
 
+/** One L3 generation rollup: a bounded, deterministic summary of one Session generation. */
+export interface ContextGenerationRecord {
+  readonly ref: string
+  readonly sessionId: string
+  readonly summary: string
+  readonly confidence: number
+  readonly validFrom: string
+  readonly segments: readonly string[]
+}
+
 /** One reachable edge rendered for review. */
 export interface ContextReviewEdge {
   readonly from: string
@@ -336,12 +346,14 @@ export interface ContextReviewDecision {
   readonly supersededBy?: string
 }
 
+export type ContextReviewGeneration = ContextGenerationRecord
+
 export interface ContextReviewCluster {
   readonly topic: string
   readonly decisions: readonly ContextReviewDecision[]
   readonly openQuestions: readonly string[]
   readonly segments: readonly string[]
-  readonly generations: readonly string[]
+  readonly generations: readonly ContextReviewGeneration[]
 }
 
 export interface ContextReviewRequest {

@@ -363,7 +363,13 @@ describe('context tools render the model-facing decision surface', () => {
         ],
         openQuestions: ['Confirm the quantisation profile?'],
         segments: ['seg:s1:1-11'],
-        generations: [],
+        generations: [{
+          ref: 'gen:s1',
+          sessionId: 's1',
+          summary: 'Generation s1: embedding size settled at 768.',
+          confidence: 0.8,
+          segments: ['seg:s1:1-11'],
+        }],
       }],
       edges: [{ from: 'cu:s1:1', to: 'cu:s1:3', kind: 'supersedes', validFrom: '2026-11-15T09:00:00.000Z' }],
       narrative: 'Reviewed 2 unit(s) across 1 topic cluster(s).',
@@ -378,8 +384,9 @@ describe('context tools render the model-facing decision surface', () => {
     expect(text).toContain('Embedding size is 768')
     expect(text).toContain('open: Confirm the quantisation profile?')
     expect(text).toContain('summaries: seg:s1:1-11')
+    expect(text).toContain('generation gen:s1 (confidence 0.8): Generation s1: embedding size settled at 768.')
     expect(text).toContain('cu:s1:1 -supersedes-> cu:s1:3')
     expect(tools.get('context_review')!.description).toContain('superseded history is included by default')
-    expect(tools.get('context_review')!.description).toContain('`generations` is reserved for L3 summaries')
+    expect(tools.get('context_review')!.description).toContain('`generations` (L3) rollups')
   })
 })

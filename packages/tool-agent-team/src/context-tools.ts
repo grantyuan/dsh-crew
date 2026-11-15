@@ -403,7 +403,7 @@ const RECALL_MODES = new Set(['auto', 'exact', 'lexical', 'facet', 'vector', 'gr
  */
 const contextReview = defineTool({
   name: 'context_review',
-  description: 'Review your own earlier decisions, commitments, and open questions on a topic, together with the graph edges that connect them and where a later unit replaced an earlier one. Use it before re-litigating a decision or when asked "what did we decide and why did it change"; superseded history is included by default, so the output can show the old value, its validity window, and the ref that replaced it. Read-only over the derived context index; Team facts stay in team_view/team_thread. `generations` is reserved for L3 summaries and is empty until that layer exists.',
+  description: 'Review your own earlier decisions, commitments, and open questions on a topic, together with the graph edges that connect them and where a later unit replaced an earlier one. Use it before re-litigating a decision or when asked "what did we decide and why did it change"; superseded history is included by default, so the output can show the old value, its validity window, and the ref that replaced it. Each cluster also carries the `generations` (L3) rollups of the Sessions it came from: a bounded, deterministic summary of that generation with its window summaries. Read-only over the derived context index; Team facts stay in team_view/team_thread.',
   parameters: {
     topic: { type: 'string', description: 'Topic or distinctive phrase to review. Omit when using `around`.' },
     around: { type: 'string', description: 'A context unit ref to review around, as returned by context_recall.' },
@@ -424,7 +424,13 @@ const contextReview = defineTool({
         } } },
         openQuestions: { type: 'array', required: true, items: { type: 'string' } },
         segments: { type: 'array', required: true, items: { type: 'string' } },
-        generations: { type: 'array', required: true, items: { type: 'string' } },
+        generations: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          ref: { type: 'string', required: true },
+          sessionId: { type: 'string', required: true },
+          summary: { type: 'string', required: true },
+          confidence: { type: 'number', required: true },
+          segments: { type: 'array', required: true, items: { type: 'string' } },
+        } } },
       } } },
       edges: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
         from: { type: 'string', required: true },
@@ -448,6 +454,9 @@ const contextReview = defineTool({
         }
         for (const question of cluster.openQuestions) lines.push(`- open: ${question}`)
         if (cluster.segments.length > 0) lines.push(`- summaries: ${cluster.segments.join(', ')}`)
+        for (const generation of cluster.generations) {
+          lines.push(`- generation ${generation.ref} (confidence ${generation.confidence}): ${generation.summary}`)
+        }
       }
       if (value.edges.length > 0) lines.push(`Edges: ${value.edges.map(edge => `${edge.from} -${edge.kind}-> ${edge.to}`).join('; ')}`)
       if (value.degraded.length > 0) lines.push(`Degraded: ${value.degraded.join(', ')}.`)
@@ -472,7 +481,10 @@ const contextReview = defineTool({
         decisions: cluster.decisions.map(decision => ({ ...decision })),
         openQuestions: [...cluster.openQuestions],
         segments: [...cluster.segments],
-        generations: [...cluster.generations],
+        generations: cluster.generations.map(generation => ({
+          ...generation,
+          segments: [...generation.segments],
+        })),
       })),
       edges: outcome.edges.map(edge => ({ ...edge })),
       narrative: outcome.narrative,

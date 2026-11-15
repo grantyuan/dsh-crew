@@ -18,6 +18,7 @@ import {
   type PrepareEpochOutcome,
 } from './compaction.ts'
 import { ContextCoordinator, type ContextEnrichmentRuntime } from './coordinator.ts'
+import { rollupGeneration as rollupGenerationInStore } from './generation.ts'
 import { contextUnitFromEvent, type SessionEventLike } from './intake.ts'
 import type { ContextRoleEmbeddingOutcome } from './role-runtime.ts'
 import type { ContextService } from './service.ts'
@@ -78,6 +79,8 @@ export class ContextPipeline {
   private readonly preparedSummaries = new Map<string, string>()
   private readonly queryVectors = new Map<string, QueryVector>()
   private readonly queryInFlight = new Set<string>()
+  /** Last Session seen per Member; a change means the previous generation closed. */
+  private readonly sessionByMember = new Map<string, string>()
   private embedding = false
   private preparing = false
   private embeddingBackoffUntil = 0
@@ -107,6 +110,11 @@ export class ContextPipeline {
   /** Index one live Session event. Synchronous and model-free on the turn path. */
   recordSessionEvent(memberId: string, sessionId: string, event: SessionEventLike): void {
     if (!this.available || this.options.canIndex?.() === false) return
+    const previous = this.sessionByMember.get(memberId)
+    if (previous !== sessionId) {
+      this.sessionByMember.set(memberId, sessionId)
+      if (previous !== undefined) this.rollupGeneration(memberId, previous)
+    }
     const input: ContextUnitInput | undefined = contextUnitFromEvent(
       memberId,
       sessionId,
@@ -132,6 +140,21 @@ export class ContextPipeline {
       await this.coordinator.drainEnrichment()
     } catch (error) {
       this.fail(error, 'enrichment')
+    }
+  }
+
+  /**
+   * Refresh one generation's L3 rollup. Deterministic and model-free, so it can
+   * run on the idle boundary or when a generation closes without touching the
+   * surface or the provider cache.
+   */
+  rollupGeneration(memberId: string, sessionId: string): void {
+    const store = this.service.contextStore()
+    if (store === undefined) return
+    try {
+      rollupGenerationInStore(store, memberId, sessionId, this.options.now === undefined ? {} : { now: this.options.now() })
+    } catch (error) {
+      this.fail(error, 'generation-rollup')
     }
   }
 
