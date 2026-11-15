@@ -345,6 +345,8 @@ const contextRecall = defineTool({
         score: { type: 'number', required: true },
         snippet: { type: 'string', required: true },
         sources: { type: 'array', required: true, items: { type: 'string' } },
+        supersededBy: { type: 'string', description: 'Unit ref that replaced this one, for superseded items.' },
+        validTo: { type: 'string', description: 'ISO instant when the belief stopped holding.' },
       } } },
       degraded: { type: 'array', required: true, items: { type: 'string' } },
       reason: { type: 'string' },
@@ -358,8 +360,10 @@ const contextRecall = defineTool({
       const lines = [`Recalled ${value.items.length} context unit(s) for "${typeof args.query === 'string' ? args.query : ''}", best first:`]
       for (const item of value.items) {
         const route = item.sources.length === 0 ? '' : ` [${item.sources.join(', ')}]`
-        const status = item.status === 'active' ? '' : ` ${item.status}`
-        lines.push(`- ${item.ref} · ${item.recordedAt} · ${item.kind}${status}${route}\n  ${item.snippet}`)
+        const replaced = item.supersededBy === undefined ? '' : ` by ${item.supersededBy}`
+        const status = item.status === 'active' ? '' : ` ${item.status}${replaced}`
+        const validity = item.validTo === undefined ? '' : ` (valid to ${item.validTo})`
+        lines.push(`- ${item.ref} · ${item.recordedAt} · ${item.kind}${status}${validity}${route}\n  ${item.snippet}`)
       }
       if (value.degraded.length > 0) lines.push(`Degraded routes: ${value.degraded.join(', ')} — results above may be incomplete.`)
       if (value.reason !== undefined) lines.push(`Note: ${value.reason}.`)
@@ -398,11 +402,13 @@ interface RecallItemView {
   readonly sessionId: string
   readonly recordedAt: string
   readonly kind: string
-  readonly status: 'active' | 'superseded' | 'expired'
+  readonly status: 'active' | 'superseded' | 'expired' | 'unverified'
   readonly importance: number
   readonly score: number
   readonly snippet: string
   readonly sources: string[]
+  readonly supersededBy?: string
+  readonly validTo?: string
 }
 
 /** The Host result is deeply immutable; the tool output contract carries plain values. */
@@ -412,11 +418,13 @@ function toRecallItem(item: AgentTeamContextRecallItem): RecallItemView {
     sessionId: item.sessionId,
     recordedAt: item.recordedAt,
     kind: item.kind,
-    status: item.status === 'superseded' || item.status === 'expired' ? item.status : 'active',
+    status: item.status,
     importance: item.importance,
     score: item.score,
     snippet: item.snippet,
     sources: [...item.sources],
+    ...(item.supersededBy === undefined ? {} : { supersededBy: item.supersededBy }),
+    ...(item.validTo === undefined ? {} : { validTo: item.validTo }),
   }
 }
 

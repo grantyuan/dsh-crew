@@ -1842,15 +1842,19 @@ export interface AgentTeamContextRecallItem {
   readonly sessionId: string
   readonly recordedAt: string
   readonly kind: string
-  readonly status: 'active' | 'superseded' | 'expired'
+  readonly status: 'active' | 'superseded' | 'expired' | 'unverified'
   readonly importance: number
   readonly score: number
   readonly snippet: string
   readonly sources: readonly string[]
+  /** Unit ref that replaced this one; present only when it was superseded. */
+  readonly supersededBy?: string
+  /** When the belief stopped holding; present with `superseded`/`expired`. */
+  readonly validTo?: string
 }
 
 /**
- * `degraded` names routes that could not run (for example `graph-unavailable`);
+ * `degraded` names routes that could not run (for example `graph-no-seeds`);
  * empty means every applicable route produced a result.
  */
 export interface AgentTeamContextRecallToolOutcome {

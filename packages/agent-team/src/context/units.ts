@@ -18,6 +18,11 @@ export function contextUnitId(sessionId: string, seq: number): string {
   return `cu:${sessionId}:${seq}`
 }
 
+/** Deterministic L1 graph node id for one unit; distinct from the unit ref itself. */
+export function contextNodeId(unitId: string): string {
+  return `mn:${unitId}`
+}
+
 /** SHA-256 of the normalized text; the idempotency key for rewrites. */
 export function contextUnitHash(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')

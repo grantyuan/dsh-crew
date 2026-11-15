@@ -83,12 +83,74 @@ describe('five-route recall', () => {
   })
 
   it('names every route it could not run instead of failing', () => {
-    const result = recallContext(seeded(), query())
-    expect(result.degraded).toContain(CONTEXT_RECALL_DEGRADED.graph)
+    const noSeeds = recallContext(seeded(), query({ mode: 'graph', query: 'zzz-not-present' }))
+    expect(noSeeds.items).toEqual([])
+    expect(noSeeds.degraded).toEqual([CONTEXT_RECALL_DEGRADED.graphNoSeeds])
 
     const noVector = recallContext(seeded(), query({ mode: 'vector' }))
     expect(noVector.items).toEqual([])
     expect(noVector.degraded).toEqual([CONTEXT_RECALL_DEGRADED.vectorPending])
+  })
+
+  it('propagates a hit to neighbouring units over the graph', () => {
+    const auto = recallContext(seeded(), query())
+    const neighbour = auto.items.find(item => item.ref === 'cu:s1:2')
+    expect(neighbour?.sources).toEqual(['graph'])
+
+    const graphOnly = recallContext(seeded(), query({ mode: 'graph', query: 'lunch' }))
+    expect(graphOnly.items.map(item => item.ref)).toContain('cu:s1:1')
+    expect(graphOnly.items.every(item => item.sources.includes('graph'))).toBe(true)
+  })
+
+  it('hides superseded units by default and returns their state when asked', () => {
+    const store = seeded()
+    store.supersedeUnit('cu:s1:2', 'cu:s1:1', new Date('2026-11-15T09:00:00.000Z'))
+
+    const hidden = recallContext(store, query({ mode: 'exact' }))
+    expect(hidden.items.map(item => item.ref)).not.toContain('cu:s1:1')
+
+    // Exact mode keeps the replacement from becoming a graph candidate, so the
+    // stale row is not deduplicated away.
+    const shown = recallContext(store, query({ mode: 'exact', includeSuperseded: true }))
+    const stale = shown.items.find(item => item.ref === 'cu:s1:1')
+    expect(stale?.status).toBe('superseded')
+    expect(stale?.supersededBy).toBe('cu:s1:2')
+    expect(stale?.validTo).toBe('2026-11-15T09:00:00.000Z')
+  })
+
+  it('keeps only the replacement when both versions are candidates', () => {
+    const store = openStore()
+    store.writeUnit(unit({ seq: 1, text: 'decision: use alpha for the recall fold', recordedAt: '2026-11-15T06:00:00.000Z' }))
+    store.writeUnit(unit({ seq: 2, text: 'decision: use beta for the recall fold', recordedAt: '2026-11-15T07:00:00.000Z' }))
+    store.supersedeUnit('cu:s1:2', 'cu:s1:1')
+
+    const result = recallContext(store, query({ query: 'recall fold', includeSuperseded: true }))
+    const refs = result.items.map(item => item.ref)
+    expect(refs).toContain('cu:s1:2')
+    expect(refs).not.toContain('cu:s1:1')
+  })
+
+  it('reports an unverified belief and ranks it below a current peer', () => {
+    const store = openStore()
+    store.writeUnit(unit({ seq: 1, text: 'shared alpha token', recordedAt: '2026-11-15T06:00:00.000Z' }))
+    store.writeUnit(unit({ seq: 2, text: 'shared alpha token', recordedAt: '2026-11-15T07:00:00.000Z' }))
+    store.upsertNode({
+      nodeId: 'mn:cu:s1:1',
+      memberId: 'm1',
+      sessionId: 's1',
+      level: 'L1',
+      kind: 'unclassified',
+      label: 'unverified copy',
+      ref: 'cu:s1:1',
+      status: 'unverified',
+    })
+
+    const result = recallContext(store, query({ query: 'alpha' }))
+    const unverified = result.items.find(item => item.ref === 'cu:s1:1')
+    const current = result.items.find(item => item.ref === 'cu:s1:2')
+    expect(unverified?.status).toBe('unverified')
+    expect(current?.status).toBe('active')
+    expect(unverified!.score).toBeLessThan(current!.score)
   })
 
   it('falls back to LIKE and says so when FTS is unavailable', () => {

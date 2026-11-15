@@ -83,12 +83,12 @@ describe('ContextStore unit writes', () => {
   it('keeps the WAL journal and schema version on a file database', () => {
     const path = tempDatabase()
     const store = openStore(path)
-    expect(store.capabilities).toMatchObject({ word: true, trigram: true, schemaVersion: 2 })
+    expect(store.capabilities).toMatchObject({ word: true, trigram: true, schemaVersion: 3 })
 
     const check = new DatabaseSync(path)
     try {
       expect(check.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 3 })
     } finally {
       check.close()
     }
@@ -101,8 +101,28 @@ describe('ContextStore unit writes', () => {
     legacy.close()
 
     const store = openStore(path)
-    expect(store.capabilities.schemaVersion).toBe(2)
+    expect(store.capabilities.schemaVersion).toBe(3)
     expect(store.pendingVectorUnits(10)).toEqual([])
+  })
+
+  it('migrates a version-2 database by adding the graph tables', () => {
+    const path = tempDatabase()
+    const legacy = new DatabaseSync(path)
+    legacy.exec('PRAGMA user_version = 2')
+    legacy.close()
+
+    const store = openStore(path)
+    expect(store.capabilities.schemaVersion).toBe(3)
+    expect(store.listNodes('m1')).toEqual([])
+
+    const check = new DatabaseSync(path)
+    try {
+      const tables = check.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('memory_node', 'memory_edge') ORDER BY name")
+        .all() as unknown as { name: string }[]
+      expect(tables.map(table => table.name)).toEqual(['memory_edge', 'memory_node'])
+    } finally {
+      check.close()
+    }
   })
 
   it('writes units when FTS is unavailable', () => {

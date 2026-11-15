@@ -141,3 +141,102 @@ export interface ContextOutboxRow {
   readonly payload: string
   readonly attempts: number
 }
+
+/** Compaction levels: L0 raw, L1 units, L2 topics, L3 generations, L4 Member index. */
+export const CONTEXT_NODE_LEVELS = ['L0', 'L1', 'L2', 'L3', 'L4'] as const
+
+export type ContextNodeLevel = (typeof CONTEXT_NODE_LEVELS)[number]
+
+/** Belief lifecycle of a graph node; `current` is the only trusted-by-default state. */
+export const CONTEXT_NODE_STATUSES = ['current', 'superseded', 'retired', 'unverified'] as const
+
+export type ContextNodeStatus = (typeof CONTEXT_NODE_STATUSES)[number]
+
+/** Edge kinds keep structure (`contains`), provenance (`evidence`) and belief change (`supersedes`) distinct. */
+export const CONTEXT_EDGE_KINDS = [
+  'contains',
+  'derived_from',
+  'about',
+  'continues',
+  'mentions',
+  'evidence',
+  'same_subject',
+  'supersedes',
+] as const
+
+export type ContextEdgeKind = (typeof CONTEXT_EDGE_KINDS)[number]
+
+/** One graph node. `ref` points at the immutable artifact it represents. */
+export interface ContextNodeInput {
+  readonly nodeId: string
+  readonly memberId: string
+  readonly sessionId: string
+  readonly level: ContextNodeLevel
+  readonly kind: string
+  readonly label: string
+  readonly ref: string
+  readonly status?: ContextNodeStatus
+  readonly confidence?: number
+  /** When this belief became valid; defaults to write time. */
+  readonly validFrom?: string
+  /** When it stopped being valid; set together with `supersededBy`. */
+  readonly validTo?: string
+  readonly supersededBy?: string
+  readonly now?: Date
+}
+
+export interface ContextNodeRecord {
+  readonly nodeId: string
+  readonly memberId: string
+  readonly sessionId: string
+  readonly level: ContextNodeLevel
+  readonly kind: string
+  readonly label: string
+  readonly ref: string
+  readonly status: ContextNodeStatus
+  readonly confidence: number
+  readonly validFrom: string
+  readonly validTo?: string
+  readonly supersededBy?: string
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** One directed edge; an undirected relation is stored once and traversed both ways. */
+export interface ContextEdgeInput {
+  readonly memberId: string
+  readonly srcId: string
+  readonly dstId: string
+  readonly kind: ContextEdgeKind
+  readonly weight?: number
+  readonly validFrom?: string
+  /** Retiring an edge keeps the fact that it once held. */
+  readonly validTo?: string
+  readonly now?: Date
+}
+
+export interface ContextEdgeRecord {
+  readonly memberId: string
+  readonly srcId: string
+  readonly dstId: string
+  readonly kind: ContextEdgeKind
+  readonly weight: number
+  readonly validFrom: string
+  readonly validTo?: string
+  readonly createdAt: string
+}
+
+/** One reached-but-not-seeded unit in a graph walk. */
+export interface ContextGraphHit {
+  readonly ref: string
+  readonly depth: number
+  readonly weight: number
+}
+
+/** Belief state of a unit, resolved from its L1 graph node. */
+export interface ContextUnitStatus {
+  readonly status: ContextNodeStatus
+  /** Unit ref of the replacing node, resolved for recall output. */
+  readonly supersededByRef?: string
+  readonly validTo?: string
+}

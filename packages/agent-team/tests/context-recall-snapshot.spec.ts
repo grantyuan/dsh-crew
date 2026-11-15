@@ -40,8 +40,13 @@ describe('recall snapshot rendering', () => {
   })
 
   it('names degraded routes so absence of a hit is not read as absence of content', () => {
-    const snapshot = renderRecallSnapshot(result({ degraded: ['graph-unavailable', 'lexical-like'] }))
-    expect(snapshot?.text).toContain('Degraded routes: graph-unavailable, lexical-like')
+    const snapshot = renderRecallSnapshot(result({ degraded: ['graph-no-seeds', 'lexical-like'] }))
+    expect(snapshot?.text).toContain('Degraded routes: graph-no-seeds, lexical-like')
+  })
+
+  it('marks a stale hit with its state and replacement', () => {
+    const snapshot = renderRecallSnapshot(result({ items: [item({ status: 'superseded', supersededBy: 'cu:s1:2' })] }))
+    expect(snapshot?.text).toContain('superseded by cu:s1:2')
   })
 
   it('is byte-stable for an unchanged hit set and changes when membership changes', () => {

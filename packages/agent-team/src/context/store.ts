@@ -11,9 +11,17 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { CONTEXT_SCHEMA_VERSION, openContextDatabase, type ContextFtsCapabilities } from './schema.ts'
 import type {
+  ContextEdgeInput,
+  ContextEdgeKind,
+  ContextEdgeRecord,
   ContextFacet,
+  ContextGraphHit,
   ContextImportance,
   ContextKeyword,
+  ContextNodeInput,
+  ContextNodeLevel,
+  ContextNodeRecord,
+  ContextNodeStatus,
   ContextOutboxRow,
   ContextTermKind,
   ContextTermSource,
@@ -21,10 +29,12 @@ import type {
   ContextUnitKind,
   ContextUnitRecord,
   ContextUnitRole,
+  ContextUnitStatus,
   ContextUnitWriteResult,
   ContextFacetDimension,
   ContextFacetSource,
 } from './types.ts'
+import { contextNodeId } from './units.ts'
 
 type Statement = ReturnType<DatabaseSync['prepare']>
 
@@ -104,6 +114,47 @@ interface UnitRow {
   readonly event_type: string | null
   readonly tool_name: string | null
   readonly created_at: string
+}
+
+interface NodeRow {
+  readonly node_id: string
+  readonly member_id: string
+  readonly session_id: string
+  readonly level: string
+  readonly kind: string
+  readonly label: string
+  readonly ref: string
+  readonly status: string
+  readonly confidence: number
+  readonly valid_from: string
+  readonly valid_to: string | null
+  readonly superseded_by: string | null
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface EdgeRow {
+  readonly member_id: string
+  readonly src_id: string
+  readonly dst_id: string
+  readonly kind: string
+  readonly weight: number
+  readonly valid_from: string
+  readonly valid_to: string | null
+  readonly created_at: string
+}
+
+interface StatusRow {
+  readonly ref: string
+  readonly status: string
+  readonly valid_to: string | null
+  readonly superseded_ref: string | null
+}
+
+interface GraphRow {
+  readonly ref: string
+  readonly depth: number
+  readonly weight: number
 }
 
 interface TermRow {
@@ -260,6 +311,11 @@ export class ContextStore {
       }
 
       this.insertDerived(record)
+      // Every unit is an L1 graph node. The node carries belief state
+      // (status/confidence/validity) so recall can filter stale versions
+      // without mutating the immutable unit text.
+      this.syncUnitNode(record)
+      this.linkUnitNode(record)
       this.statement("DELETE FROM outbox WHERE unit_id = ? AND kind = 'enrich'").run(record.unitId)
       if (enqueue) this.insertOutbox(record)
     })
@@ -331,6 +387,258 @@ export class ContextStore {
       now,
       record.createdAt,
     )
+  }
+
+  /**
+   * Create or refresh the L1 node for a unit. Belief state is never revived:
+   * a later rewrite of the same unit does not make a superseded version current.
+   */
+  private syncUnitNode(record: ContextUnitRecord): void {
+    this.statement(`INSERT INTO memory_node (
+      node_id, member_id, session_id, level, kind, label, ref, status, confidence,
+      valid_from, created_at, updated_at
+    ) VALUES (?, ?, ?, 'L1', ?, ?, ?, 'current', 1.0, ?, ?, ?)
+    ON CONFLICT(node_id) DO UPDATE SET
+      session_id = excluded.session_id,
+      kind = excluded.kind,
+      label = excluded.label,
+      updated_at = excluded.updated_at`).run(
+      contextNodeId(record.unitId),
+      record.memberId,
+      record.sessionId,
+      record.kind,
+      record.text.slice(0, 120),
+      record.unitId,
+      record.recordedAt,
+      record.createdAt,
+      record.createdAt,
+    )
+  }
+
+  /**
+   * Structural edges created without a model: `continues` keeps Session order
+   * walkable, and `same_subject` joins units that share an explicit subject.
+   * Both are cheap, deterministic, and rebuilt idempotently on rewrite.
+   */
+  private linkUnitNode(record: ContextUnitRecord): void {
+    const nodeId = contextNodeId(record.unitId)
+    // Rewriting a unit may change its subject set, so rebuild only its own
+    // outgoing structural edges; incoming edges authored by other units stay.
+    this.statement("DELETE FROM memory_edge WHERE member_id = ? AND src_id = ? AND kind IN ('continues', 'same_subject')")
+      .run(record.memberId, nodeId)
+    const previous = this.statement(
+      'SELECT unit_id FROM unit WHERE member_id = ? AND session_id = ? AND seq < ? ORDER BY seq DESC LIMIT 1',
+    ).get(record.memberId, record.sessionId, record.seq) as { unit_id: string } | undefined
+    if (previous !== undefined) {
+      this.insertEdge({
+        memberId: record.memberId,
+        srcId: nodeId,
+        dstId: contextNodeId(previous.unit_id),
+        kind: 'continues',
+        weight: 1,
+        validFrom: record.recordedAt,
+        now: new Date(record.createdAt),
+      })
+    }
+    const subjects = [...new Set(record.facets.filter(facet => facet.dimension === 'subject').map(facet => facet.value))]
+    if (subjects.length === 0) return
+    const peers = this.statement(`SELECT u.unit_id FROM facet f JOIN unit u ON u.unit_id = f.owner_id
+      WHERE f.owner_kind = 'unit' AND f.dimension = 'subject' AND f.value = ? AND u.member_id = ? AND u.unit_id <> ?
+      ORDER BY u.recorded_at DESC LIMIT 3`)
+    for (const subject of subjects) {
+      for (const peer of peers.all(subject, record.memberId, record.unitId) as unknown as { unit_id: string }[]) {
+        this.insertEdge({
+          memberId: record.memberId,
+          srcId: nodeId,
+          dstId: contextNodeId(peer.unit_id),
+          kind: 'same_subject',
+          weight: 0.8,
+          validFrom: record.recordedAt,
+          now: new Date(record.createdAt),
+        })
+      }
+    }
+  }
+
+  /** Upsert one edge without reviving a retired edge. */
+  private insertEdge(input: ContextEdgeInput): void {
+    const now = input.now ?? new Date()
+    const createdAt = now.toISOString()
+    this.statement(`INSERT INTO memory_edge (member_id, src_id, dst_id, kind, weight, valid_from, valid_to, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(member_id, src_id, dst_id, kind) DO UPDATE SET
+        weight = excluded.weight,
+        valid_from = excluded.valid_from,
+        valid_to = COALESCE(excluded.valid_to, memory_edge.valid_to)`).run(
+      input.memberId,
+      input.srcId,
+      input.dstId,
+      input.kind,
+      input.weight ?? 1,
+      input.validFrom ?? createdAt,
+      input.validTo ?? null,
+      createdAt,
+    )
+  }
+
+  /** Create or refresh a graph node; see `syncUnitNode` for the no-revival rule. */
+  upsertNode(input: ContextNodeInput): ContextNodeRecord {
+    const now = input.now ?? new Date()
+    const createdAt = now.toISOString()
+    this.statement(`INSERT INTO memory_node (
+      node_id, member_id, session_id, level, kind, label, ref, status, confidence,
+      valid_from, valid_to, superseded_by, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(node_id) DO UPDATE SET
+      session_id = excluded.session_id,
+      level = excluded.level,
+      kind = excluded.kind,
+      label = excluded.label,
+      ref = excluded.ref,
+      confidence = excluded.confidence,
+      valid_from = excluded.valid_from,
+      valid_to = COALESCE(excluded.valid_to, memory_node.valid_to),
+      superseded_by = COALESCE(excluded.superseded_by, memory_node.superseded_by),
+      status = CASE WHEN excluded.status = 'current' AND memory_node.status <> 'current'
+        THEN memory_node.status ELSE excluded.status END,
+      updated_at = excluded.updated_at`).run(
+      input.nodeId,
+      input.memberId,
+      input.sessionId,
+      input.level,
+      input.kind,
+      input.label,
+      input.ref,
+      input.status ?? 'current',
+      Math.max(0, Math.min(1, input.confidence ?? 1)),
+      input.validFrom ?? createdAt,
+      input.validTo ?? null,
+      input.supersededBy ?? null,
+      createdAt,
+      createdAt,
+    )
+    const node = this.getNode(input.nodeId)
+    if (node === undefined) throw new Error(`graph node "${input.nodeId}" disappeared after upsert`)
+    return node
+  }
+
+  /** Read one node, or `undefined` when absent. */
+  getNode(nodeId: string): ContextNodeRecord | undefined {
+    const row = this.statement('SELECT * FROM memory_node WHERE node_id = ?').get(nodeId) as NodeRow | undefined
+    return row === undefined ? undefined : toStoredNode(row)
+  }
+
+  /** Nodes of one Member, optionally narrowed by level or ref. */
+  listNodes(memberId: string, filter: { level?: ContextNodeLevel; ref?: string } = {}): ContextNodeRecord[] {
+    const clauses = ['member_id = ?']
+    const values: (string | number)[] = [memberId]
+    if (filter.level !== undefined) {
+      clauses.push('level = ?')
+      values.push(filter.level)
+    }
+    if (filter.ref !== undefined) {
+      clauses.push('ref = ?')
+      values.push(filter.ref)
+    }
+    const rows = this.statement(`SELECT * FROM memory_node WHERE ${clauses.join(' AND ')} ORDER BY created_at, node_id`)
+      .all(...values) as unknown as NodeRow[]
+    return rows.map(toStoredNode)
+  }
+
+  /** Create or refresh one edge; existing edges keep their `valid_to`. */
+  upsertEdge(input: ContextEdgeInput): ContextEdgeRecord {
+    this.insertEdge(input)
+    const row = this.statement(`SELECT * FROM memory_edge WHERE member_id = ? AND src_id = ? AND dst_id = ? AND kind = ?`)
+      .get(input.memberId, input.srcId, input.dstId, input.kind) as EdgeRow | undefined
+    if (row === undefined) throw new Error(`graph edge ${input.kind} disappeared after upsert`)
+    return toStoredEdge(row)
+  }
+
+  /**
+   * Record that `supersedingUnitId` replaces `supersededUnitId`: the old node
+   * becomes `superseded` with `valid_to`/`superseded_by`, and a directed
+   * `supersedes` edge preserves the chain. The old unit row and its text stay
+   * untouched, so the historical record remains auditable.
+   */
+  supersedeUnit(supersedingUnitId: string, supersededUnitId: string, at = new Date()): void {
+    const newNode = this.getNode(contextNodeId(supersedingUnitId))
+    const oldNode = this.getNode(contextNodeId(supersededUnitId))
+    if (newNode === undefined || oldNode === undefined) {
+      throw new Error('supersedeUnit requires both units to exist in the derived index')
+    }
+    if (newNode.memberId !== oldNode.memberId) {
+      throw new Error('supersedeUnit cannot cross Member boundaries')
+    }
+    const instant = at.toISOString()
+    this.transaction(() => {
+      this.statement(`UPDATE memory_node SET status = 'superseded', valid_to = ?, superseded_by = ?, updated_at = ?
+        WHERE node_id = ?`).run(instant, newNode.nodeId, instant, oldNode.nodeId)
+      this.insertEdge({
+        memberId: newNode.memberId,
+        srcId: newNode.nodeId,
+        dstId: oldNode.nodeId,
+        kind: 'supersedes',
+        weight: 1,
+        validFrom: instant,
+        now: at,
+      })
+    })
+  }
+
+  /** Belief state per unit, resolved from its L1 node with the replacing ref joined in. */
+  unitStatuses(memberId: string, unitIds: readonly string[]): Map<string, ContextUnitStatus> {
+    const unique = [...new Set(unitIds)]
+    const statuses = new Map<string, ContextUnitStatus>()
+    if (unique.length === 0) return statuses
+    const placeholders = unique.map(() => '?').join(', ')
+    const rows = this.statement(`SELECT n.ref AS ref, n.status AS status, n.valid_to AS valid_to, s.ref AS superseded_ref
+      FROM memory_node n LEFT JOIN memory_node s ON s.node_id = n.superseded_by
+      WHERE n.member_id = ? AND n.level = 'L1' AND n.ref IN (${placeholders})`)
+      .all(memberId, ...unique) as unknown as StatusRow[]
+    for (const row of rows) {
+      statuses.set(row.ref, {
+        status: row.status as ContextNodeStatus,
+        ...(row.superseded_ref === null ? {} : { supersededByRef: row.superseded_ref }),
+        ...(row.valid_to === null ? {} : { validTo: row.valid_to }),
+      })
+    }
+    return statuses
+  }
+
+  /**
+   * Undirected walk from seed nodes over live edges. Neighbours are reached in
+   * both directions (an edge written new→old is still a relation), cycles are
+   * cut by the path string, and only L1 unit nodes are returned. Depth is
+   * clamped to 3 so one call cannot fan out across the whole graph.
+   */
+  graphNeighbors(memberId: string, seedNodeIds: readonly string[], depth = 3, limit = 50): ContextGraphHit[] {
+    const seeds = [...new Set(seedNodeIds)].slice(0, 8)
+    if (seeds.length === 0) return []
+    const walkDepth = Math.max(1, Math.min(3, Math.floor(depth)))
+    const placeholders = seeds.map(() => '?').join(', ')
+    const rows = this.statement(`WITH RECURSIVE
+      neighbor(src, dst, weight) AS (
+        SELECT src_id, dst_id, weight FROM memory_edge WHERE member_id = ? AND valid_to IS NULL
+        UNION ALL
+        SELECT dst_id, src_id, weight FROM memory_edge WHERE member_id = ? AND valid_to IS NULL
+      ),
+      walk(node_id, depth, weight, path) AS (
+        SELECT n.dst, 1, n.weight, '>' || n.src || '>' || n.dst FROM neighbor n WHERE n.src IN (${placeholders})
+        UNION ALL
+        SELECT n.dst, w.depth + 1, w.weight * n.weight, w.path || '>' || n.dst
+        FROM walk w JOIN neighbor n ON n.src = w.node_id
+        WHERE w.depth < ? AND instr(w.path, '>' || n.dst || '>') = 0
+      )
+      SELECT ref, depth, weight FROM (
+        SELECT n.ref AS ref, w.depth AS depth, w.weight AS weight,
+          ROW_NUMBER() OVER (PARTITION BY n.ref ORDER BY w.depth ASC, w.weight DESC) AS rank
+        FROM walk w JOIN memory_node n ON n.node_id = w.node_id
+        WHERE n.member_id = ? AND n.level = 'L1'
+      )
+      WHERE rank = 1
+      ORDER BY depth ASC, weight DESC
+      LIMIT ?`).all(memberId, memberId, ...seeds, walkDepth, memberId, limit) as unknown as GraphRow[]
+    return rows.map(row => ({ ref: row.ref, depth: row.depth, weight: row.weight }))
   }
 
   /** Read one unit, or `undefined` when the row is absent. */
@@ -610,5 +918,39 @@ export class ContextStore {
     this.statement(`INSERT INTO recall_state (member_id, session_id, key, value, updated_at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(member_id, session_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
       .run(memberId, sessionId, key, value, now.toISOString())
+  }
+}
+
+/** Map one `memory_node` row into the public read shape. */
+function toStoredNode(row: NodeRow): ContextNodeRecord {
+  return {
+    nodeId: row.node_id,
+    memberId: row.member_id,
+    sessionId: row.session_id,
+    level: row.level as ContextNodeLevel,
+    kind: row.kind,
+    label: row.label,
+    ref: row.ref,
+    status: row.status as ContextNodeStatus,
+    confidence: row.confidence,
+    validFrom: row.valid_from,
+    ...(row.valid_to === null ? {} : { validTo: row.valid_to }),
+    ...(row.superseded_by === null ? {} : { supersededBy: row.superseded_by }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+/** Map one `memory_edge` row into the public read shape. */
+function toStoredEdge(row: EdgeRow): ContextEdgeRecord {
+  return {
+    memberId: row.member_id,
+    srcId: row.src_id,
+    dstId: row.dst_id,
+    kind: row.kind as ContextEdgeKind,
+    weight: row.weight,
+    validFrom: row.valid_from,
+    ...(row.valid_to === null ? {} : { validTo: row.valid_to }),
+    createdAt: row.created_at,
   }
 }

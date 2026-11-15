@@ -302,10 +302,10 @@ describe('context tools render the model-facing decision surface', () => {
         {
           ref: 'cu:s1:2', sessionId: 's1', recordedAt: '2026-11-14T06:00:00.000Z', kind: 'note',
           status: 'superseded', importance: 1, score: 0.01, snippet: 'The earlier guess about token weights',
-          sources: ['lexical'],
+          sources: ['lexical'], supersededBy: 'cu:s1:3', validTo: '2026-11-15T09:00:00.000Z',
         },
       ],
-      degraded: ['graph-unavailable'],
+      degraded: ['graph-no-seeds'],
     })
     // The ref is how the model cites a unit back to itself; without it the
     // render is unusable for follow-up recall.
@@ -317,9 +317,11 @@ describe('context tools render the model-facing decision surface', () => {
     // A superseded row must be marked as such, not silently mixed with active
     // conclusions.
     expect(text).toContain('superseded')
+    expect(text).toContain('superseded by cu:s1:3')
+    expect(text).toContain('valid to 2026-11-15T09:00:00.000Z')
     // A degraded route must be named so an empty hit list is not read as
     // "nothing exists".
-    expect(text).toContain('graph-unavailable')
+    expect(text).toContain('graph-no-seeds')
   })
 
   it('context_recall states an unavailable index instead of implying an empty history', () => {

@@ -32,6 +32,8 @@
 | **D15** | 摘要本身越压越多怎么办 | **增量 delta + 固定 3 层**（窗口 → 话题簇 → 代）：新摘要只追加、旧摘要字节不变，触顶只重写被触及路径 | 递归重写：有 context collapse / brevity bias 证据，且每次击穿前缀缓存；只存 ref + 关键词：最省 token 但每轮要检索、失去可读性 | 无 |
 | **D16** | 被取代的旧结论还给不给模型看 | **默认过滤**：常规召回不返回 `superseded`，只有显式 `includeSuperseded` 或复盘才返回 | 降权 ×0.25 仍返回：挤占 top-3 名额并诱发「选了旧值」；仅复盘区分：普通对话查不到「为什么改」 | 无 |
 
+**D16 落地（P1.3）**：每个 unit 写入时建 L1 节点（`mn:<unit-ref>`），字段含 `level` / `status` / `confidence` / `validFrom` / `validTo` / `supersededBy`；`supersedeUnit()` 把旧节点标 `superseded`、写 `validTo` 与 `supersededBy`，并插入 `supersedes` 边。召回融合后读取状态：默认剔除 `superseded`/`retired`，`includeSuperseded=true` 才返回并降权（`superseded` ×0.25、`retired` ×0.1），`unverified` ×0.7；若取代目标也在候选集内，旧版本去重。返回项带 `status`（`active`/`superseded`/`expired`/`unverified`）、`supersededBy` 与 `validTo`。
+
 ## 完整推荐组合
 
 ```text

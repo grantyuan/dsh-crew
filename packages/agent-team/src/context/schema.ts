@@ -16,7 +16,7 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 /** On-disk layout version stored in `PRAGMA user_version`. */
-export const CONTEXT_SCHEMA_VERSION = 2
+export const CONTEXT_SCHEMA_VERSION = 3
 
 /** Which FTS tokenizers this SQLite build accepted. */
 export interface ContextFtsCapabilities {
@@ -127,6 +127,41 @@ CREATE TABLE IF NOT EXISTS vector (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (owner_kind, owner_id)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS memory_node (
+  node_id      TEXT PRIMARY KEY,
+  member_id    TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  level        TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  label        TEXT NOT NULL,
+  ref          TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  confidence   REAL NOT NULL,
+  valid_from   TEXT NOT NULL,
+  valid_to     TEXT,
+  superseded_by TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS memory_node_member_ref ON memory_node(member_id, ref);
+CREATE INDEX IF NOT EXISTS memory_node_member_status ON memory_node(member_id, status);
+CREATE INDEX IF NOT EXISTS memory_node_member_level ON memory_node(member_id, level);
+CREATE INDEX IF NOT EXISTS memory_node_superseded_by ON memory_node(superseded_by);
+
+CREATE TABLE IF NOT EXISTS memory_edge (
+  member_id  TEXT NOT NULL,
+  src_id     TEXT NOT NULL,
+  dst_id     TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  weight     REAL NOT NULL,
+  valid_from TEXT NOT NULL,
+  valid_to   TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (member_id, src_id, dst_id, kind)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_edge_src ON memory_edge(member_id, src_id);
+CREATE INDEX IF NOT EXISTS memory_edge_dst ON memory_edge(member_id, dst_id);
 `
 
 /** Additive migration from the P1.1 layout; safe to re-run. */
@@ -140,6 +175,44 @@ CREATE TABLE IF NOT EXISTS vector (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (owner_kind, owner_id)
 ) STRICT, WITHOUT ROWID;
+`
+
+/** Additive migration from the P1.2 layout; graph nodes and edges only. */
+const MIGRATE_2_TO_3 = `
+CREATE TABLE IF NOT EXISTS memory_node (
+  node_id      TEXT PRIMARY KEY,
+  member_id    TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  level        TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  label        TEXT NOT NULL,
+  ref          TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  confidence   REAL NOT NULL,
+  valid_from   TEXT NOT NULL,
+  valid_to     TEXT,
+  superseded_by TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS memory_node_member_ref ON memory_node(member_id, ref);
+CREATE INDEX IF NOT EXISTS memory_node_member_status ON memory_node(member_id, status);
+CREATE INDEX IF NOT EXISTS memory_node_member_level ON memory_node(member_id, level);
+CREATE INDEX IF NOT EXISTS memory_node_superseded_by ON memory_node(superseded_by);
+
+CREATE TABLE IF NOT EXISTS memory_edge (
+  member_id  TEXT NOT NULL,
+  src_id     TEXT NOT NULL,
+  dst_id     TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  weight     REAL NOT NULL,
+  valid_from TEXT NOT NULL,
+  valid_to   TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (member_id, src_id, dst_id, kind)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_edge_src ON memory_edge(member_id, src_id);
+CREATE INDEX IF NOT EXISTS memory_edge_dst ON memory_edge(member_id, dst_id);
 `
 
 const FTS_WORD = "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(unit_id UNINDEXED, body, tokenize='unicode61 remove_diacritics 2')"
@@ -165,12 +238,13 @@ export function openContextDatabase(path: string, options: OpenContextDatabaseOp
 
     const row = db.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
     const onDisk = row?.user_version ?? 0
-    if (onDisk !== 0 && onDisk !== 1 && onDisk !== CONTEXT_SCHEMA_VERSION) {
+    if (onDisk !== 0 && onDisk !== 1 && onDisk !== 2 && onDisk !== CONTEXT_SCHEMA_VERSION) {
       throw new Error(`context database at "${actual}" has schema version ${onDisk}, incompatible with this build (${CONTEXT_SCHEMA_VERSION})`)
     }
 
     db.exec(CORE_SCHEMA)
     if (onDisk === 1) db.exec(MIGRATE_1_TO_2)
+    if (onDisk === 1 || onDisk === 2) db.exec(MIGRATE_2_TO_3)
 
     let word = false
     let trigram = false

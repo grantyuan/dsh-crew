@@ -12,12 +12,13 @@
 import { extractFacets, roleFacetValue, subjectFacetValue } from './facets.ts'
 import { charLength, extractKeywords, extractTopicTerms } from './keywords.ts'
 import type { ContextFacetQuery, ContextSearchHit, ContextStore } from './store.ts'
-import type { ContextFacet } from './types.ts'
+import type { ContextFacet, ContextNodeStatus } from './types.ts'
+import { contextNodeId } from './units.ts'
 import { VectorIndex } from './vector-index.ts'
 
 export type ContextRecallMode = 'auto' | 'exact' | 'lexical' | 'facet' | 'vector' | 'graph'
 
-export type ContextRecallStatus = 'active' | 'superseded' | 'expired'
+export type ContextRecallStatus = 'active' | 'superseded' | 'expired' | 'unverified'
 
 export interface ContextRecallTimeRange {
   readonly fromMs?: number
@@ -51,6 +52,10 @@ export interface ContextRecallItem {
   readonly score: number
   readonly snippet: string
   readonly sources: readonly string[]
+  /** Unit ref that replaced this one; only present on superseded items. */
+  readonly supersededBy?: string
+  /** When this belief stopped holding; only present on superseded/retired items. */
+  readonly validTo?: string
 }
 
 export interface ContextRecallResult {
@@ -233,7 +238,30 @@ export function recallContext(store: ContextStore, query: ContextRecallQuery): C
     }
   }
 
-  if (wantsRoute(mode, 'graph')) degraded.add('graph-unavailable')
+  if (wantsRoute(mode, 'graph')) {
+    // Graph seeds are the strongest units already found by the text routes; a
+    // pure graph query falls back to a lexical seed so an explicit `mode:
+    // 'graph'` still has somewhere to start.
+    let seedHits = mergeHits(...routes.map(route => route.hits)).slice(0, 5)
+    if (seedHits.length === 0 && text !== '') {
+      seedHits = store.searchLexicalLike(query.memberId, [text], 5)
+    }
+    if (seedHits.length === 0) {
+      if (mode === 'graph') degraded.add('graph-no-seeds')
+    } else {
+      const seeds = new Set(seedHits.map(hit => hit.unitId))
+      const hits = store.graphNeighbors(
+        query.memberId,
+        seedHits.map(hit => contextNodeId(hit.unitId)),
+        3,
+        ROUTE_LIMIT,
+      )
+        .filter(hit => !seeds.has(hit.ref))
+        .map(hit => ({ unitId: hit.ref, score: hit.weight / hit.depth }))
+      if (hits.length > 0) routes.push({ name: 'graph', hits })
+      else if (mode === 'graph') degraded.add('graph-no-results')
+    }
+  }
 
   const fused = new Map<string, { score: number; sources: Set<RouteName> }>()
   for (const route of routes) {
@@ -249,33 +277,61 @@ export function recallContext(store: ContextStore, query: ContextRecallQuery): C
     .map(([unitId, entry]) => ({ unitId, ...entry }))
     .sort((left, right) => right.score - left.score || left.unitId.localeCompare(right.unitId))
 
-  const items: ContextRecallItem[] = []
+  // Belief state is applied after fusion: a stale version never outranks its
+  // replacement, and the default result hides superseded/retired units entirely.
+  const present = new Set(ranked.map(entry => entry.unitId))
+  const statuses = store.unitStatuses(query.memberId, ranked.map(entry => entry.unitId))
+  const shaped: ContextRecallItem[] = []
   for (const entry of ranked) {
     const unit = store.getUnit(entry.unitId)
     if (unit === undefined) continue
-    items.push({
+    const belief = statuses.get(entry.unitId)
+    const status = belief?.status ?? 'current'
+    if (status === 'superseded' || status === 'retired') {
+      if (query.includeSuperseded !== true) continue
+      // When the replacement is also a candidate, the old version adds no
+      // information; keep only the newest member of the chain.
+      if (belief?.supersededByRef !== undefined && present.has(belief.supersededByRef)) continue
+    }
+    shaped.push({
       ref: unit.unitId,
       sessionId: unit.sessionId,
       recordedAt: unit.recordedAt,
       kind: unit.kind,
-      status: 'active',
+      status: recallStatus(status),
       importance: unit.importance,
-      score: Number(entry.score.toFixed(6)),
+      score: Number((entry.score * statusFactor(status)).toFixed(6)),
       snippet: snippetOf(unit.text),
       sources: [...entry.sources].sort(),
+      ...(belief?.supersededByRef === undefined ? {} : { supersededBy: belief.supersededByRef }),
+      ...(belief?.validTo === undefined ? {} : { validTo: belief.validTo }),
     })
-    if (items.length >= limit) break
   }
+  shaped.sort((left, right) => right.score - left.score || left.ref.localeCompare(right.ref))
 
-  return { items, degraded: [...degraded].sort() }
+  return { items: shaped.slice(0, limit), degraded: [...degraded].sort() }
+}
+
+function recallStatus(status: ContextNodeStatus): ContextRecallStatus {
+  return status === 'current' ? 'active' : status === 'retired' ? 'expired' : status
+}
+
+/** Ranking weight per belief state; retired beliefs stay last but palpable when explicitly requested. */
+function statusFactor(status: ContextNodeStatus): number {
+  switch (status) {
+    case 'current': return 1
+    case 'unverified': return 0.7
+    case 'superseded': return 0.25
+    case 'retired': return 0.1
+  }
 }
 
 /**
  * Stable degraded-reason vocabulary for callers and tests.
- * `graph-unavailable` disappears when the graph ticket lands.
  */
 export const CONTEXT_RECALL_DEGRADED = Object.freeze({
-  graph: 'graph-unavailable',
+  graphNoSeeds: 'graph-no-seeds',
+  graphNoResults: 'graph-no-results',
   lexicalLike: 'lexical-like',
   vectorPending: 'vector-pending',
   exactNoTerms: 'exact-no-terms',

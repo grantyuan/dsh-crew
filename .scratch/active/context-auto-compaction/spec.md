@@ -574,10 +574,10 @@ interface MemoryEdge {
 
 ```text
 selection: RRF 融合分只用于排序，不设绝对阈值；注入取 top-3，0 条则不注入
-penalty: status='superseded' 默认剔除（D16=A）；status='unverified' → ×0.7（P1.4 接入）
+penalty: status='superseded' 默认剔除（D16=A）；显式 includeSuperseded 时 ×0.25；status='unverified' → ×0.7；status='retired' → ×0.1（P1.3 已接入）
 ```
 
-> P1.2 实现口径：五路召回用 reciprocal-rank fusion（k=60）排序，分数是名次倒数加权，量纲上无法与早期设计的 0.18 绝对阈值比较，因此不采用绝对阈值；「top-3 + 0 条不注入」保持不变。`status` 字段当前恒为 `active`，取代链的过滤与降权在 P1.4 随图一起接入。
+> P1.2/P1.3 实现口径：五路召回用 reciprocal-rank fusion（k=60）排序，分数是名次倒数加权，量纲上无法与早期设计的 0.18 绝对阈值比较，因此不采用绝对阈值；「top-3 + 0 条不注入」保持不变。P1.3 起每次 unit 写入自动建 L1 节点（`mn:<unit-ref>`）与结构边（同 Session 的 `continues`、同 subject 的 `same_subject`），图路由以其余路由的 top-5 为种子、递归走最多 3 跳；融合后读取节点状态，默认剔除 `superseded`/`retired`，`unverified` 保留并降权，取代目标也在候选集中时去掉旧版本。降级原因改为 `graph-no-seeds` / `graph-no-results`，不再是 `graph-unavailable`。
 
 **为什么是 3 条**：3 条 ≈ 180–260 token，是“能被模型真正读完、又不至于挤占当前任务”的折中；`Lost in the Middle` 的 U 形位置敏感性说明尾部少量高相关片段收益最高（§16）。
 
@@ -637,7 +637,7 @@ confidence = clamp(0.05, 1,
 ```
 
 - `base(kind)`：`decision` 1.0；`fact` 0.9；`memory` 0.8；`process` 0.5；`auxiliary` 0.3。
-- `statusFactor`：`current` 1.0；`unverified` 0.7；`superseded` 0.25（只在显式历史查询中参与排序，默认召回剔除，见 §7.9）；`retired` 0。
+- `statusFactor`：`current` 1.0；`unverified` 0.7；`superseded` 0.25（只在显式历史查询中参与排序，默认召回剔除，见 §7.9）；`retired` 0.1（同样只在显式历史查询中出现）。
 - `sourceFactor`：用户显式决策 1.0；账本引用 0.95；工作模型结论 0.8；小模型摘要 0.75；工具原始输出 0.6。
 - `timeFactor`（只对会“过时”的类型衰减）：
   - `decision`：**不随时间衰减**，只被取代（决策的价值在于稳定）；
@@ -680,28 +680,28 @@ confidence = clamp(0.05, 1,
 
 ### 7.9 标记陈旧后的检索排序与工具返回形态
 
-- **默认过滤**：`superseded` 不进入常规召回与尾部注入的候选集（D16=A）；只有 `context_recall(includeSuperseded: true)` 才以 ×0.35 参与排序，且“最新版本在候选内则去重旧版本”。`unverified` ×0.7 仍返回，但必须带“可能已有更新”的标注。依据：STALE（arXiv:2605.06527）与 Supersede（arXiv:2606.27472）都显示新信息并列出现时模型仍会选旧值，降权不足以纠正。
-- `context_recall(search)` 的每条命中增加字段：
+- **默认过滤**：`superseded` 不进入常规召回与尾部注入的候选集（D16=A）；只有 `context_recall(includeSuperseded: true)` 才以 ×0.25 参与排序，且“最新版本在候选内则去重旧版本”。`unverified` ×0.7 仍返回，`retired` 映射为 `expired` 且 ×0.1。依据：STALE（arXiv:2605.06527）与 Supersede（arXiv:2606.27472）都显示新信息并列出现时模型仍会选旧值，降权不足以纠正。
+- `context_recall(search)` 的每条命中增加字段（P1.3 实际输出）：
 
 ```ts
 {
-  ref, kind, topics, score,
-  status: 'current' | 'superseded' | 'unverified',
-  confidence: number,
-  supersededBy?: string,        // 新版本 ref
-  note?: string                 // "同类信息已有最新版本，建议先读 supersededBy"
+  ref, sessionId, recordedAt, kind, importance, score, snippet, sources,
+  status: 'active' | 'superseded' | 'expired' | 'unverified',
+  supersededBy?: string,   // 取代它的 unit ref
+  validTo?: string         // 旧信念失效的 ISO 时刻
 }
 ```
 
 - 默认 `includeSuperseded=false`；显式传 `true` 才返回旧版本（用于“为什么改”的复盘）。
-- `context_review` 的每个决策簇返回 `history: [{text, status, validFrom, validTo, ref}]`，按时间排序；这正好回答“以前怎么定的、后来改没改”。
+- `context_review`（P1.4）的每个决策簇返回 `history: [{text, status, validFrom, validTo, ref}]`，按时间排序；这正好回答“以前怎么定的、后来改没改”。
 - 渲染时**永不**把 `superseded` 内容写成事实句，只写“曾有如下说法（已被 X 取代）”。
-- 两种工具都带 `degraded?: true` 与 `degradedReason?`，图不可用时明确说明“只能按词法召回”。
+- 两种工具都带 `degraded: string[]`；图为空时明确写成 `graph-no-seeds` / `graph-no-results`，表示只能按其余路线召回。
 
 ### 7.10 图的增量维护、上限与重建
 
-- 增量：每个新 unit/segment 只更新它触及的节点、边与倒排项；不全量重算。
-- 每次 L1 分类顺带产出 `about` / `mentions` / `evidence` 边；取代边只由冲突检测写。
+- 增量：每个新 unit/segment 只更新它触及的节点、边与倒排项；不全量重算。P1.3 在 `writeUnit` 事务内同步建 L1 节点，按同 Session 前序 unit 建 `continues` 边、按共享 subject facet 建 `same_subject` 边（各限最近 3 条）。
+- 遍历：邻接表双向解释一条边，递归 CTE 按深度 ≤3 展开，用路径字符串防环，只返回 L1 节点；查询只看 `valid_to IS NULL` 的存活边。
+- 每次 L1 分类顺带产出 `about` / `mentions` / `evidence` 边；取代边由 `supersedeUnit()` 或冲突检测写。
 - 上限与淘汰：见 §7.2；淘汰只针对 L0 unit 节点，`decision` / `generation` / `member` 永久保留（数量有界）。
 - 重建：删除派生物域 → 从 Session 日志重放 unit → 重建 segment/cluster/generation 链 → 重跑一次冲突检测（可选，按最近 200 条）。重建期间工具返回 `degraded`。
 
@@ -951,7 +951,7 @@ SQLite 不可用时，facet 随 `units.jsonl` / `graph.json` 一起落盘；检�
 
 ### 8.1 `context_recall` — 检索原文
 
-P1.2 先交付 search 子集；`read`（按 `seg:` 回读原文）随 P1.5 的原文下钻一起接入。参数以实际实现为准：
+P1.2 先交付 search 子集；P1.3 接通图路由与取代过滤；`read`（按 `seg:` 回读原文）随 P1.5 的原文下钻一起接入。参数以实际实现为准：
 
 ```ts
 {
@@ -960,13 +960,13 @@ P1.2 先交付 search 子集；`read`（按 `seg:` 回读原文）随 P1.5 的�
     query:      { type: 'string', required: true, description: '自然语言或关键词；可用路径、标识符、决策片段。' },
     mode:       { type: 'string', description: 'auto | exact | lexical | facet | vector | graph（默认 auto）' },
     limit:      { type: 'number', description: 'search 返回条数 1..8，默认 5' },
-    includeSuperseded: { type: 'boolean', description: '是否返回已被取代的旧版本，默认 false（P1.4 起生效）' },
+    includeSuperseded: { type: 'boolean', description: '是否返回已被取代的旧版本，默认 false（P1.3 起生效）' },
     timeRange:  { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' } }, description: 'ISO 时刻区间，按 time facet 重叠过滤' },
     subjects:   { type: 'array', items: { type: 'string' }, description: '主语/实体 facet，如 @alice、workspace id、项目名' },
     roles:      { type: 'array', items: { type: 'string' }, description: '角色粗类 facet，如 planner / implementer' },
   },
   output: {
-    items: [{ ref, sessionId, recordedAt, kind, status, importance, score, snippet, sources }],
+    items: [{ ref, sessionId, recordedAt, kind, status, importance, score, snippet, sources, supersededBy?, validTo? }],
     degraded: string[],
     reason?: string,   // index-unavailable | recall-failed
   }
