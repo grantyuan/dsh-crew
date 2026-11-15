@@ -1863,6 +1863,47 @@ export interface AgentTeamContextRecallToolOutcome {
   readonly reason?: string
 }
 
+/** Read-only decision review over the context graph. */
+export interface AgentTeamContextReviewRequest {
+  readonly topic?: string
+  readonly around?: string
+  readonly includeSuperseded?: boolean
+  readonly depth?: 1 | 2
+}
+
+export interface AgentTeamContextReviewDecision {
+  readonly ref: string
+  readonly text: string
+  readonly status: 'active' | 'superseded' | 'expired' | 'unverified'
+  readonly validFrom: string
+  readonly validTo?: string
+  readonly supersededBy?: string
+}
+
+export interface AgentTeamContextReviewCluster {
+  readonly topic: string
+  readonly decisions: readonly AgentTeamContextReviewDecision[]
+  readonly openQuestions: readonly string[]
+  readonly segments: readonly string[]
+  readonly generations: readonly string[]
+}
+
+export interface AgentTeamContextReviewEdge {
+  readonly from: string
+  readonly to: string
+  readonly kind: string
+  readonly validFrom: string
+  readonly validTo?: string
+}
+
+export interface AgentTeamContextReviewToolOutcome {
+  readonly clusters: readonly AgentTeamContextReviewCluster[]
+  readonly edges: readonly AgentTeamContextReviewEdge[]
+  readonly narrative: string
+  readonly includeSuperseded: boolean
+  readonly degraded: readonly string[]
+}
+
 /** One pre-step recall snapshot request, derived from the current user turn. */
 export interface AgentTeamContextRecallSnapshotRequest {
   readonly query: string

@@ -1004,6 +1004,8 @@ P1.2 先交付 search 子集；P1.3 接通图路由与取代过滤；`read`（�
 - 语义：回答“这件事以前怎么定的、后来改过没有、还有哪些没结论、在哪些代出现过”。
 - 明确标注：图中决策若与账本冲突，以账本为准；工具不返回 Team 事实快照。
 
+**P1.4 实际落地**：参数固定为 `topic` / `around`（二选一必填）/ `includeSuperseded`（默认 true）/ `depth`（1 | 2，默认 2），暂未暴露 `limit`。输出 `clusters[].decisions` 带 `ref`、`status`、`validFrom`、`validTo`、`supersededBy`；`openQuestions` / `segments` / `edges` / `narrative` / `includeSuperseded` / `degraded` 均按上表返回。`generations` 作为 L3 占位固定为 `[]`；决策簇按 `topic` 聚合（有请求 topic 时统一用它作 label），无命中时 `degraded` 为 `review-needs-topic-or-around` 或返回空 narrative。
+
 ### 8.3 系统提示词改动
 
 1. **工具描述即指导**（与现有 12 个 Team 工具的做法一致）：两个工具的 `description` 直接写“何时用、何时不要用、结果怎么读”。
@@ -1225,6 +1227,15 @@ P2 [x] 探针实测 gemma-3-4b 吞吐（118 tok/s, 40.8ms prompt）— 证据 ma
 
 - `AssistantCompactionEngine` + 预生成 + 成本判定 + 提交监听 + 降级；L2/L3 图内汇总；触硬上限时的 surface 汇总。
 - 验收：60 轮会话 token 降幅 ≥ 40%；每 10 轮 ≤ 1 次 epoch；单 epoch 后台 ≤ 25 s；工作模型缓存命中率有基线对比不劣化超过一次重算的理论值；决策类内容逐字保留（人工抽检 20 条）；300 轮长跑后摘要区不超过硬上限，且有一次成功的图内汇总。
+
+**P1.4 落地（压缩与提交点）**：
+
+- 阈值按 [`compaction.ts`](file:///home/yus/work/dsh-agent-team-cac/packages/agent-team/src/context/compaction.ts) 原样实现，未放宽：最小窗口 8000 token、至少 10 turns、末 5 条分析窗口不压、尾部保留 1500 token、`S×N > 2R`（N clamp 5..60）、摘要 ≤1200 token、小模型输入 ≤6000 token。
+- 两阶段：`prepareEpoch()` 只做成本判定 + 调小模型预生成 digest，把 digest/commitments/hash 作为 pending 存入 `context_epoch`，**不推进 frontier**；`commitPreparedEpoch()` 提交点**不调用模型**，仅校验 pending hash 与 frontier 后写 segment/commitment 并推进 frontier。pending 与当前窗口不一致或 hash 失效时清 pending 并返回 `stale-pending`。
+- 存储：schema v4 新增 `context_segment`（L2 摘要缓存）、`context_epoch`（frontier + pending）、`context_commitment`（逐字 quote + sha256），旧 v3 库按 `MIGRATE_3_TO_4` 升级。
+- 逐字校验：commitment 的 `quote` 必须是某个来源 unit 文本的子串，否则丢弃；落库保留 `ref`、`quoteHash`、`validFrom`。提交点读缓存由 `committedDigestForSeq()` 提供。
+- `AssistantCompactionEngine` 继承 `BasicCompactionEngine`，仅覆写 `summarize()`：有预生成摘要时直接用（provider `prepared` / model `epoch-cache`），否则调用 assistant 角色，失败回退 `super.summarize()`。Host 的 manual/overflow 路径按 `contextRoleModels().assistant.enabled` 选择引擎。
+- **占位/缺口**：idle/pre-step 的自动预生成调度尚未接线，本轮通过 `ContextService.prepareCompaction/commitCompaction` API 与单测验证；真实 Session 的 unit intake 仍待后续票，因此自动压缩尚不能在真实会话触发。preset 内 `/compact` 仍走 `BasicCompactionEngine`。L3 `generations` 与图内汇总未实现。
 
 ### P3 — L3 拓扑图 + top-3 召回 + 冲突标记 + `context_review`
 

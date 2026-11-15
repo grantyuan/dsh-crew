@@ -16,7 +16,7 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 /** On-disk layout version stored in `PRAGMA user_version`. */
-export const CONTEXT_SCHEMA_VERSION = 3
+export const CONTEXT_SCHEMA_VERSION = 4
 
 /** Which FTS tokenizers this SQLite build accepted. */
 export interface ContextFtsCapabilities {
@@ -162,6 +162,58 @@ CREATE TABLE IF NOT EXISTS memory_edge (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS memory_edge_src ON memory_edge(member_id, src_id);
 CREATE INDEX IF NOT EXISTS memory_edge_dst ON memory_edge(member_id, dst_id);
+
+CREATE TABLE IF NOT EXISTS context_segment (
+  segment_id   TEXT PRIMARY KEY,
+  member_id    TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  level        TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  label        TEXT NOT NULL,
+  from_seq     INTEGER NOT NULL,
+  to_seq       INTEGER NOT NULL,
+  frontier_seq INTEGER NOT NULL,
+  digest_json  TEXT NOT NULL,
+  digest_hash  TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  valid_from   TEXT NOT NULL,
+  valid_to     TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  UNIQUE(member_id, session_id, to_seq)
+) STRICT;
+CREATE INDEX IF NOT EXISTS context_segment_frontier ON context_segment(member_id, session_id, from_seq, to_seq);
+
+CREATE TABLE IF NOT EXISTS context_epoch (
+  member_id        TEXT NOT NULL,
+  session_id       TEXT NOT NULL,
+  frontier_seq     INTEGER NOT NULL,
+  pending_json     TEXT,
+  pending_hash     TEXT,
+  pending_from_seq INTEGER,
+  pending_to_seq   INTEGER,
+  pending_at       TEXT,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (member_id, session_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS context_commitment (
+  commitment_id TEXT PRIMARY KEY,
+  member_id     TEXT NOT NULL,
+  session_id    TEXT NOT NULL,
+  segment_id    TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  text          TEXT NOT NULL,
+  quote         TEXT NOT NULL,
+  quote_hash    TEXT NOT NULL,
+  ref           TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  valid_from    TEXT NOT NULL,
+  valid_to      TEXT,
+  created_at    TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS context_commitment_segment ON context_commitment(segment_id);
+CREATE INDEX IF NOT EXISTS context_commitment_member ON context_commitment(member_id, session_id);
 `
 
 /** Additive migration from the P1.1 layout; safe to re-run. */
@@ -215,6 +267,61 @@ CREATE INDEX IF NOT EXISTS memory_edge_src ON memory_edge(member_id, src_id);
 CREATE INDEX IF NOT EXISTS memory_edge_dst ON memory_edge(member_id, dst_id);
 `
 
+/** Additive migration from the P1.3 layout; compaction segments and epoch state. */
+const MIGRATE_3_TO_4 = `
+CREATE TABLE IF NOT EXISTS context_segment (
+  segment_id   TEXT PRIMARY KEY,
+  member_id    TEXT NOT NULL,
+  session_id   TEXT NOT NULL,
+  level        TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  label        TEXT NOT NULL,
+  from_seq     INTEGER NOT NULL,
+  to_seq       INTEGER NOT NULL,
+  frontier_seq INTEGER NOT NULL,
+  digest_json  TEXT NOT NULL,
+  digest_hash  TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  valid_from   TEXT NOT NULL,
+  valid_to     TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  UNIQUE(member_id, session_id, to_seq)
+) STRICT;
+CREATE INDEX IF NOT EXISTS context_segment_frontier ON context_segment(member_id, session_id, from_seq, to_seq);
+
+CREATE TABLE IF NOT EXISTS context_epoch (
+  member_id        TEXT NOT NULL,
+  session_id       TEXT NOT NULL,
+  frontier_seq     INTEGER NOT NULL,
+  pending_json     TEXT,
+  pending_hash     TEXT,
+  pending_from_seq INTEGER,
+  pending_to_seq   INTEGER,
+  pending_at       TEXT,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (member_id, session_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS context_commitment (
+  commitment_id TEXT PRIMARY KEY,
+  member_id     TEXT NOT NULL,
+  session_id    TEXT NOT NULL,
+  segment_id    TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  text          TEXT NOT NULL,
+  quote         TEXT NOT NULL,
+  quote_hash    TEXT NOT NULL,
+  ref           TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  valid_from    TEXT NOT NULL,
+  valid_to      TEXT,
+  created_at    TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS context_commitment_segment ON context_commitment(segment_id);
+CREATE INDEX IF NOT EXISTS context_commitment_member ON context_commitment(member_id, session_id);
+`
+
 const FTS_WORD = "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(unit_id UNINDEXED, body, tokenize='unicode61 remove_diacritics 2')"
 const FTS_TRIGRAM = "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts_trigram USING fts5(unit_id UNINDEXED, body, tokenize='trigram')"
 
@@ -222,8 +329,9 @@ const FTS_TRIGRAM = "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts_trigram USING f
  * Open (or create) one context database.
  *
  * Zero `user_version` is stamped with {@link CONTEXT_SCHEMA_VERSION} only after
- * the whole layout exists; any other version rejects instead of migrating a
- * derivative that can simply be rebuilt.
+ * the whole layout exists; known older versions (1–3) are upgraded additively,
+ * and any other version rejects instead of migrating a derivative that can
+ * simply be rebuilt.
  */
 export function openContextDatabase(path: string, options: OpenContextDatabaseOptions = {}): OpenedContextDatabase {
   const actual = path === ':memory:' ? path : resolve(path)
@@ -238,13 +346,14 @@ export function openContextDatabase(path: string, options: OpenContextDatabaseOp
 
     const row = db.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
     const onDisk = row?.user_version ?? 0
-    if (onDisk !== 0 && onDisk !== 1 && onDisk !== 2 && onDisk !== CONTEXT_SCHEMA_VERSION) {
+    if (onDisk !== 0 && onDisk !== 1 && onDisk !== 2 && onDisk !== 3 && onDisk !== CONTEXT_SCHEMA_VERSION) {
       throw new Error(`context database at "${actual}" has schema version ${onDisk}, incompatible with this build (${CONTEXT_SCHEMA_VERSION})`)
     }
 
     db.exec(CORE_SCHEMA)
     if (onDisk === 1) db.exec(MIGRATE_1_TO_2)
     if (onDisk === 1 || onDisk === 2) db.exec(MIGRATE_2_TO_3)
+    if (onDisk !== 0 && onDisk !== CONTEXT_SCHEMA_VERSION) db.exec(MIGRATE_3_TO_4)
 
     let word = false
     let trigram = false

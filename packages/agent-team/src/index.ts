@@ -25,6 +25,7 @@ import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import { AssistantCompactionEngine } from './context/assistant-engine.ts'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
@@ -216,6 +217,8 @@ import type {
   AgentTeamContextRecallSnapshot,
   AgentTeamContextRecallSnapshotRequest,
   AgentTeamContextRecallToolOutcome,
+  AgentTeamContextReviewRequest,
+  AgentTeamContextReviewToolOutcome,
   AgentTeamContextRoleConfig,
   AgentTeamContextRoleConfigRequest,
   AgentTeamContextRoleName,
@@ -3035,10 +3038,7 @@ export default class AgentTeam extends TypertRemoteService {
       await agent.whenIdle()
       if (this.handles.get(memberId) !== active) return
       try {
-        const engine = new BasicCompactionEngine(this.ctx, {
-          auto: false,
-          ...(model === undefined ? {} : { summarizationProvider: model.provider, summarizationModel: model.model }),
-        })
+        const engine = this.compactionEngineFor(memberId, model)
         const result = await engine.compactNow(agent, new AbortController().signal)
         if (result === null) {
           this.ctx.logger.info(`agent-team: manual compaction for member '${member.handle}' found no compactable range`)
@@ -3066,11 +3066,7 @@ export default class AgentTeam extends TypertRemoteService {
     const fallbacks = (await this.fallbackCompactionSelections(current)).slice(0, MAX_COMPACTION_FALLBACK_ATTEMPTS)
     for (const selection of fallbacks) {
       try {
-        const engine = new BasicCompactionEngine(this.ctx, {
-          auto: false,
-          summarizationProvider: selection.provider,
-          summarizationModel: selection.model,
-        })
+        const engine = this.compactionEngineFor(memberId, selection)
         const result = await engine.compactNow(agent, new AbortController().signal)
         this.ctx.logger.info(`agent-team: manual compaction for member '${member.handle}' succeeded via fallback LLM ${selection.provider}/${selection.model} (shadowed ${result === null ? 0 : result.shadowedSeqs.length} surface nodes)`)
         return
@@ -3132,11 +3128,7 @@ export default class AgentTeam extends TypertRemoteService {
     for (const selection of fallbacks) {
       if (signal.aborted) return false
       try {
-        const engine = new BasicCompactionEngine(this.ctx, {
-          auto: false,
-          summarizationProvider: selection.provider,
-          summarizationModel: selection.model,
-        })
+        const engine = this.compactionEngineFor(memberId, selection)
         await engine.compactIfNeeded(agent, 'context-overflow', signal)
         if (agent.session.surface.replaceGeneration > generation) {
           this.ctx.logger.info(`agent-team: hard-limit compaction fallback succeeded via ${selection.provider}/${selection.model} (member '${this.memberLabel(memberId)}')`)
@@ -4496,6 +4488,41 @@ export default class AgentTeam extends TypertRemoteService {
       localEmbedding: this.localEmbedding,
     })
     return this.roleRuntime
+  }
+
+  /**
+   * Compaction engine for a Member. When the assistant role is explicitly
+   * enabled, the digest is routed through it and falls back to the shipped
+   * summarizer on failure; otherwise the shipped engine is used unchanged.
+   */
+  private compactionEngineFor(memberId: AgentTeamMemberId, selection?: AgentTeamModelSelection): BasicCompactionEngine {
+    const config = {
+      auto: false,
+      ...(selection === undefined ? {} : { summarizationProvider: selection.provider, summarizationModel: selection.model }),
+    }
+    const runtime = this.contextRoleRuntimeOrUndefined()
+    if (runtime === undefined || this.contextRoleModels().assistant.enabled !== true) {
+      return new BasicCompactionEngine(this.ctx, config)
+    }
+    let main: AgentTeamModelSelection | undefined
+    try {
+      main = this.currentModelSelectionOf(memberId)
+    } catch {
+      main = undefined
+    }
+    return new AssistantCompactionEngine(this.ctx, config, {
+      summarize: async ({ text, signal }) => {
+        const outcome = await runtime.chat('assistant', 'summarize', { text }, {
+          priority: 'background',
+          key: memberId,
+          ...(main === undefined ? {} : { main }),
+          ...(signal === undefined ? {} : { signal }),
+        })
+        return outcome.ok
+          ? { text: outcome.text, provider: outcome.route.model, model: outcome.route.model }
+          : undefined
+      },
+    })
   }
 
   /**
@@ -6286,6 +6313,30 @@ export default class AgentTeam extends TypertRemoteService {
       items: result.items.map(item => Object.freeze({ ...item, sources: [...item.sources] })),
       degraded: [...result.degraded],
       ...(result.reason === undefined ? {} : { reason: result.reason }),
+    })
+  }
+
+  /**
+   * Read-only review of decisions, commitments, and the supersession chain.
+   * Superseded history is included by default because the question is "what
+   * changed"; no Team authority is read or written.
+   */
+  async contextReviewForAgent(agent: Agent, request: AgentTeamContextReviewRequest): Promise<AgentTeamContextReviewToolOutcome> {
+    const member = this.memberForAgent(agent)
+    if (member === undefined || member.state !== 'enabled') throw new Error('context_review requires an active Team Member')
+    const result = this.contextIndex().review(member.memberId, request)
+    return Object.freeze({
+      clusters: result.clusters.map(cluster => Object.freeze({
+        ...cluster,
+        decisions: cluster.decisions.map(decision => Object.freeze({ ...decision })),
+        openQuestions: [...cluster.openQuestions],
+        segments: [...cluster.segments],
+        generations: [...cluster.generations],
+      })),
+      edges: result.edges.map(edge => Object.freeze({ ...edge })),
+      narrative: result.narrative,
+      includeSuperseded: result.includeSuperseded,
+      degraded: [...result.degraded],
     })
   }
 

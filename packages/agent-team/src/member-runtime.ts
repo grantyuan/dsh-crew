@@ -56,6 +56,7 @@ export const AGENT_TEAM_TOOL_NAMES = Object.freeze([
   'context_timeline',
   'context_interrupt',
   'context_recall',
+  'context_review',
 ] as const)
 
 /**

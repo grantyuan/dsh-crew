@@ -11,9 +11,13 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { CONTEXT_SCHEMA_VERSION, openContextDatabase, type ContextFtsCapabilities } from './schema.ts'
 import type {
+  ContextCommitmentInput,
+  ContextCommitmentRecord,
+  ContextDigest,
   ContextEdgeInput,
   ContextEdgeKind,
   ContextEdgeRecord,
+  ContextEpochRecord,
   ContextFacet,
   ContextGraphHit,
   ContextImportance,
@@ -23,6 +27,9 @@ import type {
   ContextNodeRecord,
   ContextNodeStatus,
   ContextOutboxRow,
+  ContextPendingCommitment,
+  ContextSegmentInput,
+  ContextSegmentRecord,
   ContextTermKind,
   ContextTermSource,
   ContextTimeGranularity,
@@ -155,6 +162,53 @@ interface GraphRow {
   readonly ref: string
   readonly depth: number
   readonly weight: number
+}
+
+interface SegmentRow {
+  readonly segment_id: string
+  readonly member_id: string
+  readonly session_id: string
+  readonly level: string
+  readonly kind: string
+  readonly label: string
+  readonly from_seq: number
+  readonly to_seq: number
+  readonly frontier_seq: number
+  readonly digest_json: string
+  readonly digest_hash: string
+  readonly status: string
+  readonly valid_from: string
+  readonly valid_to: string | null
+  readonly created_at: string
+  readonly updated_at: string
+}
+
+interface EpochRow {
+  readonly member_id: string
+  readonly session_id: string
+  readonly frontier_seq: number
+  readonly pending_json: string | null
+  readonly pending_hash: string | null
+  readonly pending_from_seq: number | null
+  readonly pending_to_seq: number | null
+  readonly pending_at: string | null
+  readonly updated_at: string
+}
+
+interface CommitmentRow {
+  readonly commitment_id: string
+  readonly member_id: string
+  readonly session_id: string
+  readonly segment_id: string
+  readonly kind: string
+  readonly text: string
+  readonly quote: string
+  readonly quote_hash: string
+  readonly ref: string
+  readonly status: string
+  readonly valid_from: string
+  readonly valid_to: string | null
+  readonly created_at: string
 }
 
 interface TermRow {
@@ -647,6 +701,189 @@ export class ContextStore {
     return row === undefined ? undefined : this.toStoredUnit(row)
   }
 
+  /** Read the compaction frontier and any pre-generated digest. */
+  getEpoch(memberId: string, sessionId: string): ContextEpochRecord {
+    const row = this.statement('SELECT * FROM context_epoch WHERE member_id = ? AND session_id = ?')
+      .get(memberId, sessionId) as EpochRow | undefined
+    return row === undefined
+      ? { memberId, sessionId, frontierSeq: 0, updatedAt: new Date(0).toISOString() }
+      : toStoredEpoch(row)
+  }
+
+  /** Store the pre-generated digest; the commit point may reuse it without a model call. */
+  savePendingEpoch(input: {
+    readonly memberId: string
+    readonly sessionId: string
+    readonly digest: ContextDigest
+    readonly commitments: readonly ContextPendingCommitment[]
+    readonly hash: string
+    readonly fromSeq: number
+    readonly toSeq: number
+    readonly now?: Date
+  }): ContextEpochRecord {
+    const now = input.now ?? new Date()
+    const at = now.toISOString()
+    // A pending digest never advances the committed frontier; only commitSegment does.
+    // A fresh row therefore starts at zero, and the conflict path leaves it untouched.
+    this.statement(`INSERT INTO context_epoch (
+      member_id, session_id, frontier_seq, pending_json, pending_hash,
+      pending_from_seq, pending_to_seq, pending_at, updated_at
+    ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(member_id, session_id) DO UPDATE SET
+      pending_json = excluded.pending_json,
+      pending_hash = excluded.pending_hash,
+      pending_from_seq = excluded.pending_from_seq,
+      pending_to_seq = excluded.pending_to_seq,
+      pending_at = excluded.pending_at,
+      updated_at = excluded.updated_at`).run(
+      input.memberId,
+      input.sessionId,
+      JSON.stringify({ digest: input.digest, commitments: input.commitments }),
+      input.hash,
+      input.fromSeq,
+      input.toSeq,
+      at,
+      at,
+    )
+    return this.getEpoch(input.memberId, input.sessionId)
+  }
+
+  /** Discard a stale pending digest after the frontier moved or the range changed. */
+  clearPendingEpoch(memberId: string, sessionId: string, now = new Date()): void {
+    this.statement(`UPDATE context_epoch SET pending_json = NULL, pending_hash = NULL,
+      pending_from_seq = NULL, pending_to_seq = NULL, pending_at = NULL, updated_at = ?
+      WHERE member_id = ? AND session_id = ?`).run(now.toISOString(), memberId, sessionId)
+  }
+
+  /**
+   * Commit one collapsed window: cache the digest, record its exact-quote
+   * commitments, advance the frontier, and clear the consumed pending digest.
+   */
+  commitSegment(input: ContextSegmentInput, commitments: readonly ContextCommitmentInput[] = []): ContextSegmentRecord {
+    const now = input.now ?? new Date()
+    const at = now.toISOString()
+    const segmentId = `seg:${input.sessionId}:${input.fromSeq}-${input.toSeq}`
+    this.transaction(() => {
+      this.statement(`INSERT INTO context_segment (
+        segment_id, member_id, session_id, level, kind, label,
+        from_seq, to_seq, frontier_seq, digest_json, digest_hash,
+        status, valid_from, valid_to, created_at, updated_at
+      ) VALUES (?, ?, ?, 'L2', 'summary', ?, ?, ?, ?, ?, ?, 'current', ?, ?, ?, ?)
+      ON CONFLICT(segment_id) DO UPDATE SET
+        label = excluded.label,
+        frontier_seq = excluded.frontier_seq,
+        digest_json = excluded.digest_json,
+        digest_hash = excluded.digest_hash,
+        valid_from = excluded.valid_from,
+        valid_to = excluded.valid_to,
+        updated_at = excluded.updated_at`).run(
+        segmentId,
+        input.memberId,
+        input.sessionId,
+        input.label,
+        input.fromSeq,
+        input.toSeq,
+        input.frontierSeq,
+        JSON.stringify(input.digest),
+        input.digestHash,
+        input.validFrom,
+        input.validTo ?? null,
+        at,
+        at,
+      )
+      this.statement('DELETE FROM context_commitment WHERE segment_id = ?').run(segmentId)
+      for (const commitment of commitments) {
+        this.statement(`INSERT INTO context_commitment (
+          commitment_id, member_id, session_id, segment_id, kind, text, quote,
+          quote_hash, ref, status, valid_from, valid_to, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          commitmentId(segmentId, commitment.kind, commitment.ref, commitment.text),
+          commitment.memberId,
+          commitment.sessionId,
+          segmentId,
+          commitment.kind,
+          commitment.text,
+          commitment.quote,
+          commitment.quoteHash,
+          commitment.ref,
+          commitment.status ?? 'current',
+          commitment.validFrom,
+          null,
+          at,
+        )
+      }
+      this.statement(`INSERT INTO context_epoch (
+        member_id, session_id, frontier_seq, updated_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(member_id, session_id) DO UPDATE SET
+        frontier_seq = MAX(context_epoch.frontier_seq, excluded.frontier_seq),
+        pending_json = NULL, pending_hash = NULL, pending_from_seq = NULL,
+        pending_to_seq = NULL, pending_at = NULL, updated_at = excluded.updated_at`).run(
+        input.memberId,
+        input.sessionId,
+        input.frontierSeq,
+        at,
+      )
+    })
+    const segment = this.getSegment(segmentId)
+    if (segment === undefined) throw new Error(`context segment "${segmentId}" disappeared after commit`)
+    return segment
+  }
+
+  getSegment(segmentId: string): ContextSegmentRecord | undefined {
+    const row = this.statement('SELECT * FROM context_segment WHERE segment_id = ?').get(segmentId) as SegmentRow | undefined
+    return row === undefined ? undefined : toStoredSegment(row)
+  }
+
+  /** Commit-point read cache: the segment whose window contains `seq`. */
+  segmentForSeq(memberId: string, sessionId: string, seq: number): ContextSegmentRecord | undefined {
+    const row = this.statement(`SELECT * FROM context_segment
+      WHERE member_id = ? AND session_id = ? AND from_seq <= ? AND to_seq >= ? AND status = 'current'
+      ORDER BY to_seq DESC LIMIT 1`).get(memberId, sessionId, seq, seq) as SegmentRow | undefined
+    return row === undefined ? undefined : toStoredSegment(row)
+  }
+
+  listSegments(memberId: string, sessionId: string): ContextSegmentRecord[] {
+    const rows = this.statement(`SELECT * FROM context_segment
+      WHERE member_id = ? AND session_id = ? ORDER BY from_seq ASC`).all(memberId, sessionId) as unknown as SegmentRow[]
+    return rows.map(toStoredSegment)
+  }
+
+  listCommitments(segmentId: string): ContextCommitmentRecord[] {
+    const rows = this.statement('SELECT * FROM context_commitment WHERE segment_id = ? ORDER BY kind, created_at, commitment_id')
+      .all(segmentId) as unknown as CommitmentRow[]
+    return rows.map(toStoredCommitment)
+  }
+
+  /** Units of one Session in ascending seq order, optionally bounded. */
+  listUnits(memberId: string, sessionId: string, options: { fromSeq?: number; toSeq?: number } = {}): StoredContextUnit[] {
+    const clauses = ['member_id = ?', 'session_id = ?']
+    const values: (string | number)[] = [memberId, sessionId]
+    if (options.fromSeq !== undefined) {
+      clauses.push('seq >= ?')
+      values.push(options.fromSeq)
+    }
+    if (options.toSeq !== undefined) {
+      clauses.push('seq <= ?')
+      values.push(options.toSeq)
+    }
+    const rows = this.statement(`SELECT * FROM unit WHERE ${clauses.join(' AND ')} ORDER BY seq ASC`)
+      .all(...values) as unknown as UnitRow[]
+    return rows.map(row => this.toStoredUnit(row))
+  }
+
+  /** Live edges whose two endpoints are in the supplied node set. */
+  edgesAmong(memberId: string, nodeIds: readonly string[]): ContextEdgeRecord[] {
+    const unique = [...new Set(nodeIds)]
+    if (unique.length === 0) return []
+    const placeholders = unique.map(() => '?').join(', ')
+    const rows = this.statement(`SELECT * FROM memory_edge
+      WHERE member_id = ? AND valid_to IS NULL
+        AND src_id IN (${placeholders}) AND dst_id IN (${placeholders})
+      ORDER BY kind, src_id, dst_id`).all(memberId, ...unique, ...unique) as unknown as EdgeRow[]
+    return rows.map(toStoredEdge)
+  }
+
   /** Every keyword attached to one unit. */
   listKeywords(unitId: string): ContextKeyword[] {
     const rows = this.statement(
@@ -953,4 +1190,100 @@ function toStoredEdge(row: EdgeRow): ContextEdgeRecord {
     ...(row.valid_to === null ? {} : { validTo: row.valid_to }),
     createdAt: row.created_at,
   }
+}
+
+function parseDigest(json: string): ContextDigest {
+  const parsed = JSON.parse(json) as Partial<ContextDigest>
+  return {
+    summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    decisions: Array.isArray(parsed.decisions) ? parsed.decisions.filter((item): item is string => typeof item === 'string') : [],
+    commitments: Array.isArray(parsed.commitments) ? parsed.commitments.filter((item): item is string => typeof item === 'string') : [],
+    openLoops: Array.isArray(parsed.openLoops) ? parsed.openLoops.filter((item): item is string => typeof item === 'string') : [],
+  }
+}
+
+function parsePending(json: string): { digest: ContextDigest; commitments: ContextPendingCommitment[] } {
+  const parsed = JSON.parse(json) as { digest?: unknown; commitments?: unknown }
+  const digest = parseDigest(JSON.stringify(parsed.digest ?? {}))
+  const commitments = Array.isArray(parsed.commitments)
+    ? parsed.commitments.filter((item): item is ContextPendingCommitment => {
+        if (item === null || typeof item !== 'object') return false
+        const candidate = item as Partial<ContextPendingCommitment>
+        return (candidate.kind === 'decision' || candidate.kind === 'commitment')
+          && typeof candidate.text === 'string'
+          && typeof candidate.quote === 'string'
+          && typeof candidate.quoteHash === 'string'
+          && typeof candidate.ref === 'string'
+      })
+    : []
+  return { digest, commitments }
+}
+
+function toStoredEpoch(row: EpochRow): ContextEpochRecord {
+  const pending = row.pending_json === null || row.pending_hash === null
+    || row.pending_from_seq === null || row.pending_to_seq === null || row.pending_at === null
+    ? undefined
+    : {
+        ...parsePending(row.pending_json),
+        hash: row.pending_hash,
+        fromSeq: row.pending_from_seq,
+        toSeq: row.pending_to_seq,
+        preparedAt: row.pending_at,
+      }
+  return {
+    memberId: row.member_id,
+    sessionId: row.session_id,
+    frontierSeq: row.frontier_seq,
+    ...(pending === undefined ? {} : { pending }),
+    updatedAt: row.updated_at,
+  }
+}
+
+function toStoredSegment(row: SegmentRow): ContextSegmentRecord {
+  return {
+    segmentId: row.segment_id,
+    memberId: row.member_id,
+    sessionId: row.session_id,
+    level: row.level as 'L2',
+    kind: row.kind as 'summary',
+    label: row.label,
+    fromSeq: row.from_seq,
+    toSeq: row.to_seq,
+    frontierSeq: row.frontier_seq,
+    digest: parseDigest(row.digest_json),
+    digestHash: row.digest_hash,
+    status: row.status as ContextNodeStatus,
+    validFrom: row.valid_from,
+    ...(row.valid_to === null ? {} : { validTo: row.valid_to }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function toStoredCommitment(row: CommitmentRow): ContextCommitmentRecord {
+  return {
+    commitmentId: row.commitment_id,
+    memberId: row.member_id,
+    sessionId: row.session_id,
+    segmentId: row.segment_id,
+    kind: row.kind as 'decision' | 'commitment',
+    text: row.text,
+    quote: row.quote,
+    quoteHash: row.quote_hash,
+    ref: row.ref,
+    status: row.status as ContextNodeStatus,
+    validFrom: row.valid_from,
+    ...(row.valid_to === null ? {} : { validTo: row.valid_to }),
+    createdAt: row.created_at,
+  }
+}
+
+/** Deterministic id for one exact-quote commitment. */
+export function commitmentId(segmentId: string, kind: string, ref: string, text: string): string {
+  let hash = 0
+  const input = `${segmentId}\u0000${kind}\u0000${ref}\u0000${text}`
+  for (let index = 0; index < input.length; index += 1) {
+    hash = Math.imul(hash ^ input.charCodeAt(index), 0x01000193)
+  }
+  return `cm:${(hash >>> 0).toString(36)}:${input.length}`
 }

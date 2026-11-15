@@ -396,6 +396,92 @@ const contextRecall = defineTool({
 
 const RECALL_MODES = new Set(['auto', 'exact', 'lexical', 'facet', 'vector', 'graph'])
 
+/**
+ * Read-only "what was decided and what changed" view. It walks the context
+ * graph from a topic or a known ref, groups decisions by topic, and keeps the
+ * supersession history by default because that history is the question.
+ */
+const contextReview = defineTool({
+  name: 'context_review',
+  description: 'Review your own earlier decisions, commitments, and open questions on a topic, together with the graph edges that connect them and where a later unit replaced an earlier one. Use it before re-litigating a decision or when asked "what did we decide and why did it change"; superseded history is included by default, so the output can show the old value, its validity window, and the ref that replaced it. Read-only over the derived context index; Team facts stay in team_view/team_thread. `generations` is reserved for L3 summaries and is empty until that layer exists.',
+  parameters: {
+    topic: { type: 'string', description: 'Topic or distinctive phrase to review. Omit when using `around`.' },
+    around: { type: 'string', description: 'A context unit ref to review around, as returned by context_recall.' },
+    includeSuperseded: { type: 'boolean', description: 'Include superseded decisions (default true). Set false for the current picture only.' },
+    depth: { type: 'number', description: 'Graph hops to expand from the seeds: 1 or 2 (default 2).' },
+  },
+  output: {
+    schema: { type: 'object', additionalProperties: false, properties: {
+      clusters: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        topic: { type: 'string', required: true },
+        decisions: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          ref: { type: 'string', required: true },
+          text: { type: 'string', required: true },
+          status: { type: 'string', required: true },
+          validFrom: { type: 'string', required: true },
+          validTo: { type: 'string' },
+          supersededBy: { type: 'string' },
+        } } },
+        openQuestions: { type: 'array', required: true, items: { type: 'string' } },
+        segments: { type: 'array', required: true, items: { type: 'string' } },
+        generations: { type: 'array', required: true, items: { type: 'string' } },
+      } } },
+      edges: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        from: { type: 'string', required: true },
+        to: { type: 'string', required: true },
+        kind: { type: 'string', required: true },
+        validFrom: { type: 'string', required: true },
+        validTo: { type: 'string' },
+      } } },
+      narrative: { type: 'string', required: true },
+      includeSuperseded: { type: 'boolean', required: true },
+      degraded: { type: 'array', required: true, items: { type: 'string' } },
+    } },
+    render: (_args, value) => {
+      const lines = [value.narrative]
+      for (const cluster of value.clusters) {
+        lines.push(`Topic: ${cluster.topic}`)
+        for (const decision of cluster.decisions) {
+          const replaced = decision.supersededBy === undefined ? '' : ` by ${decision.supersededBy}`
+          const validity = decision.validTo === undefined ? '' : `, valid to ${decision.validTo}`
+          lines.push(`- ${decision.status}${replaced} · ${decision.ref} · from ${decision.validFrom}${validity}\n  ${decision.text}`)
+        }
+        for (const question of cluster.openQuestions) lines.push(`- open: ${question}`)
+        if (cluster.segments.length > 0) lines.push(`- summaries: ${cluster.segments.join(', ')}`)
+      }
+      if (value.edges.length > 0) lines.push(`Edges: ${value.edges.map(edge => `${edge.from} -${edge.kind}-> ${edge.to}`).join('; ')}`)
+      if (value.degraded.length > 0) lines.push(`Degraded: ${value.degraded.join(', ')}.`)
+      return [{ type: 'text', text: lines.join('\n') }]
+    },
+  },
+  async execute(args, exec) {
+    const agent = agentOf(exec)
+    const topic = typeof args.topic === 'string' && args.topic.trim() !== '' ? args.topic.trim() : undefined
+    const around = typeof args.around === 'string' && args.around.trim() !== '' ? args.around.trim() : undefined
+    if (topic === undefined && around === undefined) throw new Error('context_review requires topic or around')
+    const depth = args.depth === 1 ? 1 : 2
+    const outcome = await service(agent).contextReviewForAgent(agent, {
+      ...(topic === undefined ? {} : { topic }),
+      ...(around === undefined ? {} : { around }),
+      ...(args.includeSuperseded === false ? { includeSuperseded: false } : {}),
+      depth,
+    })
+    return {
+      clusters: outcome.clusters.map(cluster => ({
+        ...cluster,
+        decisions: cluster.decisions.map(decision => ({ ...decision })),
+        openQuestions: [...cluster.openQuestions],
+        segments: [...cluster.segments],
+        generations: [...cluster.generations],
+      })),
+      edges: outcome.edges.map(edge => ({ ...edge })),
+      narrative: outcome.narrative,
+      includeSuperseded: outcome.includeSuperseded,
+      degraded: [...outcome.degraded],
+    }
+  },
+})
+
 /** The tool output contract carries mutable plain arrays across the Host seam. */
 interface RecallItemView {
   readonly ref: string
@@ -463,12 +549,13 @@ function toInterruptViewItem(item: AgentTeamInterruptView): InterruptViewItem {
 }
 
 export function registerContextTools(ctx: { readonly tools: { register(tool: unknown): void } }): void {
-  // The engine's two, then the Team's own timeline, interrupt stack, and recall:
-  // one registration each, and the roster the Host validates against stays the
-  // same five names.
+  // The engine's two, then the Team's own timeline, interrupt stack, recall,
+  // and review: one registration each, and the roster the Host validates
+  // against stays the same six names.
   ctx.tools.register(engineTools.rollover)
   ctx.tools.register(engineTools.checkpoint)
   ctx.tools.register(contextTimeline)
   ctx.tools.register(contextInterrupt)
   ctx.tools.register(contextRecall)
+  ctx.tools.register(contextReview)
 }

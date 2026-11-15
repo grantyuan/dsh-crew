@@ -83,12 +83,12 @@ describe('ContextStore unit writes', () => {
   it('keeps the WAL journal and schema version on a file database', () => {
     const path = tempDatabase()
     const store = openStore(path)
-    expect(store.capabilities).toMatchObject({ word: true, trigram: true, schemaVersion: 3 })
+    expect(store.capabilities).toMatchObject({ word: true, trigram: true, schemaVersion: 4 })
 
     const check = new DatabaseSync(path)
     try {
       expect(check.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 3 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
     } finally {
       check.close()
     }
@@ -101,7 +101,7 @@ describe('ContextStore unit writes', () => {
     legacy.close()
 
     const store = openStore(path)
-    expect(store.capabilities.schemaVersion).toBe(3)
+    expect(store.capabilities.schemaVersion).toBe(4)
     expect(store.pendingVectorUnits(10)).toEqual([])
   })
 
@@ -112,7 +112,7 @@ describe('ContextStore unit writes', () => {
     legacy.close()
 
     const store = openStore(path)
-    expect(store.capabilities.schemaVersion).toBe(3)
+    expect(store.capabilities.schemaVersion).toBe(4)
     expect(store.listNodes('m1')).toEqual([])
 
     const check = new DatabaseSync(path)
@@ -120,6 +120,26 @@ describe('ContextStore unit writes', () => {
       const tables = check.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('memory_node', 'memory_edge') ORDER BY name")
         .all() as unknown as { name: string }[]
       expect(tables.map(table => table.name)).toEqual(['memory_edge', 'memory_node'])
+    } finally {
+      check.close()
+    }
+  })
+
+  it('migrates a version-3 database by adding compaction tables', () => {
+    const path = tempDatabase()
+    const legacy = new DatabaseSync(path)
+    legacy.exec('PRAGMA user_version = 3')
+    legacy.close()
+
+    const store = openStore(path)
+    expect(store.capabilities.schemaVersion).toBe(4)
+    expect(store.getEpoch('m1', 's1')).toMatchObject({ frontierSeq: 0 })
+
+    const check = new DatabaseSync(path)
+    try {
+      const tables = check.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'context_%' ORDER BY name")
+        .all() as unknown as { name: string }[]
+      expect(tables.map(table => table.name)).toEqual(['context_commitment', 'context_epoch', 'context_segment'])
     } finally {
       check.close()
     }

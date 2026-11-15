@@ -34,6 +34,10 @@
 
 **D16 落地（P1.3）**：每个 unit 写入时建 L1 节点（`mn:<unit-ref>`），字段含 `level` / `status` / `confidence` / `validFrom` / `validTo` / `supersededBy`；`supersedeUnit()` 把旧节点标 `superseded`、写 `validTo` 与 `supersededBy`，并插入 `supersedes` 边。召回融合后读取状态：默认剔除 `superseded`/`retired`，`includeSuperseded=true` 才返回并降权（`superseded` ×0.25、`retired` ×0.1），`unverified` ×0.7；若取代目标也在候选集内，旧版本去重。返回项带 `status`（`active`/`superseded`/`expired`/`unverified`）、`supersededBy` 与 `validTo`。
 
+**D5/D6/D12/D14 落地（P1.4）**：压缩拆成两个阶段，且阈值原样保留（8000 token 窗口、10 turns、末 5 条分析、1500 token 尾、`S×N > 2R`、摘要 ≤1200、输入 ≤6000）。`prepareEpoch()` 只做后台预生成，把 digest + 逐字 commitments + sha256 作为 pending 写入 `context_epoch`，不推进 frontier；`commitPreparedEpoch()` 是唯一提交点，不调用模型，校验 pending 后写 `context_segment`/`context_commitment` 并推进 frontier；hash 或窗口失效即清 pending（`stale-pending`）。schema 升到 v4，新增三张表并提供 v3→v4 迁移。commitment 的 `quote` 必须是来源 unit 原文子串，否则丢弃。`AssistantCompactionEngine` 仅覆写 `summarize()`：优先消费预生成摘要（`prepared`/`epoch-cache`），否则调 assistant 角色，失败回退 Basic。`context_review` 作为复盘工具落地：从 topic/`around` 出发走图，默认包含被取代历史，输出 clusters/decisions/openQuestions/segments/edges/narrative/degraded；`generations` 是 L3 占位。
+
+**P1.4 占位与依赖**：自动预生成的 idle/pre-step 调度、真实 Session 的 unit intake、preset `/compact` 的 Assistant 引擎替换、L3 图内汇总均未在本轮接线；当前通过 `ContextService.prepareCompaction/commitCompaction` API 与单测验证，待后续票接入。
+
 ## 完整推荐组合
 
 ```text

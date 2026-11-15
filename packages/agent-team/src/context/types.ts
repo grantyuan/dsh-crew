@@ -240,3 +240,136 @@ export interface ContextUnitStatus {
   readonly supersededByRef?: string
   readonly validTo?: string
 }
+
+/** A committed L1 summary of one frontier window. */
+export interface ContextDigest {
+  readonly summary: string
+  readonly decisions: readonly string[]
+  readonly commitments: readonly string[]
+  readonly openLoops: readonly string[]
+}
+
+export interface ContextSegmentInput {
+  readonly memberId: string
+  readonly sessionId: string
+  readonly fromSeq: number
+  readonly toSeq: number
+  readonly frontierSeq: number
+  readonly digest: ContextDigest
+  readonly digestHash: string
+  readonly label: string
+  readonly validFrom: string
+  readonly validTo?: string
+  readonly now?: Date
+}
+
+export interface ContextSegmentRecord extends ContextSegmentInput {
+  readonly segmentId: string
+  readonly level: 'L2'
+  readonly kind: 'summary'
+  readonly status: ContextNodeStatus
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export interface ContextPendingCommitment {
+  readonly kind: 'decision' | 'commitment'
+  readonly text: string
+  readonly quote: string
+  readonly quoteHash: string
+  readonly ref: string
+}
+
+export interface ContextEpochPending {
+  readonly digest: ContextDigest
+  readonly commitments: readonly ContextPendingCommitment[]
+  readonly hash: string
+  readonly fromSeq: number
+  readonly toSeq: number
+  readonly preparedAt: string
+}
+
+export interface ContextEpochRecord {
+  readonly memberId: string
+  readonly sessionId: string
+  readonly frontierSeq: number
+  readonly pending?: ContextEpochPending
+  readonly updatedAt: string
+}
+
+export interface ContextCommitmentInput {
+  readonly memberId: string
+  readonly sessionId: string
+  readonly segmentId: string
+  readonly kind: 'decision' | 'commitment'
+  readonly text: string
+  readonly quote: string
+  readonly quoteHash: string
+  readonly ref: string
+  readonly status?: ContextNodeStatus
+  readonly validFrom: string
+  readonly now?: Date
+}
+
+export interface ContextCommitmentRecord extends Omit<ContextCommitmentInput, 'now'> {
+  readonly commitmentId: string
+  readonly status: ContextNodeStatus
+  readonly validTo?: string
+  readonly createdAt: string
+}
+
+/** One reachable edge rendered for review. */
+export interface ContextReviewEdge {
+  readonly from: string
+  readonly to: string
+  readonly kind: ContextEdgeKind
+  readonly validFrom: string
+  readonly validTo?: string
+}
+
+export interface ContextReviewDecision {
+  readonly ref: string
+  readonly text: string
+  readonly status: 'active' | 'superseded' | 'expired' | 'unverified'
+  readonly validFrom: string
+  readonly validTo?: string
+  readonly supersededBy?: string
+}
+
+export interface ContextReviewCluster {
+  readonly topic: string
+  readonly decisions: readonly ContextReviewDecision[]
+  readonly openQuestions: readonly string[]
+  readonly segments: readonly string[]
+  readonly generations: readonly string[]
+}
+
+export interface ContextReviewRequest {
+  readonly topic?: string
+  readonly around?: string
+  readonly includeSuperseded?: boolean
+  readonly depth?: 1 | 2
+}
+
+export interface ContextReviewResult {
+  readonly clusters: readonly ContextReviewCluster[]
+  readonly edges: readonly ContextReviewEdge[]
+  readonly narrative: string
+  readonly includeSuperseded: boolean
+  readonly degraded: readonly string[]
+}
+
+/** Planning verdict for one compaction epoch. */
+export interface ContextCompactionPlan {
+  readonly fromSeq: number
+  readonly toSeq: number
+  readonly unitCount: number
+  readonly windowTokens: number
+  readonly retainedTokens: number
+  readonly expectedRemainingRequests: number
+  readonly savingsTokens: number
+}
+
+export type ContextCompactionPlanOutcome =
+  | { readonly ok: true; readonly plan: ContextCompactionPlan }
+  | { readonly ok: false; readonly reason: string }

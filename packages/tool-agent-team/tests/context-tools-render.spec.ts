@@ -343,4 +343,43 @@ describe('context tools render the model-facing decision surface', () => {
     expect(tools.get('context_recall')!.description).toContain('team_view/team_thread/team_inbox authority')
     expect(tools.get('context_recall')!.description).toContain('never a checkpoint ref')
   })
+
+  it('context_review keeps the supersession history and its replacement ref visible', () => {
+    const tools = contextTools()
+    expect(tools.has('context_review')).toBe(true)
+    expect([...AGENT_TEAM_TOOL_NAMES]).toContain('context_review')
+    const text = renderText(tools.get('context_review')!, { topic: 'embedding size' }, {
+      clusters: [{
+        topic: 'embedding size',
+        decisions: [
+          {
+            ref: 'cu:s1:1', text: 'Embedding size is 1024', status: 'superseded',
+            validFrom: '2026-11-14T06:00:00.000Z', validTo: '2026-11-15T09:00:00.000Z', supersededBy: 'cu:s1:3',
+          },
+          {
+            ref: 'cu:s1:3', text: 'Embedding size is 768', status: 'active',
+            validFrom: '2026-11-15T09:00:00.000Z',
+          },
+        ],
+        openQuestions: ['Confirm the quantisation profile?'],
+        segments: ['seg:s1:1-11'],
+        generations: [],
+      }],
+      edges: [{ from: 'cu:s1:1', to: 'cu:s1:3', kind: 'supersedes', validFrom: '2026-11-15T09:00:00.000Z' }],
+      narrative: 'Reviewed 2 unit(s) across 1 topic cluster(s).',
+      includeSuperseded: true,
+      degraded: [],
+    })
+    // The old value, its validity window, and the replacing ref are the whole
+    // point of a review; dropping any of them hides why the decision changed.
+    expect(text).toContain('Embedding size is 1024')
+    expect(text).toContain('superseded by cu:s1:3')
+    expect(text).toContain('valid to 2026-11-15T09:00:00.000Z')
+    expect(text).toContain('Embedding size is 768')
+    expect(text).toContain('open: Confirm the quantisation profile?')
+    expect(text).toContain('summaries: seg:s1:1-11')
+    expect(text).toContain('cu:s1:1 -supersedes-> cu:s1:3')
+    expect(tools.get('context_review')!.description).toContain('superseded history is included by default')
+    expect(tools.get('context_review')!.description).toContain('`generations` is reserved for L3 summaries')
+  })
 })
