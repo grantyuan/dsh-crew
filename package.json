@@ -67,6 +67,9 @@
     "yaml": "^2.9.1",
     "zod": "4.6.6"
   },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  },
   "devDependencies": {
     "@deepseek-ai/dsh-storage-sqlite": "0.1.5-rc.2",
     "@testing-library/dom": "^10.4.1",

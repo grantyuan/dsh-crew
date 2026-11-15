@@ -37,6 +37,10 @@ import { createHumanUpdateChecker } from './human-update-check.ts'
 import { PressurePolicyCoordinator } from './pressure-policy.ts'
 import { CONTEXT_CONTINUITY_PROJECTION_KEY, readContextTimeline, type ContextProjectionConfig, type ContextProjectionState, type ContextTimelineItem, type ContextTimelineSource, type TransitionPlan } from '@wowyuarm/dsh-context-continuity'
 import { createTeamContextManagement, TEAM_CONTEXT_CODEC } from './context-continuity-host.ts'
+import { EmbeddingModelManager } from './context/embedding/model-manager.ts'
+import { LocalEmbeddingRuntime } from './context/embedding/runtime.ts'
+import { CONTEXT_MODEL_ROLES, contextRoleModelsFromSettings, contextRoleSettingKey, normalizeContextRoleEntry, resolveContextRoleRoute, validateContextRoleEntry, type ContextModelRole, type ContextRoleModels } from './context/role-models.ts'
+import { ContextRoleRuntime } from './context/role-runtime.ts'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
 import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, createTeamContextProjectionConfig, createTeamContextProjectionDefinition, foldTeamContextProjection, retainedTopicsThrough, TeamContextProjectionHost } from './context-projection.ts'
 import { AGENT_TEAM_HUMAN_HANDLE, AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamLedger, agentTeamAssistantActor, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
@@ -206,6 +210,12 @@ import type {
   AgentTeamSetHumanProfileResult,
   AgentTeamSetGatewayConfigRequest,
   AgentTeamSetGatewayConfigResult,
+  AgentTeamContextRoleConfig,
+  AgentTeamContextRoleConfigRequest,
+  AgentTeamContextRoleName,
+  AgentTeamContextRoleView,
+  AgentTeamRetryContextEmbeddingRequest,
+  AgentTeamSetContextRoleRequest,
   AgentTeamSetMemberStateRequest,
   AgentTeamStatus,
   AgentTeamTask,
@@ -615,6 +625,28 @@ export interface Config {
   externalApiEnabled: Volatile<boolean>
   externalApiPort: Volatile<number>
   externalApiToken: Volatile<string | undefined>
+  /**
+   * Functional context roles (see context/role-models.ts): flat volatile
+   * fields, one group per role. Empty endpoint/model means "not configured";
+   * each role is independent and the resolver applies the fallback chain.
+   * `apiKey` is a Host-local secret and is never returned to the Client.
+   */
+  contextRoleAssistantBaseURL: Volatile<string | undefined>
+  contextRoleAssistantModel: Volatile<string | undefined>
+  contextRoleAssistantApiKey: Volatile<string | undefined>
+  contextRoleAssistantEnabled: Volatile<boolean>
+  contextRoleEmbeddingBaseURL: Volatile<string | undefined>
+  contextRoleEmbeddingModel: Volatile<string | undefined>
+  contextRoleEmbeddingApiKey: Volatile<string | undefined>
+  contextRoleEmbeddingEnabled: Volatile<boolean>
+  contextRoleDecisionBaseURL: Volatile<string | undefined>
+  contextRoleDecisionModel: Volatile<string | undefined>
+  contextRoleDecisionApiKey: Volatile<string | undefined>
+  contextRoleDecisionEnabled: Volatile<boolean>
+  contextRoleExtractionBaseURL: Volatile<string | undefined>
+  contextRoleExtractionModel: Volatile<string | undefined>
+  contextRoleExtractionApiKey: Volatile<string | undefined>
+  contextRoleExtractionEnabled: Volatile<boolean>
 }
 
 /** Host owner of the single Agent Team in one dshHome. */
@@ -1046,6 +1078,12 @@ export default class AgentTeam extends TypertRemoteService {
   })
   /** The awaited Team context registration; its reader survives unregistration. */
   private contextProjectionHandle: ProjectionHandle<ContextProjectionState> | undefined
+  /** Built-in embedding model download manager; downloads never block activation. */
+  private readonly embeddingModel = new EmbeddingModelManager()
+  /** Local ONNX runtime over the built-in model; degrades when the optional dependency is absent. */
+  private readonly localEmbedding = new LocalEmbeddingRuntime({ manager: this.embeddingModel })
+  /** Functional role runtime, built on first use once the LLM service exists. */
+  private roleRuntime: ContextRoleRuntime | undefined
   private lifecycleTail: Promise<void> = Promise.resolve()
   private accepting = true
   /**
@@ -1465,6 +1503,8 @@ export default class AgentTeam extends TypertRemoteService {
       this.backgroundJobs.dispose()
       this.contextManagement.dispose()
       this.pressurePolicy.dispose()
+      this.roleRuntime?.dispose()
+      this.localEmbedding.dispose()
       if (this.attachmentGcTimer !== undefined) clearInterval(this.attachmentGcTimer)
       this.attachmentGcTimer = undefined
       this.emitChanged()
@@ -4412,6 +4452,161 @@ export default class AgentTeam extends TypertRemoteService {
     if (ops.length !== 0) await settings.mutate(HUMAN_PROFILE_SETTINGS_NAMESPACE, ops)
     await this.reconcileExternalApi()
     return this.gatewayConfigForClient()
+  }
+
+  /** The four role entries as read from the live Host Config. */
+  private contextRoleModels(): ContextRoleModels {
+    return contextRoleModelsFromSettings({
+      contextRoleAssistantBaseURL: this.config.contextRoleAssistantBaseURL.get(),
+      contextRoleAssistantModel: this.config.contextRoleAssistantModel.get(),
+      contextRoleAssistantApiKey: this.config.contextRoleAssistantApiKey.get(),
+      contextRoleAssistantEnabled: this.config.contextRoleAssistantEnabled.get(),
+      contextRoleEmbeddingBaseURL: this.config.contextRoleEmbeddingBaseURL.get(),
+      contextRoleEmbeddingModel: this.config.contextRoleEmbeddingModel.get(),
+      contextRoleEmbeddingApiKey: this.config.contextRoleEmbeddingApiKey.get(),
+      contextRoleEmbeddingEnabled: this.config.contextRoleEmbeddingEnabled.get(),
+      contextRoleDecisionBaseURL: this.config.contextRoleDecisionBaseURL.get(),
+      contextRoleDecisionModel: this.config.contextRoleDecisionModel.get(),
+      contextRoleDecisionApiKey: this.config.contextRoleDecisionApiKey.get(),
+      contextRoleDecisionEnabled: this.config.contextRoleDecisionEnabled.get(),
+      contextRoleExtractionBaseURL: this.config.contextRoleExtractionBaseURL.get(),
+      contextRoleExtractionModel: this.config.contextRoleExtractionModel.get(),
+      contextRoleExtractionApiKey: this.config.contextRoleExtractionApiKey.get(),
+      contextRoleExtractionEnabled: this.config.contextRoleExtractionEnabled.get(),
+    })
+  }
+
+  /** Build the role runtime on first use; the LLM service may not exist yet at construction. */
+  private contextRoleRuntimeOrUndefined(): ContextRoleRuntime | undefined {
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) return undefined
+    this.roleRuntime ??= new ContextRoleRuntime({
+      readRoles: () => this.contextRoleModels(),
+      llm,
+      localEmbedding: this.localEmbedding,
+    })
+    return this.roleRuntime
+  }
+
+  /**
+   * Start (or retry) the built-in embedding download when the role is enabled
+   * without a dedicated endpoint. Fire-and-forget: no main path ever awaits it,
+   * and a failure stays visible in the status view instead of throwing.
+   */
+  private startEmbeddingModelDownload(): void {
+    if (this.config.contextRoleEmbeddingEnabled.get() !== true) return
+    if ((this.config.contextRoleEmbeddingBaseURL.get() ?? '').trim() !== '') return
+    const state = this.embeddingModel.snapshot().state
+    if (state === 'ready' || state === 'downloading') return
+    void this.localEmbedding.prepare().catch(error => {
+      this.ctx.logger.warn(`agent-team: embedding model preparation failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /** The Team settings page's view of functional model roles. */
+  private contextRoleConfigView(): AgentTeamContextRoleConfig {
+    const models = this.contextRoleModels()
+    const main = this.ctx.agentDefaultModel.currentSelection()
+    const status = this.contextRoleRuntimeOrUndefined()?.status({ main })
+    const rows = new Map(status?.roles.map(row => [row.role, row]) ?? [])
+    const roles: AgentTeamContextRoleView[] = CONTEXT_MODEL_ROLES.map((role) => {
+      const entry = models[role]
+      const row = rows.get(role)
+      const route = row?.route ?? resolveContextRoleRoute({
+        role,
+        roles: models,
+        main,
+        embedding: { localReady: this.localEmbedding.available(), assistantEmbeddings: 'unknown' },
+      })
+      return {
+        role,
+        baseURL: entry.baseURL,
+        model: entry.model,
+        apiKeySet: entry.apiKey !== '',
+        enabled: entry.enabled,
+        timeoutMs: route.timeoutMs,
+        route: {
+          source: route.source,
+          transport: route.transport,
+          model: route.model,
+          promptProfile: route.promptProfile,
+          ...(route.reason === undefined ? {} : { reason: route.reason }),
+        },
+        circuit: row?.circuit ?? 'closed',
+        ...(row?.p50 === undefined ? {} : { p50: row.p50 }),
+        ...(row?.p95 === undefined ? {} : { p95: row.p95 }),
+        queueDepth: row?.queueDepth ?? 0,
+        ...(row?.lastError === undefined ? {} : { lastError: `${row.lastError.kind}: ${row.lastError.message}` }),
+      }
+    })
+    const local = this.localEmbedding.status()
+    const embeddingError = local.error ?? local.download.error
+    return Object.freeze({
+      roles: Object.freeze(roles),
+      embedding: Object.freeze({
+        modelId: local.modelId,
+        dimension: local.dimension,
+        state: local.state,
+        directory: local.download.directory,
+        downloadedBytes: local.download.downloadedBytes,
+        ...(local.download.totalBytes === undefined ? {} : { totalBytes: local.download.totalBytes }),
+        ...(embeddingError === undefined ? {} : { error: embeddingError }),
+      }),
+      mainModel: { provider: main.provider, model: main.model },
+    })
+  }
+
+  @Remote('contextRoleConfig')
+  contextRoleConfigForClient(_request: AgentTeamContextRoleConfigRequest): AgentTeamContextRoleConfig {
+    this.startEmbeddingModelDownload()
+    return this.contextRoleConfigView()
+  }
+
+  /**
+   * Overwrite one role's settings. The Host owns the write for the same reason
+   * as the gateway: the role entries are the Host row's own volatile Config,
+   * and the Host supplies the judgements the schema cannot make (URL shape,
+   * endpoint/model pairing). `apiKey: null` clears the stored secret; a blank
+   * string keeps it. The returned view is post-mutation and never includes a key.
+   */
+  @Remote('setContextRole')
+  async setContextRole(request: AgentTeamSetContextRoleRequest): Promise<AgentTeamContextRoleConfig> {
+    this.requireAccepting()
+    if (!CONTEXT_MODEL_ROLES.includes(request.role)) throw new Error(`unknown context role '${String(request.role)}'`)
+    const settings = this.ctx.get('settings')
+    if (settings === undefined) throw new Error('the settings service is unavailable')
+    const current = this.contextRoleModels()[request.role]
+    const next = normalizeContextRoleEntry({
+      baseURL: request.baseURL ?? current.baseURL,
+      model: request.model ?? current.model,
+      apiKey: request.apiKey === null ? '' : (request.apiKey ?? current.apiKey),
+      enabled: request.enabled ?? current.enabled,
+    })
+    const errors = validateContextRoleEntry(next)
+    if (errors.length !== 0) throw new Error(errors.join('; '))
+    const ops: SettingsPathOp[] = []
+    if (request.baseURL !== undefined) ops.push({ op: 'set', path: [contextRoleSettingKey(request.role, 'BaseURL')], value: next.baseURL })
+    if (request.model !== undefined) ops.push({ op: 'set', path: [contextRoleSettingKey(request.role, 'Model')], value: next.model })
+    if (request.apiKey === null) ops.push({ op: 'unset', path: [contextRoleSettingKey(request.role, 'ApiKey')] })
+    else if (request.apiKey !== undefined && request.apiKey.trim() !== '') {
+      ops.push({ op: 'set', path: [contextRoleSettingKey(request.role, 'ApiKey')], value: request.apiKey.trim() })
+    }
+    if (request.enabled !== undefined) ops.push({ op: 'set', path: [contextRoleSettingKey(request.role, 'Enabled')], value: request.enabled })
+    if (ops.length !== 0) await settings.mutate(HUMAN_PROFILE_SETTINGS_NAMESPACE, ops)
+    if (request.role === 'embedding' && request.enabled === true) this.startEmbeddingModelDownload()
+    return this.contextRoleConfigView()
+  }
+
+  /** Retry a failed built-in embedding download; returns the current view immediately. */
+  @Remote('retryContextEmbeddingModel')
+  retryContextEmbeddingModel(_request: AgentTeamRetryContextEmbeddingRequest): AgentTeamContextRoleConfig {
+    this.requireAccepting()
+    if ((this.config.contextRoleEmbeddingBaseURL.get() ?? '').trim() === '') {
+      void this.localEmbedding.prepare().catch(error => {
+        this.ctx.logger.warn(`agent-team: embedding model retry failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    return this.contextRoleConfigView()
   }
 
   /**

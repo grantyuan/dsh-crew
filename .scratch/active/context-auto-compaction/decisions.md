@@ -1,8 +1,8 @@
 # 决策表：S1 + D1–D17（一页版）
 
-- 状态：18 项待你裁定；已确认的 2 项（每 Member 一个助手模型；L2 后台预生成 + 提交点读缓存）不在本表。
-- 回一句「按推荐」即视为确认下表的全部推荐组合。
-- 所有阈值是验收目标，不是已测结果；数字出处见 [spec.md](spec.md) §14.2、§23。
+- 状态：架构决策（S1、D1–D17）按推荐执行；模型访问方式已改为「配置界面可插拔 + 回退链」，不再需要二选一裁定。
+- 四个功能角色 `assistant` / `embedding` / `decision` / `extraction` 全部可选；未配置不执行该角色，嵌入未配置时使用内置本地默认。
+- 所有阈值仍是验收目标，不是已测结果；数字出处见 [spec.md](spec.md) §14.2、§23。回退到主模型不改变阈值。
 
 ## 第一组：建议先定这四条（涉及外部依赖，或会改动既有约束）
 
@@ -47,37 +47,32 @@ D9=A  D10=C D11=A D12=A D13=B D14=C D15=A D16=A D17=C
 - `D10 A→C`、`D17 A→C`：多调 4B 不再算成本，允许它异步补下一轮；同步路径仍 0 模型调用。
 - `D13 A→B`：新增 `embedding` 职能角色，向量存 D9 的 SQLite 派生域，A 保留为降级。
 - `D2/D7/D11` 结论不变，但理由改为工作模型计账、Host 预算与精确率，不再以“省 4B token”为依据。
-- 新增 §26 职能模型注册表：`assistant` / `embedding` / `decision` / `extraction` 四类角色，Member × 角色独立配置；每角色独立探活、熔断、超时、并发与降级；全部不进 `agent/pre-step`，工作模型 p95 阈值不变。
+- 新增 §26 职能模型注册表：`assistant` / `embedding` / `decision` / `extraction` 四类角色，Host 全局角色配置；每角色独立探活、熔断、超时、并发与降级；全部不进 `agent/pre-step`，工作模型 p95 阈值不变。
 
-### 职能模型选型（spec §26.9–26.15；3.4 轮按 ≥8 GB 显存重选，不改变字母级推荐）
+### 功能模型：可插拔配置 + 回退链（取代原选型表）
 
-| 角色 | GPU 档（≥8 GB，默认） | CPU 档（回退） | 量化 / 许可 | 8 GB 显存 | 纯 CPU |
-| --- | --- | --- | --- | --- | --- |
-| `embedding` | `Qwen3-Embedding-0.6B`（596M，1024 维） | 同左 | int8 ONNX / Apache-2.0 / 2025-06-05 | int8 ≈0.6GB，轻松 | 约 50–200 条/s；最小回退 `bge-small-zh-v1.5`（24M，MIT） |
-| `decision` | `Qwen3.5-4B`（4.66B） | `Laya` multilingual（322M） | Q4_K_M / Apache-2.0；fp32 ONNX / Apache-2.0 | 4B 2.9GB + 8k KV ≈3.4–3.9GB；Laya ≈0.65GB | CPU 档 Laya 发布方实测 193–464 ms；4B CPU ≈29 s 不可用 |
-| `extraction` | `NuExtract3-4B`（4.66B） | `GLiNER2`（205M） | Q4 / Apache-2.0；int8 ONNX / Apache-2.0 | NuExtract3 2.9GB + 4k KV ≈3.2–3.6GB；GLiNER2 ≈0.2GB | 仅 GLiNER2 可用（10–100 ms/条）；NuExtract3 CPU ≈29 s |
-| `assistant` | 远程 `gemma-3-4b-it`（3.88B）；无远程时本地 `Qwen3.5-4B`（≤8k） | `Qwen3.5-2B`（2.27B，4k） | Q4_K_M / Gemma Terms；Apache-2.0 | 本地 4B 8k ≈3.4–3.9GB；40k KV ≈5.4GB，超 8GB | 4B ≈31 s（超 25 s）；Qwen3.5-2B ≈18 s 满足；本地 GPU 4B 可用 |
+不再要求用户在对话里二选一。每个角色在设置页独立填写 `baseURL` / `model` / `apiKey`（可选）/ `enabled`，全部可选；留空即不启用该角色（`embedding` 例外）。配置是 Host 全局 settings，Member 是否参与仍由既有 opt-in 策略决定。
 
-- **8 GB 的硬约束**：基础常驻（Laya + 嵌入 + GLiNER2）≈1.5GB，再加**一个** 4B 权重槽 ≈3.4–3.9GB，峰值 ≈5.0–5.5GB；**`Qwen3.5-4B` 与 `NuExtract3-4B` 不能同时常驻**（≈7.3GB + KV 超限），必须单槽 LRU（`decision > extraction`）；**40k 上下文放不下**，长摘要仍走远程。
-- **无字母级推荐变化**：`D10=C`、`D13=B`、`D17=C` 保持；`D9=A`（SQLite）保持，向量存其 `memory_vector` 表。
-- **CPU 档差异**：全局并发从 3 降为 **2**；`decision`（Laya）与 `extraction`（GLiNER2）各自单进程、串行执行（spec §26.11）。
-- **本轮变更（3.3 → 3.4，显存 4GB → 8GB）**：
-  - 决策：GPU 档默认由 `Laya` 改为 **`Qwen3.5-4B`**；Laya 保留为 CPU 档默认与 GPU 快速通道。
-  - 抽取：GPU 档默认由 `GLiNER2` 改为 **`NuExtract3-4B`**；GLiNER2 保留为 CPU 档默认与 schema 快路。
-  - 助手：GPU 档新增 **本地 `Qwen3.5-4B`（≤8k）** 作为无远程时的摘要回退；远程仍 `gemma-3-4b-it`，CPU 档仍 `Qwen3.5-2B`。
-  - 嵌入：**不变**（0.6B 仍是两档默认）。
-  - 新增 **spec §26.15**：逐角色写清在写入链/压缩链/读取链中的作用点。
-- **显式冲突与取舍**（不放宽任何 §14.2 阈值）：
-  - 两个 4B 不能同时常驻 → 单 4B 槽 + LRU；换入 1–3 s 必须在后台完成。
-  - 40k 上下文 + 8GB 放不下 → 长摘要继续远程，本地上限 8k。
-  - 4B 在 CPU 上 ≈29 s → CPU 档自动切 Laya/GLiNER2。
-  - CPU 嵌入约 50–200 条/s < 300 units/s → 300 units/s 只计词法/facet/图，向量另立 `vector_index_lag` p95 ≤60 s。
-  - 1024 维向量使暴力余弦更慢：10–15k 节点约 8–24 ms（仍 < 25/30/40 ms），超 2 万节点改 HNSW 或 MRL 截 512 维。
-- **数据性质**：只有远程 `gemma-3-4b-it` 的权重/上下文/decode 是本仓库实测（spec §1.3）；Laya/GLiNER2 的延迟与榜单分数是**发布方实测**；所有本地显存、tok/s、条/s、GPU 4B 生成耗时均为估算，P0 必须实测回填（spec §26.13）。
-- **Laya 确认结论**：「laya」= Convai Innovations 的 Laya（Apache-2.0，ModernBERT-large 421M / mmBERT-base 322M / typed-decisions 421M，arXiv:2510.01237），非 Layla Network App、非 `moophlo/layla:24B`；适配 `decision`，**不适配 `extraction`**（只回答预设选项，不生成 JSON）。
+**粒度变更**：早期草案写的是「每 Member × 每角色」。现改为 Host 全局共享，理由（共享基础设施、密钥不进 ledger、回退链已提供 Member 差异、嵌入索引几何必须统一）与影响范围见 spec §26.2.1；当前不保留 Member 级覆盖字段，避免双权威。
+
+| 角色 | 在上下文管理中的用途 | 专用模型（可选） | 回退链 | 三者都不可用时 |
+| --- | --- | --- | --- | --- |
+| `assistant` | L2 摘要、压缩、turn 后预生成 | 任意 OpenAI-compatible 或本地端点 | 专用 → Agent 主模型 | 回退 `BasicCompactionEngine` 既有摘要 |
+| `decision` | 新旧 unit 关系判定（none/update/refute） | 任意判定模型 | 专用 → `assistant` 端点 → Agent 主模型 | 规则判定：同主语 + 同槽位 + 更晚时间 |
+| `extraction` | facet/关键词异步补全 | 任意抽取模型 | 专用 → `assistant` 端点 → Agent 主模型 | 只用同步规则抽取 |
+| `embedding` | unit 与查询向量化 | 任意 OpenAI-compatible `/embeddings` | 专用 → 本地 granite int8 → `assistant` 兼容 embeddings → 词法 | 词法/精确/facet 检索 |
+
+- **提示词分开维护**：专用模型使用 `small-model` 提示词（短指令、单 JSON、字段白名单）；`assistant` 或主模型承担角色时使用 `general-model` 提示词（声明角色、输出契约、禁止对话化）。两套文本不共享长常量。
+- **嵌入内建默认**：`granite-embedding-97m-multilingual-r2` 官方 int8（384 维、约 98MB）；未配置时自动下载，下载/运行时/网络失败都降级词法，不阻塞主路径。
+- **阈值不放宽**：`assistant` 25s、`decision`/`extraction` 12s、`embedding` 5s；回退到主模型仍受原预算，超预算只记录并报告，不调整阈值。
+- **调用点**：见 spec §26.16。`agent/pre-step` 只读 DB 生成快照，不 await 任何模型；decision/extraction/assistant 的模型调用都在后台或压缩路径。
+- **建议默认值（不是必选项）**：P0 实测的 `Qwen3-4B-Instruct-2507 Q4`（中 0.967 / 英 0.950）与 `granite-embedding-97m-r2` int8（中 1.000 / 英 0.920）可作为“专用端点”的建议填写值，但不再要求用户确认。
+- **API key**：与 `externalApiToken` 同级存于 settings profile；Remote 只返回 `apiKeySet`，不回传明文或掩码，日志脱敏。
+- **历史选型材料**：spec §19–§26.15 保留为调研记录；其中“必须二选一”“待裁定”“P0 必须实测回填后才能进入 P1”的表述已被本节取代。
 
 ## 与验收门槛的绑定
 
 - 性能/并发不再单列决策项，而是**全部方案的硬门槛**：单轮增量 p95 ≤120 / 150 / 180 ms、压缩提交 p95 ≤80 / 100 / 120 ms、召回热 p95 ≤25 / 30 / 40 ms、冷 p95 ≤120 / 180 / 250 ms（100 / 500 / 1000 轮），CPU ≤0.4 / 0.5 / 0.6 核、RSS 增量 ≤256 / 512 / 768 MB；由 `npm run test:perf` 自动验证（spec §14.2）。
 - 任何选项若达不到上述门槛，都按 spec §13 的降级链退回本地，不因选型而放宽门槛。
+- 回退到 Agent 主模型时仍按原角色预算计时；超预算记为 `fallback-over-budget` 并报告，**不调整上述阈值**。
 - 向量写入不混入「索引写入吞吐」：该行只计词法/facet/图；`memory_vector` 单独按 `vector_index_lag` p95 ≤30 / 45 / 60 s（100 / 500 / 1000 轮）验收（spec §14.2、§26.12）。

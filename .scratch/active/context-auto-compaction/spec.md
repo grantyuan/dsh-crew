@@ -16,9 +16,9 @@
 6. **每条新消息先做主题提取 + 拓扑检索，再把 top-3 以特殊格式追加到消息尾部。** 同步阶段仍是本地确定性计算（词法 + facet 过滤 + 图遍历，毫秒级），发送前不调用模型；4B 只在后台为**下一轮**补全主题扩展、语义 facet 与实体别名，结果进缓存供下次读取（D10=C、D17=C）。注入块只在命中集合变化时追加，并声明“取代更早的召回快照”，避免逐轮线性膨胀。
 7. **冲突要落成“取代链”，不是删旧。** 新的返回信息/用户决策由小模型异步比对历史；冲突时把旧节点标 `superseded`，写入 `validTo` 与 `supersedes` 边，旧内容默认不再进入召回（D16），需要“为什么改”时用 `includeSuperseded` 显式查询。这是“相信哪个”的派生物判断，不改账本、不改原文。
 8. **权威关系固定为**：账本 = Team 事实唯一权威；Session 日志 = 对话原文唯一权威；`units/segments/graph/facet/staleness` = 可重建的派生物，删掉只会降低召回质量，不会改变任何事实或权限。
-9. **已确认 2 项、待确认 18 项**：已确认“每 Member 一个助手模型”与“后台预生成 + 提交点读缓存”，并扩展为 **Member × 职能角色**（§26）；S1 与 D1–D17 仍待裁定（§17、§25）。全部确认后才产出 tickets、进入 P0。
+9. **已确认 2 项、待确认 18 项**：已确认“每 Member 一个助手模型”与“后台预生成 + 提交点读缓存”，并扩展为 **Host 全局 × 职能角色**（§26；粒度变更见 §26.2.1）；S1 与 D1–D17 仍待裁定（§17、§25）。全部确认后才产出 tickets、进入 P0。
 10. **性能与并发是硬门槛。** §14.2 给出 100/500/1000 轮的增量、提交、召回（冷/热）、写入吞吐、并发、CPU/内存、错误/超时与降级阈值，并由 `npm run test:perf` 自动验证。smart-tsdb 只作为 D9=C 的可选本机 sidecar，须先过同一门槛；文档未回答的问题集中在 §7.2.1，不臆测其能力。
-11. **模型按角色配置，而不是只有一个助手。** §26 定义 `assistant` / `embedding` / `decision` / `extraction` 四类职能角色：每 Member × 每角色独立配置 provider/model/baseURL/超时/并发，未配置走全局默认或关闭；每个角色有独立探活、熔断与降级（嵌入→词法、决策→规则、抽取→规则、助手→不压缩）。因为有了专用嵌入角色，**D13 由纯词法（A）改为词法 + 向量（B）**；向量存 D9 的 SQLite 派生域，不引入第三个存储。所有角色都不进 `agent/pre-step` 同步路径。**选型按两档解析**（§26.9–26.13，2026-11-15 复核）：GPU 档（≥8 GB）决策 `Qwen3.5-4B`、抽取 `NuExtract3-4B`、嵌入 `Qwen3-Embedding-0.6B`、助手远程 `gemma-3-4b-it`（本地可退 `Qwen3.5-4B` 8k）；CPU 档决策 `Laya`、抽取 `GLiNER2`、助手 `Qwen3.5-2B`。**每个模型在流程中的作用点见 §26.15**：`extraction` 挂写入链、`decision` 挂陈旧判定、`assistant` 挂压缩链、`embedding` 挂读写两条链，同步段 0 模型调用。
+11. **模型按角色配置，而不是只有一个助手。** §26 定义 `assistant` / `embedding` / `decision` / `extraction` 四类职能角色：配置为 **Host 全局**、四角色各自独立的端点/模型/可选密钥/开关（详见 §26.2.1 的粒度变更），超时与并发仍按 `(Member, 角色)` 计；未配置时按专用 → assistant → 主模型的回退链，三者都不可得则关闭并走规则降级。每个角色有独立探活、熔断与降级（嵌入→词法、决策→规则、抽取→规则、助手→不压缩）。因为有了专用嵌入角色，**D13 由纯词法（A）改为词法 + 向量（B）**；向量存 D9 的 SQLite 派生域，不引入第三个存储。所有角色都不进 `agent/pre-step` 同步路径。**§26.9–26.13 只保留建议默认值，不再是选型裁决**：用户可填专用端点，也可完全留空。**每个模型在流程中的作用点见 §26.15**：`extraction` 挂写入链、`decision` 挂陈旧判定、`assistant` 挂压缩链、`embedding` 挂读写两条链，同步段 0 模型调用。
 12. **≥8 GB 显存是默认档，纯 CPU 是回退档，两者都是硬约束。** GPU 档常驻小模型（Laya + 嵌入 + GLiNER2）≈1.5 GB，再加**一个** 4B 权重槽（Qwen3.5-4B 或 NuExtract3-4B，Q4 2.9 GB + 8k KV）峰值 ≈5.0–5.5 GB，8 GB 内有余量；但**两个 4B 不能同时常驻**，必须单槽 LRU。40k 上下文仍放不下（KV ≈5.4 GB），长上下文摘要继续走远程。0.6B 嵌入在 CPU 上约 50–200 条/s，低于 §14.2 的 300 units/s 行写入口径，故向量写入单列 `vector_index_lag`（p95 ≤60 s），不混入该行、也不下调该行。
 
 ---
@@ -87,7 +87,7 @@
 | L3：跨会话语义关联图 + 回忆复盘工具 | `MemoryGraph` + `context_review`（PPR 风格加权遍历，无向量） | 否 |
 | 记忆及时持久化 | 小模型维护 `open-loops.md` / `done-log.md`，激活时注入，账本对账 | 否（尾部追加） |
 | 多维快速索引（时间/空间/主题/角色/主语） | `memory_facet` 一张表挂在既有节点/边上：时间/精确键用规则同步归一化，语义 facet 由 4B 异步补全；检索与关键词/图共用一次 RRF 合并 | 否（仅索引与查询参数） |
-| 职能模型按角色配置 | `assistant` / `embedding` / `decision` / `extraction` 四类角色，Member × 角色独立配置，缺省关闭或走全局默认；每角色独立熔断与降级 | 否 |
+| 职能模型按角色配置 | `assistant` / `embedding` / `decision` / `extraction` 四类角色，**Host 全局**独立配置（端点/模型/可选密钥/开关，留空即关闭）；未配置按专用 → assistant → 主模型回退；每角色独立熔断与降级 | 否 |
 | 嵌入向量召回 | `embedding` 角色异步生成向量，存 `agent_team_context` 的 `memory_vector`；与词法/图三路 RRF 合并 | 否（仅索引与查询） |
 
 ---
@@ -2271,32 +2271,53 @@ D14–D17 的三种选项与非实现者说明见 §19；确认表见 §20.2。*
 ```ts
 type ModelRole = 'assistant' | 'embedding' | 'decision' | 'extraction'
 
-interface RoleModelConfig {
-  provider: 'openai-compatible' | 'local-gguf' | 'local-onnx'
-  model: string
-  quantization?: 'fp16' | 'q8' | 'q4_k_m' | 'int8'
-  device?: 'auto' | 'cuda' | 'cpu'
-  contextWindow?: number
-  baseURL?: string
-  apiKeyRef?: string          // 只存引用，不落明文
-  timeoutMs?: number          // 缺省按角色表
-  concurrency?: number        // 缺省 1
-  enabled?: boolean           // 缺省：配置了即启用
+interface ContextRoleEntry {
+  baseURL: string             // OpenAI-compatible 端点；空串表示未配置
+  model: string               // 端点上的模型名；空串表示未配置
+  apiKey?: string             // 可选；只存于 Host settings，不回传 Client
+  enabled: boolean            // 用户开关
 }
 
-interface MemberModelConfig {
-  roles: Partial<Record<ModelRole, RoleModelConfig>>
+interface ContextRoleModels {
+  assistant: ContextRoleEntry
+  embedding: ContextRoleEntry
+  decision: ContextRoleEntry
+  extraction: ContextRoleEntry
 }
 ```
 
-解析顺序（逐字段，不跨角色继承）：
+配置是 **Host 全局 settings**，不是 Member 私有数据，也不进 append-only ledger。四个角色彼此独立；写入时只校验 URL 协议、空值配对与角色枚举，未知角色直接拒绝。
 
-1. `Member.roles[role]`（Member 显式配置）
-2. 全局默认 `models.roles[role]`
-3. 内置缺省：只有 `assistant` 允许继承“全局助手”配置；四类角色都没有硬编码 provider，未配置即关闭
-4. 都没有 → 该角色关闭，对应能力走规则降级
+解析顺序（逐角色，不跨角色拼字段）：
 
-缺省值：`timeoutMs` = assistant 25 s / 其余 12 s；`concurrency` = 1；`enabled` = 配置即 true。写入时校验 role 枚举与必填字段，未知角色直接拒绝，避免拼写错误静默失效。**防配置爆炸**：只有四类角色、一个扁平层级、无 per-task 覆盖；未配置的 Member 不产生任何新行为。
+1. 本角色 `enabled && baseURL && model` → 专用模型，`source='role'`，使用 `small-model` 提示词。
+2. 否则 `assistant` 角色已配置 → 使用 assistant 端点，`source='assistant'`，使用 `general-model` 提示词。
+3. 否则 Agent 主模型可得 → `source='main'`，使用 `general-model` 提示词。
+4. 都没有 → 该角色关闭，对应能力走规则降级。
+
+`assistant` 角色自身：本角色配置 → 专用；否则直接到主模型，不存在“assistant 回退到 assistant”。
+
+**嵌入特例**：嵌入不使用生成式回退链。顺序为 `embedding 专用端点 → 本地 granite int8（未配置时自动下载）→ assistant 兼容 /embeddings 端点 → 词法`；主模型永远不能承担嵌入。`embedding.enabled=false` 时只走词法。
+
+缺省值：`timeoutMs` = assistant 25 s / decision 12 s / extraction 12 s / embedding 5 s；全局并发 3；每 `(Member, 角色)` 同时 1 个在飞；队列深度 8。未配置任何角色的 Member 不产生新行为。
+
+### 26.2.1 粒度变更：从“每 Member 一个”改为 Host 全局
+
+早期草案写的是“每 Member × 每角色独立配置”。本次改为 **Host 全局角色配置**，四个角色共享，不随 Member 变化。这是一次有意的口径变更，不是实现偏差。
+
+**理由**：
+
+1. 专用端点、模型名与密钥通常是团队级共享基础设施；按 Member 重复填写只会放大配置面积和密钥泄漏面。
+2. 密钥只应存在于 Host settings 的 volatile 字段，不能进入 append-only ledger 或 Member 私有数据；Host 全局配置天然满足这一点。
+3. 回退链（角色 → assistant → Agent 主模型）已经让不同 Member 在主模型上得到各自不同的实际执行者；再叠加 Member 级覆盖，收益有限、解析与 UI 复杂度显著上升。
+4. 嵌入模型只需下载一份、只维护一份索引几何；Member 级不同嵌入模型会让向量维度与相似度不可比。
+
+**影响范围**：
+
+- 所有 Member 共用同一组角色端点、模型与开关；切换会影响全部 Member 的后续调用（已生成的摘要与向量不回溯重算）。
+- 超时、并发、熔断仍按 `(Member, 角色)` 与端点实例分别计，不因共享配置而互相串扰。
+- 设置页只有一处角色配置区，不提供按 Member 的覆盖编辑器。
+- 如果将来确实需要 Member 覆盖，可以新增可选的 Member 级 `roleOverride`，在解析时优先于 Host 全局值；本设计不预留该字段，避免当前就引入双权威。
 
 ### 26.3 新增一个角色要改哪里
 
@@ -2308,7 +2329,7 @@ interface MemberModelConfig {
 6. 指标：`<role>_calls_total`、`<role>_fail_total`、`<role>_latency_ms`、`<role>_queue_depth`
 7. 文档：§26.1 行、§19/§20 是否需要新决策项、§14.3 验收行、本表
 
-不需要改：账本、compaction、Session 持久化、Web Client（角色配置走 Team 设置面）。
+不需要改：账本、compaction、Session 持久化。角色配置经 Web Client 的 Team 设置页写入 Host settings；不新增 ledger operation。
 
 ### 26.4 健康、熔断与降级
 
@@ -2330,7 +2351,8 @@ interface MemberModelConfig {
 | --- | --- |
 | 存储位置 | `memory_vector` 表，放在 D9=A 的 `agent_team_context` SQLite 派生域，**不引入第三个存储** |
 | 表结构 | `(owner_kind, owner_id, model_id, dim, vec BLOB, norm REAL, updated_at)`，主键 `(owner_kind, owner_id, model_id)` |
-| 维度 | 可配 384/768/1024；行内记 `model_id + dim`；换模型不覆盖旧行，查询只用当前激活模型 |
+| 内置默认 | 未配置 `embedding` 端点时，自动下载 `ibm-granite/granite-embedding-97m-multilingual-r2` 官方 int8（`onnx/model_quint8_avx2.onnx`，384 维、约 98MB），缓存到 `$DSH_HOME/agent-team/models/...`；下载/运行时/网络失败降级词法 |
+| 维度 | 内置 384；远端可配 384/768/1024，行内记 `model_id + dim`；换模型不覆盖旧行，查询只用当前激活模型 |
 | 批量写入 | 16–64 条/批，异步、事务内写；在 unit 落盘之后执行，失败可重试 |
 | 增量更新 | 新 unit 异步补向量；`superseded` 只改状态、不重算向量；正文变更才重嵌入 |
 | 重建 | `memory_vector` 是可重建派生物：从 `units.jsonl` + Session 日志按游标后台重建，可断点续跑 |
@@ -2392,9 +2414,11 @@ interface MemberModelConfig {
 4. 提交后异步：更新窗口/话题簇/代三层节点、facet、摘要节点向量；失败只影响下一轮召回质量。
 5. `pending` 未就绪：本轮跳过，绝不 inline 调用模型。
 
-### 26.9 按角色选型（2025–2026 复核，≥8 GB 显存 / 纯 CPU 回退）
+### 26.9 按角色的建议默认值（非必选；2025–2026 调研参考）
 
-**本轮约束变化**：本地显存下限由 4 GB 改为 **8 GB**，同时保留“没有显卡时必须纯 CPU 可运行”的回退要求。因此选型分成两档，同一套角色配置按 `device` 自动解析：
+**本节不再是选型裁决，也不要求用户二选一。** 角色是否启用、用哪个端点/模型，全部由设置页填写；未配置即关闭（嵌入除外）。本节表格只作为“如果用户想配一个专用模型”的建议默认值，以及 P0 实测/估算的依据。用户完全不配置时，系统仍按 §26.2 的回退链工作。
+
+历史约束（本地显存下限、纯 CPU 回退）仅用于解释建议值的来源；当前实现不探测显存，也不强制本地部署。
 
 | 档位 | 条件 | 能承载什么 | 不能承载什么 |
 | --- | --- | --- | --- |
@@ -2645,6 +2669,29 @@ interface RoleModelConfig {
 
 1. **“appear 在流程里”不等于“在本轮关键路径里”。** 四个角色都出现在 §9 的调用表，但只有 `embedding` 的“上一轮向量缓存”和 `extraction` 的规则部分会以**只读派生数据**的形式进入本轮召回；模型本身始终在 `pre-step` 之后。
 2. **`assistant` 不是“什么都能干”的兜底。** 摘要、分级汇总、语义补全、记忆整理是四个不同的调用点，各自有独立超时与降级；`assistant` 失败不等于整条链失败，它只影响“下一次压缩”和“下一轮补全”。
+
+#### 26.15.6 可插拔配置下的调用点与回退
+
+角色配置改成设置页可填写后，调用点不变，只多了一层“本次用哪个端点”的解析。下表是实现的唯一口径：
+
+| 调用点 | 同步/异步 | 角色与回退 | pre-step 是否 await |
+| --- | --- | --- | --- |
+| 消息落库 + 规则抽取（time/精确键/关键词/facet） | 同步 | 无模型 | 否 |
+| 新 unit 向量化 | 异步 | `embedding` → 本地 granite → assistant 兼容 /embeddings → 词法 | 否 |
+| facet/关键词语义补全 | 异步 outbox | `extraction` → assistant → 主模型 | 否 |
+| 新旧关系/取代判定 | 异步 outbox | `decision` → assistant → 主模型 | 否 |
+| L2 摘要（压缩路径） | 同步于压缩调用内 | `assistant` → 主模型 → Basic 摘要 | 不在 pre-step |
+| turn 后预生成 pending 摘要 | 异步 | `assistant` → 主模型 | 否（pre-step 只 commit） |
+| 召回快照注入 | 同步 | 无模型（exact/词法/facet/图 + 已算好的向量） | 否 |
+| `context_recall` / `context_review` | 工具调用内同步 | 无模型 | 否 |
+| 查询向量预热 | 异步（turn 后） | `embedding` | 否；未就绪只用词法 |
+
+两条硬规则：
+
+1. **pre-step 不做任何模型 await**；`decision` / `extraction` / `assistant` 的模型调用只能在后台队列或压缩路径发生。
+2. **回退到 assistant/主模型时使用 `general-model` 提示词**；专用端点使用 `small-model` 提示词。两套提示词分开维护，调用方不临时改写。
+
+主模型只通过三种受控通道消费功能模型的结果：`<recall-snapshot>`、两个上下文工具、`<compacted-summary>`。功能模型不直接改写主模型的对话。
 
 ## 附录 A：目录布局与存储
 

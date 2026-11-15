@@ -729,6 +729,77 @@ export interface AgentTeamSetGatewayConfigResult {
   readonly boundPort?: number
 }
 
+/** The four functional context roles, mirrored from the Host domain model. */
+export type AgentTeamContextRoleName = 'assistant' | 'embedding' | 'decision' | 'extraction'
+
+/** Where the effective route comes from at call time; a UI hint, not a promise. */
+export interface AgentTeamContextRoleRouteView {
+  readonly source: 'role' | 'assistant' | 'main' | 'local' | 'lexical' | 'off'
+  readonly transport: 'openai-compatible' | 'host-llm' | 'local-onnx' | 'lexical'
+  readonly model: string
+  readonly promptProfile: 'small' | 'general' | 'embedding'
+  readonly reason?: string
+}
+
+/**
+ * One role's editable state plus its resolved route and health. `apiKeySet`
+ * is a boolean rather than the key: the Host never returns a secret, and the
+ * Client sends a blank field to keep the stored value.
+ */
+export interface AgentTeamContextRoleView {
+  readonly role: AgentTeamContextRoleName
+  readonly baseURL: string
+  readonly model: string
+  readonly apiKeySet: boolean
+  readonly enabled: boolean
+  readonly timeoutMs: number
+  readonly route: AgentTeamContextRoleRouteView
+  readonly circuit: 'closed' | 'open' | 'half-open'
+  readonly p50?: number
+  readonly p95?: number
+  readonly queueDepth: number
+  readonly lastError?: string
+}
+
+/** Built-in embedding model status: downloaded on demand, never user-supplied. */
+export interface AgentTeamContextEmbeddingView {
+  readonly modelId: string
+  readonly dimension: number
+  readonly state: 'idle' | 'downloading' | 'loading' | 'ready' | 'model-unavailable' | 'runtime-unavailable' | 'failed'
+  readonly directory: string
+  readonly downloadedBytes: number
+  readonly totalBytes?: number
+  readonly error?: string
+}
+
+/** The Team settings page's view of functional model roles. */
+export interface AgentTeamContextRoleConfig {
+  readonly roles: readonly AgentTeamContextRoleView[]
+  readonly embedding: AgentTeamContextEmbeddingView
+  /** The Agent default model the last fallback hop would use, when known. */
+  readonly mainModel?: { readonly provider: string; readonly model: string }
+}
+
+export interface AgentTeamContextRoleConfigRequest {
+  readonly refresh?: boolean
+}
+
+/**
+ * Overwrite one role's settings. Absent fields keep their stored value;
+ * `apiKey: null` clears the stored secret, a blank string keeps it.
+ */
+export interface AgentTeamSetContextRoleRequest {
+  readonly role: AgentTeamContextRoleName
+  readonly baseURL?: string
+  readonly model?: string
+  readonly apiKey?: string | null
+  readonly enabled?: boolean
+}
+
+export interface AgentTeamRetryContextEmbeddingRequest {
+  readonly refresh?: boolean
+}
+
 /** One synced conversation turn from an external agent's own harness. */
 export interface AgentTeamExternalContextEntry {
   /** Free-form speaker label, bounded to 16 characters (`user`, `assistant`, `tool`, …). */

@@ -87,6 +87,31 @@ export const HUMAN_PROFILE_SETTINGS_SCHEMA = z.object({
   externalApiEnabled: z.boolean().default(false).volatile(),
   externalApiPort: z.number().default(43110).volatile(),
   externalApiToken: z.string().volatile(),
+  /**
+   * Functional context roles (see context/role-models.ts). Flat volatile
+   * fields rather than a nested object: the settings service can persist
+   * each path independently, and the Team settings row is presentation-owned
+   * (`auto: false`), so these render through the custom role card UI instead
+   * of generic derived controls. Empty endpoint/model means "not configured";
+   * each role is independent, and the resolver applies the fallback chain.
+   * `apiKey` is a local settings secret, never returned to the Client.
+   */
+  contextRoleAssistantBaseURL: z.string().volatile(),
+  contextRoleAssistantModel: z.string().volatile(),
+  contextRoleAssistantApiKey: z.string().volatile(),
+  contextRoleAssistantEnabled: z.boolean().default(false).volatile(),
+  contextRoleEmbeddingBaseURL: z.string().volatile(),
+  contextRoleEmbeddingModel: z.string().volatile(),
+  contextRoleEmbeddingApiKey: z.string().volatile(),
+  contextRoleEmbeddingEnabled: z.boolean().default(true).volatile(),
+  contextRoleDecisionBaseURL: z.string().volatile(),
+  contextRoleDecisionModel: z.string().volatile(),
+  contextRoleDecisionApiKey: z.string().volatile(),
+  contextRoleDecisionEnabled: z.boolean().default(false).volatile(),
+  contextRoleExtractionBaseURL: z.string().volatile(),
+  contextRoleExtractionModel: z.string().volatile(),
+  contextRoleExtractionApiKey: z.string().volatile(),
+  contextRoleExtractionEnabled: z.boolean().default(false).volatile(),
 })
 
 /** Normalize one candidate display name the way Member handles normalize. */
