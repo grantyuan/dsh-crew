@@ -12,6 +12,8 @@ Thread 的速览按需生成，绝不自动：席位提供「生成速览」，�
 
 侧栏行自带控件：行级 ⋯ 菜单打开对应编辑器——`updateChannel` 修改频道名称/说明；`updateMember` 编辑 Agent 名称/说明，并可为该成员固定可选的 provider/model（缺省即清除覆盖、回到 Host 默认继承；对活跃成员改模型会原地更新 live model selection，保持 Agent 与 Session 身份不变，后续请求使用新选择）。模型选择经与会话无关的 `llm.models` RPC 读取 Host 目录。点击 Agent 卡片会在 Team 模式内临时显示该成员的会话，不会丢掉下层已选中的 Channel 或 Thread。两种行菜单都带 danger「归档」入口：`archiveMember` 与 `archiveChannel` 经破坏性确认弹窗（明确说明"暂无恢复入口"）后把实体从所有面收起（持久数据保留、活跃 Claim 释放）；归档行随 workspace 刷新消失，mention 候选、成员选择器与频道成员列表都排除已归档成员。本轮不做侧栏归档列表与恢复入口。
 
+Team 还贡献一个 Team 设置分区，承载上下文模型角色。它渲染四张卡——assistant、embedding、decision、extraction——各有启用开关、端点、模型与 API key；所有字段可选，端点/模型留空表示该角色未配置。API key 只写不回显（Host view 只报告是否已设置，留空即保持原值），保存是非乐观的，每张卡显示生效来源、熔断状态与最后错误。嵌入卡另显示本地模型 id 与维度、下载/加载状态、字节进度与重试入口；`runtime-unavailable` 与仅词法都会明确标为降级，而不是隐藏。
+
 Client 使用以下 Host 接口：
 
 - `readThread`：确认一个 Thread 的未读批次。

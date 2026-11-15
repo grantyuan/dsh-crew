@@ -1,4 +1,4 @@
-# Twelve-tool protocol
+# Fifteen-tool protocol
 
 English | [中文](tools.zh.md)
 
@@ -171,3 +171,19 @@ The stack is LIFO, capped at eight pending entries per Member, and one anchor pi
 `action: 'list'` returns the stack newest-first, each entry annotated with the Host's live verdict on whether citing its anchor to `context_rollover` would return today, plus the timeline's reason when it would not. `action: 'release'` closes one entry without returning to it.
 
 The Host closes an entry as `resumed` itself, inside the checkpoint-return transition that consumes the anchor; a Member completes the interrupted work by returning to it, never by editing the stack. While a Member's stack is non-empty, the completion liaison pushes one private resume-check notice behind a finished episode — the notice is steer-level context, never a ledger Message — so pending interruptions surface at every completion boundary for the pre-completion analysis.
+
+## `context_recall`
+
+`context_recall` searches the Member's derived context index or reads one cited source back. Search takes `query` and fuses the routes that are available: exact identifiers, keywords, facets (time, Workspace, role, subject), semantic neighbours from the background embedding pass, and graph neighbours. `limit` defaults to five and is capped at eight; `includeSuperseded` is the only way superseded units appear and defaults to false. Results carry stable derived-context refs plus a short excerpt, not transcript text.
+
+Read takes `ref` (`cu:<sessionId>:<seq>` for one unit, `seg:<sessionId>:<from>-<to>` for a committed window) and returns the indexed original text, bounded by `maxChars` (default 4,000, capped at 16,000), with `truncated` and `totalChars`. It also returns the range's belief state: `status`, `supersededBy`, `validTo`, `confidence`, and the same fields per unit. A read never mutates the index or the Session.
+
+The tool is read-only. `degraded` names routes that could not run, so an empty `items` with a `degraded` entry means the index is incomplete, not that nothing exists. An unavailable index answers `index-unavailable`; a failed read answers with a reason. Returned refs are derived-context identifiers, never checkpoint refs: only `context_checkpoint`/`context_timeline` produce refs `context_rollover` accepts.
+
+## `context_review`
+
+`context_review` projects what was decided and what changed on a topic (`topic`) or around one cited unit (`around`). It reads the graph and includes superseded history by default, so each decision carries its status, validity window, and replacement ref rather than only the current value. Each topic cluster also lists its open questions, the committed segment refs that contributed, and the L3 generation rollups that produced them: `ref` (`gen:<sessionId>`), `sessionId`, a bounded deterministic `summary`, `confidence`, and the contributing segment refs.
+
+The generation rollup is a derived graph projection, not a surface summary: it is built from L2 digests (or L1 units for a short generation), keeps decisions verbatim, and is refreshed at idle and when the generation closes. It neither rewrites the Member's context nor consumes provider prompt cache, so review never triggers a model or a compaction decision.
+
+`edges` shows the graph relations behind the cluster, and `narrative` summarizes the counts. `degraded` reports routes or graph reads that could not run. The tool is read-only over the derived index; current Thread, Task, and Claim state remain `team_view`/`team_thread` authority.

@@ -49,6 +49,8 @@ Slot parent 的 `children` declaration 同时是 render site 和 render authorit
 
 Team feature 需要现有 Harness capability 时，使用 public service 或 package export。对于 directory selection，先检查 `ctx.workspaces.pickDirectory()` 和 `host.pickDirectory` path，再考虑 Team-specific picker。如果 public contract 无法表达目标 composition，记录这个 limitation，选择 Team-owned plugin 或新设计，不要静默依赖 private implementation details。
 
+Team 还会注入一个 `settings.section`（`team-context-roles`），承载上下文功能模型角色。四张卡——assistant、embedding、decision、extraction——各有启用开关、端点、模型与 API key；所有字段可选，端点/模型留空表示该角色未配置。API key 只写不回显：Host view 只报告是否已设置，已保存的 key 不会回传，key 输入留空即保持原值。保存是非乐观的：页面用 Host 写后 view 替换草稿，失败则保留草稿并就地显示错误。每张卡展示生效来源（角色、assistant、主模型、本地、词法或关闭）、熔断状态与最后错误。嵌入卡另显示下载/加载状态、模型 id 与维度、字节进度与重试入口；`runtime-unavailable` 与 lexical 会明确标为降级，不隐藏。
+
 ## Client data 和 presentation boundary
 `packages/client-agent-team/src/client/` 下的 components 不接触 `ctx`、operation ledger 或 Host classes。Data 与 callbacks 通过 Client slot contract 进入，包括 owner props、runtime props、declared store 或 inject face。Presentation layer 消费 Host projections 和本地 navigation state，不自行发明 durable facts。
 

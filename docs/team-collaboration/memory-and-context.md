@@ -20,6 +20,23 @@ A provider context-overflow refusal gets one bounded compact-and-retry sequence 
 
 A route whose window cannot be measured is an explicit rejection, never a silent over-limit submission. Accepted-Task auto compaction is retired: the overflow rescue is the only Host compaction trigger besides the Member's own explicit choice.
 
+## Derived context index
+The live Member Session also feeds one derived, read-only context index. It is not Team authority: the operation ledger still owns collaboration facts, and the Session log still owns transcript. The index exists for recall and review, is rebuilt from Session events, and never rewrites a Session, a Message, or the ledger.
+
+Intake runs synchronously on live Session events and stores an L1 unit with rule-derived time, exact, keyword, and facet entries. Background work then fills the rest: unit embeddings when an embedding role is available, one query vector after a new message, and outbox-driven facet/relation candidates from the configured roles. The `agent/pre-step` recall snapshot reads only state prepared by earlier work; it never awaits a model.
+
+The index has three layers. L1 is the unit itself. L2 is a committed window: an idle boundary prepares a bounded digest without blocking the conversation, and the next pre-step commits that pending digest into one `context_segment` transaction without calling a model. L3 is one generation (one Session): a deterministic rollup of its L2 digests, or of its L1 units for a short generation with no segment, capped at 2,400 characters with decisions kept verbatim. The rollup is refreshed at idle and when the Member moves to a new Session, and is written only into the graph.
+
+The L3 rollup does not enter the prompt or rewrite the surface, so it pays no provider prompt-cache cost and needs no compaction cost gate. Only a surface merge is subject to the existing `S×N > 2R` rule; that rule and the pressure thresholds are unchanged.
+
+The graph stores nodes and edges for units, segments, and generations. A later decision can supersede an earlier one while both stay readable: the old unit keeps its validity window and a `supersededBy` ref, and `context_review` shows that history by default. `context_recall` searches the index and can read a `cu:` unit or `seg:` window back as original indexed text with its status, replacement ref, validity end, and confidence. Both tools are read-only and never substitute for current Thread, Task, or Claim state.
+
+Four role settings configure the models used outside the main conversation: `assistant` for summaries and judgments, `embedding` for vectors, `decision` for relation candidates, and `extraction` for facet completion. A role uses its own endpoint and model when configured; otherwise `assistant` and then the Member's routed main model may serve the assistant, decision, and extraction roles, under the role's own timeout (25 s assistant, 12 s decision/extraction).
+
+The main model never serves embeddings. Embedding falls back from its own endpoint to the bundled local Granite int8 model, then to an assistant-compatible embeddings endpoint, then to lexical only. Leaving a role blank disables it, except embedding: blank keeps the local model enabled, and an explicit opt-out selects lexical only.
+
+Degradation is local, not a failed turn. With no decision or extraction role, rules still index and exact/lexical/facet/graph recall still works; with no embedding route, recall reports a degraded vector route and continues lexically. When the index itself is unavailable, the tools answer `index-unavailable`; a failed index read returns an empty result with a reason. Role calls stay bounded and are not awaited by pre-step, and an open circuit at one endpoint is reported instead of retried on every turn.
+
 ## Interrupt stack and continuation
 The pending-interrupt stack is the durable memory of interrupted work: one Host operation pair (`team/member-interrupt-recorded`, `team/member-interrupt-resolved`) on the same append-only ledger, projected into a per-Member LIFO stack of at most eight pending entries, one per checkpoint anchor. An entry pins a resolved checkpoint ref plus a bounded label and `incompleteState`; the full working state never enters the ledger — it stays in the Member's Session log and private memory, and the entry is only the resume pointer.
 

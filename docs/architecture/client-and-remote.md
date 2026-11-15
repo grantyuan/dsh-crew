@@ -30,6 +30,10 @@ Activation mounts `agentTeamRemote`, waits for `remote.agentTeam`, then register
 
 A slot parent's `children` declaration is both render site and authority. Team's `sidebar.workspaces` shadow must not redeclare shipped `sidebar.workspaces.directoryFlow`; Harness SlotCore rejects duplicate live declarations. Do not copy private WorkspaceBrowser, ConversationRoot, Shell, or private CSS. Use public Harness services and exports, such as `ctx.workspaces.pickDirectory()`, and record limitations rather than depending silently on private implementation.
 
+Team also injects a `settings.section` for its context model roles (`team-context-roles`). Four cards — assistant, embedding, decision, extraction — expose an enable switch, endpoint, model, and API key; every field is optional, and an empty endpoint/model means the role is not configured. The API key is write-only: the Host view only reports whether a key is set, a saved key is never echoed, and a blank key field keeps the stored key. Saves are non-optimistic: the page replaces its draft with the Host's post-write view, and a failure keeps the draft with an inline error.
+
+Each card shows the effective source (role, assistant, main, local, lexical, or off), circuit state, and last error. The embedding card additionally shows download/load state, model id and dimension, byte progress, and a retry action; runtime-unavailable and lexical are rendered as explicit degradation, not hidden.
+
 ## Client data and presentation boundary
 Client components do not reach into `ctx`, the operation ledger, or Host classes. Data and callbacks arrive through slot owner props, runtime props, declared stores, or injected faces. Presentation consumes Host projections and local navigation state and does not invent durable facts.
 

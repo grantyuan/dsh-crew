@@ -16,7 +16,7 @@ listener 以 assembly 的 turn signal 为门：agent loop 是唯一带着 signal
 
 整份 prompt 画像都是 per-Member 的 ledger 状态，因此随 Member 经由普通 lifecycle operation 流转——重启、suspend/resume、context 续期、归档与恢复都逐字保留画像、`leader` 标记与 context 策略，而不会回退到默认值（见 Host authority）。
 
-protected 集合在 `member-runtime.ts` 一处定义（`isProtectedPromptSection`）：段落 section 自身、deployment persona 槽位、以及 Team tools 的 `tool:<name>` guidance sections——对受保护名字的 drop 请求在消费端拒绝，对话框将该行渲染为带受保护标记的不可操作状态。十二个 Team tools 目前把 guidance 放在 tool description 而非注册的 prompt section 里，所以 `tool:*` 条目今天是前瞻防御：没有任何 live section 携带这些名字，它们不会渲染为对话框的 live 或 stale 行。没有任何 live section 提供的名字照常存储但不起作用——对话框标记为已失效。
+protected 集合在 `member-runtime.ts` 一处定义（`isProtectedPromptSection`）：段落 section 自身、deployment persona 槽位、以及 Team tools 的 `tool:<name>` guidance sections——对受保护名字的 drop 请求在消费端拒绝，对话框将该行渲染为带受保护标记的不可操作状态。十五个 Team tools 目前把 guidance 放在 tool description 而非注册的 prompt section 里，所以 `tool:*` 条目今天是前瞻防御：没有任何 live section 携带这些名字，它们不会渲染为对话框的 live 或 stale 行。没有任何 live section 提供的名字照常存储但不起作用——对话框标记为已失效。
 
 `sectionToolMapping` 是对话框「无自动信号」标记背后的共享 primitive：它扫描每个 section 的文本，对 Member scope 工具 schema 名做整词匹配，不匹配任何当前工具名的 section 即为纯散文。
 
@@ -26,11 +26,11 @@ Auto-prune 就骑在这份投影上。画像的 `autoPrune` 开关（默认关�
 
 `autoExecutePrune` 升级让 sweep 以 Human actor、同样的 echo 齐全形状自行提交移除，在边界落定后 live 生效，并且仍然发通知——每次自动移除都留在台账里且被广播。纯散文与受保护 section 永远不会成为候选。
 
-十二个 model-facing tools 定义在 `packages/tool-agent-team/src/`：八个 Team 工具在 `index.ts`，四个 context 工具在 `context-tools.ts`；实现的 collaboration contract 记录在 [`tools.zh.md`](../team-collaboration/tools.zh.md)。它们挂载在隔离开的 `team-member` preset 下（`cordis.patch.yml` 里的一条 declarative row）。不要为了让测试可用就把 tool package 作为 global row 添加；普通 Sessions 必须保持 Team-free。
+十五个 model-facing tools 定义在 `packages/tool-agent-team/src/`：九个 Team 工具在 `index.ts`，六个 context 工具在 `context-tools.ts`；实现的 collaboration contract 记录在 [`tools.zh.md`](../team-collaboration/tools.zh.md)。它们挂载在隔离开的 `team-member` preset 下（`cordis.patch.yml` 里的一条 declarative row）。不要为了让测试可用就把 tool package 作为 global row 添加；普通 Sessions 必须保持 Team-free。
 
 Member 上下文自主管理在这些 preset 之上由 Host 编排。`context_rollover` 与 `context_checkpoint` 工具只做校验并结束/锚定 turn：在 tool 时，引擎的门先拒绝 Member 自己的 timeline 未列为 restorable 的 `checkpointRef`，通过这道门的 ref 仍由 Host 的 seed resolver（与换窗同一套）预校验，因此当下不可能成功的 ref 以 model-visible 的 error result 拒绝，而不是返回假 `scheduled`；可变 guard 集（jobs、route limits）在 commit seam 复查。
 
-四个 context 工具里有两个用的是引擎自己的定义：`context-tools.ts` 通过引擎的 `createContinuityTools` 构造 `context_rollover` 与 `context_checkpoint`，只提供 Team 词汇与 host adapter，不再自带文案与校验。`context_timeline` 与 `context_interrupt` 仍是 Team 自己的实现——前者的渲染对不可返回的行绝不打印可引用的 ref，后者经 Host-authority 方法驱动 ledger 的 pending 打断栈，而不依赖引擎状态。
+六个 context 工具里有两个用的是引擎自己的定义：`context-tools.ts` 通过引擎的 `createContinuityTools` 构造 `context_rollover` 与 `context_checkpoint`，只提供 Team 词汇与 host adapter，不再自带文案与校验。`context_timeline` 与 `context_interrupt` 仍是 Team 自己的实现——前者的渲染对不可返回的行绝不打印可引用的 ref，后者经 Host-authority 方法驱动 ledger 的 pending 打断栈，而不依赖引擎状态。`context_recall` 与 `context_review` 同样由 Team 实现，读派生索引：recall 融合搜索或回读一条 `cu:`/`seg:` 原文，review 投影决策、取代边、开放问题与 L3 代际汇总。两者都只读，失败时返回 `degraded`/`reason` 而不让 turn 失败。
 
 单一 context-continuity coordinator（`ContextContinuityCoordinator`，来自 `@wowyuarm/dsh-context-continuity`）由 `context-continuity-host.ts` 绑定到 Member lifecycle，后者还用 Team 的 plugin id 与冻结的 handoff 文案构造引擎的 message codec。它监听各 Member Session 的事件，从 durable 的 `tool/call`+`tool/result` 对折出 rollover 与 checkpoint 意图，再经串行 lifecycle queue 执行换窗。
 
@@ -53,6 +53,8 @@ unit 自带 fork cut，seed 子代的继承前缀折叠回同一引用。换窗�
 恢复由日志派生：重启重放 pending 意图并完成换窗；落在 rollover 的 durable commit 与新 Session 激活之间的重启，会从 ledger 记录的上一 Session 重建 handoff——即使新 Session 在崩溃前从未落盘——且重建幂等（自身日志已含 handoff 的一代不再收到第二条）。重启后的 carried-input 重放是有界的：当前代一旦已开始自身 turn 即跳过重放（其携带输入已在运行中被投递或取代）；上一代 Session 不可读时，属日志损坏类（`corrupt session log`，Host 会修复 torn tail）或确定性格式拒绝类（`SessionFormatUnsupportedError`，重试无法改变结果）的以 warn 放行，缺失/IO 及未知原因仍 fail-closed——当前代一旦运行过，其激活不再受退役代可读性阻塞。Member Session 是否有 durable 持久内容，通过 session-persistence inspection 判定（会等待进行中的 retirement drain），绝不使用会与 suspend 终末 flush 竞争的裸元数据列表。
 
 上下文压力是第二个 Host 持有的 coordinator（`pressure-policy.ts`），且 Host 不盯上下文大小：该 coordinator 只剩 provider 溢出自救一条车道——provider 因上下文装不下而拒绝的请求，每次开放故障链获得一条有界 compact-and-retry，只有成功请求才重新武装；被路由 proxy 接管压缩的车道（`dsh_compaction_refused` 拒绝）从不尝试。
+
+除这条 surface 压力车道外，live Session 还喂给一份派生上下文索引，供召回与回顾。它不是第二个 surface authority：摄入、后台 embedding/facet、idle 预生成并在下一次 pre-step 提交的 L2 digest、确定性的 L3 代际汇总，以及两个只读工具，详见[记忆、上下文压力与通知](../team-collaboration/memory-and-context.zh.md#派生上下文索引)。L3 写入不进提示词，因此既不重写 surface，也不产生 provider cache 代价。
 
 Member 按需读到的预算阈值（验收建议、`context_timeline`、checkpoint 回返守卫）从当前 route 自身的模型信息派生。Member 通过 `context_rollover` 与 `context_checkpoint` 自管上下文，仍然上浮的溢出交给 supervision 的故障计数。原地 compaction 绝不取消 owner，因此豁免于拒绝持有 running 或未上报 terminal jobs 的 rollover job guard。
 

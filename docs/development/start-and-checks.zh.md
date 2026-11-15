@@ -36,6 +36,7 @@ npm run check:facades
 npm test
 npm run build
 npm run lint
+npm run test:perf
 npm run duplication
 npm pack --dry-run
 npm run check:artifact
@@ -55,6 +56,7 @@ git diff --check HEAD
 - `npm test`：先生成 Typert、跑 `check:facades`、`check:docs`、`check:core-skills`、`check:boundaries` 与 `check:versions`，再运行 Vitest。Vitest 通过 `scripts/isolate-dsh-home.setup.ts` 给每个测试文件一次性 `DSH_HOME`，隔离各 Member activation 的 `$DSH_HOME/agent-team/members/member:*` 私有 memory。需要特定 home 的测试自行保存/恢复该变量（见 `member-lifecycle.spec.ts`）。启动不会自动清理账本不认识的 Member 目录；显式 Member remove 才删除该 Member 的私有 memory；介质重置后的旧目录须由操作者手动删除 `member:` 目录。
 - `npm run build`：先由受限 Node cleaner 清空 Host、tools 与 Client 三个 package 的 `lib/`，再生成 Typert、构建三个源码目录，并用 Harness 的 `tsdown` 构建 Client bundle；这样删除源码后遗留的旧产物不会进入 pack。最终发布物仍是一个根 npm 包。
 - `npm run lint`：运行 oxlint。
+- `npm run test:perf`：运行 `scripts/context-perf.mjs`，对派生上下文索引做合成验收。支持 `--scale=100|500|1000`、`--members`、`--concurrency`、`--queries`、`--json`，输出 `artifacts/perf/<scale>.json`。它测量增量摄入、L2 提交事务、召回冷/热（冷启动在独立进程）、索引写入吞吐、CPU、RSS、错误率/超时率与并发 p95 比，并用 `EXPLAIN QUERY PLAN` 断言 facet/time/term/segment/node 关键查询命中索引。阈值取 spec §14.2，不要为了让一次运行通过而放宽。
 - `npm run duplication`：用 `.jscpd.json` 对 `packages` 与 `scripts` 跑 jscpd。它的输出只是"值得看一眼的地方"，不是结论——移动或重构过的代码同样会被报成重复。
 - `npm pack --dry-run`：检查根 bundle 的发布内容；`prepack` 会先跑完整 build，所以它是发布前置步骤，不是日常检查。
 - `npm run check:artifact`：回读 `npm pack` 真正会装进 tarball 的内容，拒绝会以破损形态发布的产物——混入的 `.ts`/`.tsx` 源码、缺失的 `cordis.patch.yml`，或目标不在 tarball 内的运行时相对导入。最后一项在本地任何检查里都看不见，因为工作树里每个文件都在。跑完 `build`、发布之前跑它。

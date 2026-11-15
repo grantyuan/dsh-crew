@@ -18,6 +18,21 @@ Provider 的 context-overflow 拒绝在每次开放故障链上获得一条有�
 
 Memory 不是 authority：它可能过时，不能覆盖 Workspace instructions、direct Human input 或 durable Team facts。Member 只能记录已验证且持久的知识，不得记录 credentials、sensitive data、guesses、chat logs、其他 Members' memory，或 ledger 已拥有的 facts。
 
+## 派生上下文索引
+Member 的 live Session 还会喂给一份派生的只读上下文索引。它不是 Team authority：协作事实仍归 operation ledger，transcript 仍归 Session 日志。索引只服务召回与回顾，从 Session 事件重建，绝不回写 Session、Message 或 ledger。
+
+摄入在 live Session 事件上同步完成，落一条 L1 unit 以及规则派生的 time、exact、关键词与 facet 条目；后台再补齐其余部分：有 embedding 角色时补 unit 向量，新消息后算一条查询向量，并按 outbox 用已配置角色补 facet/关系候选。`agent/pre-step` 的召回快照只读此前已算好的状态，绝不 await 模型。
+
+索引分三层。L1 是 unit 本身。L2 是一个已提交窗口：idle 边界在不阻塞对话的前提下准备有界 digest，下一次 pre-step 把 pending digest 提交为一条 `context_segment` 事务，不调用模型。L3 是一代（一个 Session）：由该代 L2 digest 确定性汇总；没有 segment 的短代退回 L1 unit。汇总上限 2,400 字符，决策原句保留；idle 与 Member 换代时刷新，只写入图。
+
+L3 汇总不进提示词、不重写 surface，因此不产生 provider prompt cache 代价，也不需要 compaction 成本闸门。只有 surface 合并才受既有 `S×N > 2R` 规则约束；该规则与压力阈值均未改动。
+
+图存 unit、segment、generation 的节点与边。后来的决策可以取代早先决策而两者都保持可读：旧 unit 保留有效期窗口与 `supersededBy` ref，`context_review` 默认展示这段历史。`context_recall` 可搜索索引，也能按 `cu:` unit 或 `seg:` 窗口回读原始索引文本，并返回状态、取代 ref、有效期终点与置信度。两个工具都只读，绝不替代当前 Thread、Task 或 Claim 状态。
+
+四个角色配置决定主对话之外的模型：`assistant` 负责摘要与判断，`embedding` 负责向量，`decision` 负责关系候选，`extraction` 负责 facet 补全。角色配置了自己的端点与模型时直接使用；否则 assistant、decision、extraction 可依次回退到 `assistant` 角色与 Member 的路由主模型，并受角色自身超时约束（assistant 25 秒，decision/extraction 12 秒）。主模型永不承担 embedding。嵌入依次回退：专用端点 → 内置本地 Granite int8 → assistant 兼容 embeddings 端点 → 仅词法。角色留空即关闭，embedding 例外：留空仍启用本地模型，显式关闭才只走词法。
+
+降级是局部的，不是失败 turn。没有 decision/extraction 角色时规则仍索引，exact/词法/facet/图召回仍可用；没有 embedding route 时召回标记 vector 路 degraded 并继续词法。索引本身不可用时工具返回 `index-unavailable`；单次读失败返回空结果与原因。角色调用有界且不被 pre-step await，某端点熔断时报告状态而不是每轮重试。
+
 ## 打断栈与续作
 pending-interrupt 栈是被打断工作的 durable 记忆：同一 append-only ledger 上的一对 Host operation（`team/member-interrupt-recorded`、`team/member-interrupt-resolved`），投影为每个 Member 至多 8 条 pending、按锚点去重的 LIFO 栈。条目钉住一个已 resolve 的 checkpoint ref，加上有界的 label 与 `incompleteState`；完整工作状态绝不进 ledger——它留在 Member 的 Session 日志与私有记忆里，条目只是回到它的续作指针。
 

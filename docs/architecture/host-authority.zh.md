@@ -75,6 +75,8 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - Team 管理的 Agent sessions 使用显式 Team preset 和可信的 `danger-full-access` policy，这是面向可信 Workspace 的有意产品边界。
 - Host 激活 Member 时，会通过 session-title service 用其 handle 命名没有标题的 Member session，使普通 Session list 显示 Member identity。显式 rename 或任何已有 title 始终优先，命名失败不会导致 activation 失败。
 - 已接受 Task 的自动 compaction 已退役，且 Host 不再盯上下文大小：压力 coordinator 只剩 provider 溢出自救一条车道（见 Tools and preset）——对 provider 因上下文装不下而拒绝的请求，每次开放故障链给一条有界 compact-and-retry，只有成功请求才重新武装；被路由 proxy 接管压缩的车道从不尝试。Member 按需读到的一切——验收建议、`context_timeline` 工具、checkpoint 回返守卫——都按当前 route 定价，绝不参与请求决策。Pending/error bookkeeping 只在进程内维护；只有进入 transaction 的 compactions 才会写入 durable Session history，绝不写入 Team ledger。
+- live Session 还会喂给一份派生上下文索引，供 `context_recall` 与 `context_review` 使用。它不是第二 authority：可从 Session 事件重建，绝不写 Session 或 ledger，L1/L2/L3 行都是投影。L2 digest 在 idle 准备、下一次 pre-step 无模型提交；L3 代际汇总确定性生成且不进提示词。索引降级通过工具结果报告，不让 turn 失败。详见[记忆、上下文压力与通知](../team-collaboration/memory-and-context.zh.md#派生上下文索引)。
+- 四个上下文角色配置是 Host 全局 settings，不是 ledger facts。Host 把每个角色的端点、模型、API key 与启用开关存入 settings profile；typed Remote view 只报告 `apiKeySet`，绝不回传 key 或掩码副本。角色调用受自身超时与熔断约束；即使回退到 Member 主模型，仍遵守该角色预算。
 - Supervision 的进度判定只有纯故障计数（见 Lifecycle 与通知）：连续 3 次 `agent/error` 且中间没有任何干净回合，即开启强制链的 fresh-context 重置——identity、固定设置与 private memory 完好——没有任何上下文专属的分类或快车道。
 
 ## 私有记忆、归档与身份效应
@@ -85,7 +87,7 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 
 ## Member capabilities 与 skills
 - Member capabilities（Member 实体上的 `capabilities` 字段：预留的 `tools.allow` 与 `skills.allow`）是随全部 lifecycle operation 原样流转的 durable intent。commit 时不做已知名白名单校验，保证 Harness 升级后旧 ledger 仍可重放；与已知名的偏差在 activation 时派生为不持久化的 `capabilityWarnings`。`tools.allow` 是有意的接口预留（无 UI 写入路径），供后续 Runtime Revision manifest 编排依赖，cleanup 时勿删。编辑语义与 `model` 一致（absent 即清除）；不管理 capabilities 的调用方必须回传已存储的值。`leader` 标记是唯一的 keeps-prior 字段：absent 保留现有指定，因此总是回显该值的编辑器保持幂等。
-- Activation 把 `tools.allow` 作为 scoped restriction 应用在已组合的 preset 面上，顺序为 mount → restrict → validate（validate 观察限制后的可见面），并在配置之上强制并集十二个 Team tools。未知名 drop + warning，不阻断 activation；restriction 失败只表现为该 Member 的 activation failure。
+- Activation 把 `tools.allow` 作为 scoped restriction 应用在已组合的 preset 面上，顺序为 mount → restrict → validate（validate 观察限制后的可见面），并在配置之上强制并集十五个 Team tools。未知名 drop + warning，不阻断 activation；restriction 失败只表现为该 Member 的 activation failure。
 - LLM 路由 failover 是建立在 durable pin 之上的 Host runtime 策略：`modelFallbacks` 是 Member 实体上的有序备用路由列表（与 `model` 同为 absent-clears，经 `sameMemberFacts` 在 renewal 与 rollover 中原样保留，至多四条，且不得与主路由重复）。
 - 当 Member 当前路由连续三个回合以服务端侧错误应答（限流、overload、瞬时网络——与 recovery 重试同一族），Host 通过该 session 自己的 durable model selection 提升下一条备用路由，并发出一条点名两条路由的 `@human` 通知；pinned 主路由不变，新的世代或手动编辑即回到主路由。streak 按路由计数且仅存进程内：干净回合清零，新世代从主路由重来，备用耗尽后由 supervision 的既有 remedy 接管。
 - 两项 runtime 能力随 Member 的 preset 组合走，而不进 ledger：后台 job（`team_job`——Host spawn 并看护长命子进程，把脚本回报与进程退出转成普通 Team Message，Host 停止时杀掉活着的子进程）与 subagent 委派（team-member preset 上挂载的 shipped `subagent`／control 工具，锁定到不携带任何 Team 工具的纯工作型 `team-subagent` 子 preset；它的双注册表注册是 Tools and preset 一侧的事实）。两者都是进程内执行；durable 的 Team 事实仍然只经 ledger 进入。

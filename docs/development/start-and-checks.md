@@ -36,6 +36,7 @@ npm run check:facades
 npm test
 npm run build
 npm run lint
+npm run test:perf
 npm run duplication
 npm pack --dry-run
 npm run check:artifact
@@ -56,6 +57,7 @@ Their responsibilities are:
 - `test` regenerates Typert, runs `check:facades`, `check:docs`, `check:core-skills`, `check:boundaries`, and `check:versions`, then runs Vitest. `scripts/isolate-dsh-home.setup.ts` gives each test file an isolated `DSH_HOME`; tests needing a particular home must save and restore it. Startup does not prune ledger-unknown Member directories; explicit Member removal removes that Member's private memory.
 - `build` uses the restricted Node cleaner to clear package `lib/` directories, regenerates Typert, builds all three source trees, and uses Harness `tsdown` for the Client bundle. The published artifact remains one root npm package.
 - `lint` runs oxlint.
+- `test:perf` runs `scripts/context-perf.mjs`, a synthetic acceptance run for the derived index. It supports `--scale=100|500|1000`, `--members`, `--concurrency`, `--queries`, and `--json`; it writes `artifacts/perf/<scale>.json`. It measures incremental ingest, the L2 commit transaction, cold/hot recall (cold in a separate process), index-write throughput, CPU, RSS, error/timeout rates, and concurrency p95 ratio, and asserts the key facet/time/term/segment/node queries use their indexes with `EXPLAIN QUERY PLAN`. Thresholds are the ones in spec §14.2; do not relax them to make a run pass.
 - `duplication` runs jscpd over `packages` and `scripts` using `.jscpd.json`; treat its output as a place to look, never as a verdict, because it reports moved and restructured code as readily as copied code.
 - `pack --dry-run` checks the root bundle's published contents; `prepack` runs the full build first, so it is a release prerequisite rather than an everyday check.
 - `check:artifact` reads back what `npm pack` would actually ship and refuses an artifact that would ship broken: stray `.ts`/`.tsx` sources, a missing `cordis.patch.yml`, or a runtime relative import whose target is not inside the tarball. That last one is invisible to every local check, because the working tree has every file. Run it after `build` and before publishing.

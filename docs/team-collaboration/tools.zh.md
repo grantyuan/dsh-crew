@@ -1,4 +1,4 @@
-# 十二工具协议
+# 十五工具协议
 
 [English](tools.md) | 中文
 
@@ -123,3 +123,19 @@ seed 成本按来源 Session 自身重放的测量定价——无法测量成本
 `action: 'list'` 按新→旧返回栈，每条携带 Host 的实时判定：此刻引用其锚点执行 `context_rollover` 能否回返，不可回返时附上 timeline 给出的原因。`action: 'release'` 在不回返的情况下关闭一个条目。
 
 Host 在消费锚点的 checkpoint-return 转换内部亲自把条目关闭为 `resumed`；Member 完成被打断工作的方式是回到它，绝不是编辑栈。当 Member 的栈非空时，completion liaison 会在收尾的 episode 之后推送一条私有的 resume-check 通知——该通知是 steer 级上下文，绝不是 ledger Message——使 pending 打断在每个完成边界浮现，供完成前分析使用。
+
+## `context_recall`
+
+`context_recall` 搜索 Member 的派生上下文索引，或回读一条被引用的来源。搜索使用 `query`，融合当前可用的各路：exact identifier、关键词、facet（时间、Workspace、角色、subject）、后台 embedding 补出的语义邻居，以及图邻居。`limit` 默认 5、上限 8；`includeSuperseded` 是让被取代 unit 出现的唯一方式，默认 false。结果带稳定的派生上下文 ref 与短摘录，不是 transcript 原文。
+
+读取使用 `ref`（单条为 `cu:<sessionId>:<seq>`，已提交窗口为 `seg:<sessionId>:<from>-<to>`），返回索引中的原文，按 `maxChars` 截断（默认 4,000，上限 16,000），并给出 `truncated` 与 `totalChars`。同时返回该范围的信念状态：`status`、`supersededBy`、`validTo`、`confidence`，以及逐条 unit 的同样字段。读取绝不修改索引或 Session。
+
+工具只读。`degraded` 列出无法运行的路由，因此 `items` 为空但带 `degraded` 表示索引不完整，而不是不存在。索引不可用时返回 `index-unavailable`；读取失败返回原因。返回的 ref 是派生上下文标识，绝不是 checkpoint ref：只有 `context_checkpoint`/`context_timeline` 产生的 ref 才能交给 `context_rollover`。
+
+## `context_review`
+
+`context_review` 投影某个主题（`topic`）或某条引用附近（`around`）的决策与变更。它读取图并默认包含被取代历史，因此每条决策带状态、有效期窗口与取代 ref，而不只给当前值。每个主题 cluster 还列出开放问题、贡献过的已提交 segment refs，以及产生它们的 L3 代际汇总：`ref`（`gen:<sessionId>`）、`sessionId`、有界确定性 `summary`、`confidence` 与贡献的 segment refs。
+
+代际汇总是派生图投影，不是 surface 摘要：它由 L2 digest 构建（短代退回 L1 unit），决策原句保留，并在 idle 与该代关闭时刷新。它既不重写 Member 上下文，也不消耗 provider prompt cache，因此 review 绝不触发模型或 compaction 决策。
+
+`edges` 展示 cluster 背后的图关系，`narrative` 汇总计数。`degraded` 报告无法运行的路由或图读取。工具对派生索引只读；当前 Thread、Task 与 Claim 状态仍是 `team_view`/`team_thread` 的 authority。
