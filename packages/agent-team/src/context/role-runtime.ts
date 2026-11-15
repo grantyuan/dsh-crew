@@ -24,7 +24,9 @@ import {
 } from './role-client.ts'
 import { ContextRoleHealth } from './role-health.ts'
 import {
+  BUILTIN_EMBEDDING_MODEL_ID,
   CONTEXT_ROLE_TIMEOUT_MS,
+  isContextRoleConfigured,
   resolveContextRoleCandidates,
   resolveContextRoleRoute,
   type ContextModelRole,
@@ -114,12 +116,15 @@ export class ContextRoleRuntime {
   private readonly metrics: ContextMetrics
   private readonly health: ContextRoleHealth
   private readonly scheduler: ContextRoleScheduler
+  /** Learned assistant `/embeddings` support; a 404/405 is remembered as unsupported. */
+  private assistantEmbeddings: 'unknown' | 'supported' | 'unsupported'
 
   constructor(dependencies: ContextRoleRuntimeDependencies) {
     this.dependencies = dependencies
     this.metrics = dependencies.metrics ?? new ContextMetrics()
     this.health = dependencies.health ?? new ContextRoleHealth()
     this.scheduler = dependencies.scheduler ?? new ContextRoleScheduler()
+    this.assistantEmbeddings = dependencies.assistantEmbeddings ?? 'unknown'
   }
 
   /** Run one generative role task with fallback across candidates. */
@@ -218,54 +223,61 @@ export class ContextRoleRuntime {
   async embed(texts: readonly string[], options: { readonly signal?: AbortSignal; readonly key?: string } = {}): Promise<ContextRoleEmbeddingOutcome> {
     const started = Date.now()
     const roles = this.dependencies.readRoles()
-    const route = resolveContextRoleRoute({
-      role: 'embedding',
-      roles,
-      embedding: {
-        localReady: this.dependencies.localEmbedding?.available() === true,
-        assistantEmbeddings: this.dependencies.assistantEmbeddings ?? 'unknown',
-      },
-    })
+    const own = roles.embedding
     const signal = options.signal ?? new AbortController().signal
-
-    if (route.source === 'local') {
-      const local = this.dependencies.localEmbedding
-      if (local === undefined || !local.available()) {
-        return { ok: false, kind: 'local-unavailable', reason: 'local embedding runtime is unavailable', source: route.source, latencyMs: Date.now() - started }
-      }
-      try {
-        const result = await this.scheduler.run({
-          key: `${options.key ?? 'embedding'}:embedding`,
-          priority: 'background',
-          signal,
-          task: scheduledSignal => local.embed(texts, scheduledSignal),
-        })
-        this.metrics.inc('context_role_calls_total', { role: 'embedding', source: 'local', outcome: 'ok' })
-        this.metrics.observe('context_role_latency_ms', { role: 'embedding', source: 'local' }, result.latencyMs)
-        return { ok: true, vectors: result.vectors, dimension: result.dimension, modelId: result.modelId, source: 'local', latencyMs: result.latencyMs }
-      } catch (error) {
-        this.metrics.inc('context_role_fail_total', { role: 'embedding', source: 'local', kind: 'local-error' })
-        return { ok: false, kind: 'local-error', reason: error instanceof Error ? error.message : 'local embedding failed', source: 'local', latencyMs: Date.now() - started }
-      }
+    if (!own.enabled) {
+      return { ok: false, kind: 'lexical', reason: 'embedding role is disabled', source: 'lexical', latencyMs: 0 }
     }
 
-    if (route.source === 'lexical') {
-      return { ok: false, kind: 'lexical', reason: route.reason ?? 'embedding is not configured', source: 'lexical', latencyMs: 0 }
+    // Candidates are built by the specification order, not by route
+    // resolution: a failing dedicated endpoint must still be able to fall
+    // through to the built-in model, and a missing built-in model to the
+    // assistant endpoint. The chat model is never a candidate.
+    type EmbeddingCandidate = { readonly route: ContextRoleRoute; readonly local?: LocalEmbeddingProvider }
+    const candidates: EmbeddingCandidate[] = []
+    if (isContextRoleConfigured(own)) {
+      candidates.push({ route: resolveContextRoleRoute({ role: 'embedding', roles }) })
     }
-
-    // Dedicated endpoint, with the assistant endpoint as a compatibility hop
-    // only when it is known to expose /embeddings.
-    const candidates: ContextRoleRoute[] = [route]
+    const local = this.dependencies.localEmbedding
+    if (local !== undefined && local.available()) {
+      candidates.push({
+        route: {
+          role: 'embedding',
+          source: 'local',
+          transport: 'local-onnx',
+          promptProfile: 'embedding',
+          model: BUILTIN_EMBEDDING_MODEL_ID,
+          timeoutMs: CONTEXT_ROLE_TIMEOUT_MS.embedding,
+        },
+        local,
+      })
+    }
     const assistant = roles.assistant
-    if (route.source === 'role' && this.dependencies.assistantEmbeddings === 'supported' && assistant.enabled && assistant.baseURL !== '' && assistant.model !== '') {
-      candidates.push({ ...route, source: 'assistant', baseURL: assistant.baseURL, model: assistant.model, ...(assistant.apiKey === '' ? {} : { apiKey: assistant.apiKey }) })
+    const assistantState = this.assistantEmbeddings
+    if (assistantState !== 'unsupported' && assistant.enabled && assistant.baseURL !== '' && assistant.model !== '') {
+      candidates.push({
+        route: {
+          role: 'embedding',
+          source: 'assistant',
+          transport: 'openai-compatible',
+          promptProfile: 'embedding',
+          baseURL: assistant.baseURL,
+          model: assistant.model,
+          ...(assistant.apiKey === '' ? {} : { apiKey: assistant.apiKey }),
+          timeoutMs: CONTEXT_ROLE_TIMEOUT_MS.embedding,
+        },
+      })
     }
-    let last: ContextRoleError | undefined
+    if (candidates.length === 0) {
+      return { ok: false, kind: 'lexical', reason: 'no embedding endpoint or local model is available', source: 'lexical', latencyMs: 0 }
+    }
+
+    let last: { error: ContextRoleError; source: ContextRoleRoute['source'] } | undefined
     for (const candidate of candidates) {
       if (options.signal?.aborted === true) break
-      const health = this.health.check(candidate)
+      const health = this.health.check(candidate.route)
       if (!health.allowed) {
-        last = new ContextRoleError('role-timeout', `circuit is ${health.state}`)
+        last = { error: new ContextRoleError('role-timeout', `circuit is ${health.state}`), source: candidate.route.source }
         continue
       }
       try {
@@ -273,33 +285,40 @@ export class ContextRoleRuntime {
           key: `${options.key ?? 'embedding'}:embedding`,
           priority: 'background',
           signal,
-          task: async (scheduledSignal) => {
-            const client = roleClientFor(candidate, {
+          task: scheduledSignal => candidate.local === undefined
+            ? roleClientFor(candidate.route, {
               llm: this.dependencies.llm,
               ...(this.dependencies.fetchImpl === undefined ? {} : { fetchImpl: this.dependencies.fetchImpl }),
-            })
-            return client.embed(candidate, texts, scheduledSignal)
-          },
+            }).embed(candidate.route, texts, scheduledSignal)
+            : candidate.local.embed(texts, scheduledSignal),
         })
-        this.health.success(candidate)
-        this.metrics.inc('context_role_calls_total', { role: 'embedding', source: candidate.source, outcome: 'ok' })
-        this.metrics.observe('context_role_latency_ms', { role: 'embedding', source: candidate.source }, result.latencyMs)
-        return { ok: true, vectors: result.vectors, dimension: result.dimension, modelId: result.modelId, source: candidate.source, latencyMs: result.latencyMs }
+        this.health.success(candidate.route)
+        this.metrics.inc('context_role_calls_total', { role: 'embedding', source: candidate.route.source, outcome: 'ok' })
+        this.metrics.observe('context_role_latency_ms', { role: 'embedding', source: candidate.route.source }, result.latencyMs)
+        if (candidate.route.source === 'assistant') this.assistantEmbeddings = 'supported'
+        return { ok: true, vectors: result.vectors, dimension: result.dimension, modelId: result.modelId, source: candidate.route.source, latencyMs: result.latencyMs }
       } catch (error) {
-        last = error instanceof ContextRoleError ? error : new ContextRoleError('role-http', 'embedding call failed')
-        this.health.failure(candidate, last)
-        this.metrics.inc('context_role_fail_total', { role: 'embedding', source: candidate.source, kind: last.kind })
+        const failure = error instanceof ContextRoleError
+          ? error
+          : new ContextRoleError(candidate.route.source === 'local' ? 'role-incompatible' : 'role-http', error instanceof Error ? error.message : 'embedding call failed')
+        this.health.failure(candidate.route, failure)
+        this.metrics.inc('context_role_fail_total', { role: 'embedding', source: candidate.route.source, kind: failure.kind })
+        if (candidate.route.source === 'assistant' && failure.status !== undefined && (failure.status === 404 || failure.status === 405)) {
+          this.assistantEmbeddings = 'unsupported'
+        }
+        last = { error: failure, source: candidate.route.source }
       }
     }
     return {
       ok: false,
-      kind: last?.kind ?? 'lexical',
-      reason: last?.message ?? 'embedding is unavailable',
-      source: route.source,
+      kind: last?.error.kind ?? 'lexical',
+      reason: last?.error.message ?? 'embedding is unavailable',
+      source: last?.source ?? 'lexical',
       latencyMs: Date.now() - started,
     }
   }
 
+  /** Resolved route per role, for settings display. */
   status(options: { readonly main?: AgentTeamModelSelection } = {}): ContextRoleRuntimeStatus {
     const roles = this.dependencies.readRoles()
     const routeFor = (role: ContextModelRole): ContextRoleRoute => resolveContextRoleRoute({
@@ -308,7 +327,7 @@ export class ContextRoleRuntime {
       ...(options.main === undefined ? {} : { main: options.main }),
       embedding: {
         localReady: this.dependencies.localEmbedding?.available() === true,
-        assistantEmbeddings: this.dependencies.assistantEmbeddings ?? 'unknown',
+        assistantEmbeddings: this.assistantEmbeddings,
       },
     })
     return {
