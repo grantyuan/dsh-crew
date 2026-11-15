@@ -344,6 +344,34 @@ describe('context tools render the model-facing decision surface', () => {
     expect(tools.get('context_recall')!.description).toContain('never a checkpoint ref')
   })
 
+  it('context_recall read renders the source, its belief state, and the truncation bound', () => {
+    const tools = contextTools()
+    const text = renderText(tools.get('context_recall')!, { ref: 'cu:s1:1' }, {
+      items: [],
+      degraded: [],
+      read: {
+        ref: 'cu:s1:1',
+        sessionId: 's1',
+        fromSeq: 1,
+        toSeq: 1,
+        text: 'The embedding size is 1024.',
+        truncated: true,
+        totalChars: 5_000,
+        status: 'superseded',
+        confidence: 0.9,
+        supersededBy: 'cu:s1:3',
+        validTo: '2026-11-15T09:00:00.000Z',
+        units: [{ ref: 'cu:s1:1', status: 'superseded', confidence: 0.9, supersededBy: 'cu:s1:3' }],
+      },
+    })
+    expect(text).toContain('Read cu:s1:1 (seq 1-1)')
+    expect(text).toContain('superseded replaced by cu:s1:3')
+    expect(text).toContain('confidence 0.9')
+    expect(text).toContain('The embedding size is 1024.')
+    expect(text).toContain('truncated at')
+    expect(tools.get('context_recall')!.description).toContain('read the original text behind one `cu:`/`seg:` ref')
+  })
+
   it('context_review keeps the supersession history and its replacement ref visible', () => {
     const tools = contextTools()
     expect(tools.has('context_review')).toBe(true)

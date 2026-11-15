@@ -6350,6 +6350,22 @@ export default class AgentTeam extends TypertRemoteService {
   async contextRecallForAgent(agent: Agent, request: AgentTeamContextRecallRequest): Promise<AgentTeamContextRecallToolOutcome> {
     const member = this.memberForAgent(agent)
     if (member === undefined || member.state !== 'enabled') throw new Error('context_recall requires an active Team Member')
+    if (request.ref !== undefined && request.ref.trim() !== '') {
+      const read = this.contextIndex().read(member.memberId, {
+        ref: request.ref,
+        ...(request.maxChars === undefined ? {} : { maxChars: request.maxChars }),
+      })
+      return Object.freeze(read.ok
+        ? {
+            items: [],
+            degraded: [],
+            read: Object.freeze({ ...read, units: read.units.map(unit => Object.freeze({ ...unit })) }),
+          }
+        : { items: [], degraded: [read.reason], reason: read.reason })
+    }
+    if (request.query === undefined || request.query.trim() === '') {
+      throw new Error('context_recall requires a query for search or a ref for read')
+    }
     const result = this.contextIndex().recall(this.contextRecallQuery(agent, member.memberId, request))
     return Object.freeze({
       items: result.items.map(item => Object.freeze({ ...item, sources: [...item.sources] })),
@@ -6468,7 +6484,7 @@ export default class AgentTeam extends TypertRemoteService {
     return {
       memberId,
       sessionId: agent.session.id,
-      query: request.query,
+      query: request.query ?? '',
       ...(request.mode === undefined ? {} : { mode: request.mode }),
       ...(request.limit === undefined ? {} : { limit: request.limit }),
       ...(request.includeSuperseded === undefined ? {} : { includeSuperseded: request.includeSuperseded }),

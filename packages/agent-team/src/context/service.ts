@@ -19,6 +19,7 @@ import {
 } from './compaction.ts'
 import { recallContext, type ContextRecallQuery, type ContextRecallResult } from './recall.ts'
 import { renderRecallSnapshot, type ContextRecallSnapshot } from './recall-snapshot.ts'
+import { readContextSource, type ContextReadRequest, type ContextReadResult } from './read.ts'
 import { reviewContext } from './review.ts'
 import { ContextStore } from './store.ts'
 import type { ContextReviewRequest, ContextReviewResult } from './types.ts'
@@ -75,6 +76,17 @@ export class ContextService {
   /** Render the replace-in-place snapshot for the current recall result. */
   snapshot(query: ContextRecallQuery): ContextRecallSnapshot | undefined {
     return renderRecallSnapshot(this.recall(query))
+  }
+
+  /** Read original indexed text for one `cu:` / `seg:` ref; never mutates. */
+  read(memberId: string, request: ContextReadRequest): ContextReadResult {
+    if (this.store === undefined) return { ok: false, reason: 'index-unavailable' }
+    try {
+      return readContextSource(this.store, memberId, request)
+    } catch (error) {
+      this.options.onError?.(error, 'read')
+      return { ok: false, reason: 'read-failed' }
+    }
   }
 
   /** Read-only decision/commitment review; superseded history is included by default. */

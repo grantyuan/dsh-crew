@@ -320,9 +320,11 @@ const contextInterrupt = defineTool({
  */
 const contextRecall = defineTool({
   name: 'context_recall',
-  description: 'Search your own derived context index for earlier passages worth re-reading: exact identifiers (paths, URLs, issue and commit ids, versions, commands, quoted phrases), keywords, facets (time, Workspace, role, subject), and — when a background embedding pass has caught up — semantic neighbours. Results are fused from independent routes and ranked; routes that could not run are named under `degraded`, so an empty `items` with a `degraded` entry means the index is incomplete, not that nothing exists. Use it when you suspect earlier work holds the answer (a decision, an error signature, a file path, a previous conclusion). Do not use it for current Team state — Threads, Tasks, Claims, and Inbox are team_view/team_thread/team_inbox authority. `includeSuperseded` asks why a conclusion changed and is the only way superseded units appear; the default hides them. The returned `ref` is a stable derived-context identifier and is never a checkpoint ref: only context_checkpoint/context_timeline produce refs that context_rollover accepts.',
+  description: 'Search your own derived context index for earlier passages worth re-reading, or read the original text behind one `cu:`/`seg:` ref. Pass `query` to search: exact identifiers (paths, URLs, issue and commit ids, versions, commands, quoted phrases), keywords, facets (time, Workspace, role, subject), and — when a background embedding pass has caught up — semantic neighbours. Results are fused from independent routes and ranked; routes that could not run are named under `degraded`, so an empty `items` with a `degraded` entry means the index is incomplete, not that nothing exists. Pass `ref` (a `cu:<sessionId>:<seq>` unit or `seg:<sessionId>:<from>-<to>` window, as returned by context_recall/context_review) to read the indexed source text; the read also states whether it was superseded, by which ref, and its confidence. Reads are bounded by `maxChars` (default 4000) and are strictly read-only. Use search when you suspect earlier work holds the answer (a decision, an error signature, a file path, a previous conclusion). Do not use it for current Team state — Threads, Tasks, Claims, and Inbox are team_view/team_thread/team_inbox authority. `includeSuperseded` asks why a conclusion changed and is the only way superseded units appear in search; the default hides them. The returned `ref` is a stable derived-context identifier and is never a checkpoint ref: only context_checkpoint/context_timeline produce refs that context_rollover accepts.',
   parameters: {
-    query: { type: 'string', required: true, description: 'What to look for, in natural language or as exact identifiers. Keep it short: identifiers and distinctive phrases rank best.' },
+    query: { type: 'string', description: 'Search text: what to look for, in natural language or as exact identifiers. Keep it short: identifiers and distinctive phrases rank best. Omit when using `ref`.' },
+    ref: { type: 'string', description: 'Read mode: a cu:<sessionId>:<seq> unit ref or seg:<sessionId>:<from>-<to> window ref. Omit when using `query`.' },
+    maxChars: { type: 'number', description: 'Read mode: maximum characters of source text to return (default 4000; Host caps at 16000).' },
     mode: { type: 'string', description: 'auto (default) | exact | lexical | facet | vector | graph. Restrict the route only when you know which signal is missing.' },
     limit: { type: 'number', description: 'Maximum number of units to return (default 5, at most 8).' },
     includeSuperseded: { type: 'boolean', description: 'Include units superseded by a later correction (default false).' },
@@ -350,8 +352,35 @@ const contextRecall = defineTool({
       } } },
       degraded: { type: 'array', required: true, items: { type: 'string' } },
       reason: { type: 'string' },
+      read: { type: 'object', additionalProperties: false, properties: {
+        ref: { type: 'string', required: true },
+        sessionId: { type: 'string', required: true },
+        fromSeq: { type: 'number', required: true },
+        toSeq: { type: 'number', required: true },
+        text: { type: 'string', required: true },
+        truncated: { type: 'boolean', required: true },
+        totalChars: { type: 'number', required: true },
+        status: { type: 'string', required: true },
+        confidence: { type: 'number', required: true },
+        supersededBy: { type: 'string' },
+        validTo: { type: 'string' },
+        units: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          ref: { type: 'string', required: true },
+          status: { type: 'string', required: true },
+          confidence: { type: 'number', required: true },
+          supersededBy: { type: 'string' },
+          validTo: { type: 'string' },
+        } } },
+      } },
     } },
     render: (args, value) => {
+      if (value.read !== undefined) {
+        const read = value.read
+        const replaced = read.supersededBy === undefined ? '' : ` replaced by ${read.supersededBy}`
+        const validity = read.validTo === undefined ? '' : ` (valid to ${read.validTo})`
+        const cut = read.truncated ? `\n[truncated at ${read.text.length - 1} of ${read.totalChars} characters; raise maxChars to read more]` : ''
+        return [{ type: 'text', text: `Read ${read.ref} (seq ${read.fromSeq}-${read.toSeq}) · ${read.status}${replaced}${validity} · confidence ${read.confidence}:\n${read.text}${cut}` }]
+      }
       if (value.items.length === 0) {
         const why = value.reason === undefined ? '' : ` (${value.reason})`
         const routes = value.degraded.length === 0 ? '' : ` Degraded routes: ${value.degraded.join(', ')}.`
@@ -372,8 +401,21 @@ const contextRecall = defineTool({
   },
   async execute(args, exec) {
     const agent = agentOf(exec)
+    const ref = typeof args.ref === 'string' ? args.ref.trim() : ''
+    if (ref !== '') {
+      const outcome = await service(agent).contextRecallForAgent(agent, {
+        ref,
+        ...(typeof args.maxChars === 'number' ? { maxChars: args.maxChars } : {}),
+      })
+      return {
+        items: outcome.items.map(toRecallItem),
+        degraded: [...outcome.degraded],
+        ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        ...(outcome.read === undefined ? {} : { read: { ...outcome.read, units: outcome.read.units.map(unit => ({ ...unit })) } }),
+      }
+    }
     const query = typeof args.query === 'string' ? args.query.trim() : ''
-    if (query === '') throw new Error('context_recall requires a non-empty query')
+    if (query === '') throw new Error('context_recall requires a query for search or a ref for read')
     const mode = typeof args.mode === 'string' && RECALL_MODES.has(args.mode)
       ? args.mode as NonNullable<AgentTeamContextRecallRequest['mode']>
       : undefined

@@ -1826,7 +1826,12 @@ export interface AgentTeamListInterruptsToolOutcome {
 
 /** One model-facing recall request; the Host derives the Member and Session. */
 export interface AgentTeamContextRecallRequest {
-  readonly query: string
+  /** Search text. Required for search, omitted when `ref` reads one source. */
+  readonly query?: string
+  /** Read mode: `cu:<sessionId>:<seq>` or `seg:<sessionId>:<from>-<to>`. */
+  readonly ref?: string
+  /** Read mode bound in characters; defaults to 4000 and is capped by the Host. */
+  readonly maxChars?: number
   readonly mode?: 'auto' | 'exact' | 'lexical' | 'facet' | 'vector' | 'graph'
   readonly limit?: number
   readonly includeSuperseded?: boolean
@@ -1853,6 +1858,30 @@ export interface AgentTeamContextRecallItem {
   readonly validTo?: string
 }
 
+export interface AgentTeamContextRecallReadUnit {
+  readonly ref: string
+  readonly status: 'active' | 'superseded' | 'expired' | 'unverified'
+  readonly confidence: number
+  readonly supersededBy?: string
+  readonly validTo?: string
+}
+
+/** Original indexed source text for one `cu:`/`seg:` ref, with belief state. */
+export interface AgentTeamContextRecallRead {
+  readonly ref: string
+  readonly sessionId: string
+  readonly fromSeq: number
+  readonly toSeq: number
+  readonly text: string
+  readonly truncated: boolean
+  readonly totalChars: number
+  readonly status: 'active' | 'superseded' | 'expired' | 'unverified'
+  readonly confidence: number
+  readonly supersededBy?: string
+  readonly validTo?: string
+  readonly units: readonly AgentTeamContextRecallReadUnit[]
+}
+
 /**
  * `degraded` names routes that could not run (for example `graph-no-seeds`);
  * empty means every applicable route produced a result.
@@ -1861,6 +1890,8 @@ export interface AgentTeamContextRecallToolOutcome {
   readonly items: readonly AgentTeamContextRecallItem[]
   readonly degraded: readonly string[]
   readonly reason?: string
+  /** Present only for a source read (`ref`), never for search. */
+  readonly read?: AgentTeamContextRecallRead
 }
 
 /** Read-only decision review over the context graph. */
