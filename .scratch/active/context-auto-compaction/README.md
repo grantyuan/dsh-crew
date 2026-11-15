@@ -3,7 +3,7 @@
 - **状态**：设计稿完成；**已确认 2 项，1 项策略（S1）+ 17 个方向（D1–D17）待确认**，正文暂按推荐书写。未改生产代码。
 - **本轮新增**：§14.2 性能/并发验收阈值（100/500/1000 轮，可自动化）；§7.2.1 smart-tsdb 用户文档评估（默认仍 SQLite，C 为可选 sidecar）；**§26 职能模型注册表**（`assistant`/`embedding`/`decision`/`extraction`，Member × 角色配置）；**§26.9–26.13 按 ≥8 GB 显存两档重选**（GPU 档 Qwen3.5-4B / NuExtract3-4B / Qwen3-Embedding-0.6B / 远程 gemma-3-4b-it，CPU 档 Laya / GLiNER2 / Qwen3.5-2B）；**新增 §26.15 逐角色写清在写入链/压缩链/读取链中的作用点**；4B 与职能模型 token **不计入节省目标**，工作模型 p95 不放宽。
 - **最后核对**：2026-11-15（外部检索模型卡/HF API/论文；代码基线 `packages/`、`cordis.patch.yml`；小模型端点实测 2026-11-14）。
-- **P0 验证（2026-11-15）**：`summarize()` 覆写、framing/锁、6k 输入延迟（冷 1.7 s）通过；**Laya 中文关系分类不通过**（0.45–0.62，update 召回≈0；同题 `gemma-3-4b-it` 0.90）；**Qwen3-Embedding 动态 int8 不通过**（ONNX int8 top-1 0.64→0.04，余弦 0.145；权重-only 4-bit 保持 0.64）。两项待裁定后再进入 P1，详见 [materials/P0-validation-2026-11-15.md](materials/P0-validation-2026-11-15.md)。
+- **P0 验证（2026-11-15）**：`summarize()` 覆写、framing/锁、6k 输入延迟（冷 1.7 s）通过。决策与嵌入按中英双语重测后**换模型达标**：决策默认改 `Qwen3-4B-Instruct-2507` Q4（中 0.967 / 英 0.950，基线 `gemma-3-4b-it` 0.900 / 0.833；Laya 0.517 / 0.650、gemma-3-1b 0.367 / 0.550 淘汰）；嵌入默认改 `granite-embedding-97m-multilingual-r2` 官方 int8（98 MB，中 1.000/1.000、英 0.920/1.000，Qwen3-Embedding 动态 int8 中英同时崩塌）。两项都满足「中英都不低于基线 + CPU 档可用」，详见 [materials/P0-validation-2026-11-15.md](materials/P0-validation-2026-11-15.md)。
 - **当前前沿**：等 Human 在 `spec.md` §3.5 与 §19 一次定完；确认前不产出 tickets、不动代码。
 - **完成条件**：§14 的 P0–P5、§14.2 性能/并发门槛与 §14.3/§26.8 职能模型门槛全部通过，且 `docs/` 相关表述与新行为一致。
 - **正式文档出口**：`docs/architecture/tools-and-preset.md`、`docs/team-collaboration/memory-and-context.md`、`docs/architecture/host-authority.md`；完成后归档到 `archive/YYYY-MM/`。
@@ -40,4 +40,4 @@ D1 摘要保真、D2 缓存经济、D3 跨代衔接、D4 关键词组织、D5 �
 - 缓存：§10。冲突与取舍：§4、§16。
 - 分期验收：§14（含 §14.3 4B/职能模型异步预算）。
 - 职能模型与配置：§26（角色表、解析顺序、健康降级、嵌入落地、职责边界）；协作时序 §26.8；**各模型在流程中的作用点 §26.15**；按 ≥8 GB / 纯 CPU 两档选型与取舍 §26.9–26.13。
-- 选型结论（2026-11-15，≥8 GB 两档；除远程 `gemma-3-4b-it` 外均为估算/发布方自测，待 P0 实测）：**GPU 档**决策 `Qwen3.5-4B`（Q4 2.9GB）、抽取 `NuExtract3-4B`（Q4 2.9GB）、嵌入 `Qwen3-Embedding-0.6B`、助手远程 `gemma-3-4b-it`（无远程时本地 `Qwen3.5-4B` ≤8k）；**CPU 档**决策 `Laya`（322M，193–464 ms）、抽取 `GLiNER2`（205M，10–100 ms/条）、助手 `Qwen3.5-2B`。基础常驻 ≈1.5GB + **单个 4B 槽** ≈3.4–3.9GB，峰值 ≈5.0–5.5GB；两个 4B 不能同时常驻（必须 LRU），40k 上下文仍走远程。每个模型在哪一步起作用见 §26.15。
+- 选型结论（2026-11-15，≥8 GB 两档）：**GPU 档**决策 `Qwen3.5-4B`（Q4 2.9GB）、抽取 `NuExtract3-4B`（Q4 2.9GB）、嵌入 `Qwen3-Embedding-0.6B`、助手远程 `gemma-3-4b-it`（无远程时本地 `Qwen3.5-4B` ≤8k）；**CPU 档**决策 `Qwen3-4B-Instruct-2507` Q4（P0 实测中 0.967 / 英 0.950）、抽取 `GLiNER2`（205M，10–100 ms/条）、嵌入 `granite-embedding-97m-multilingual-r2` int8（98 MB）、助手不配置。基础常驻 ≈1.5GB + **单个 4B 槽** ≈3.4–3.9GB，峰值 ≈5.0–5.5GB；两个 4B 不能同时常驻（必须 LRU），40k 上下文仍走远程。每个模型在哪一步起作用见 §26.15。**§26.9–26.13 中被 P0 推翻的两处（CPU 决策 Laya、嵌入 Qwen3-Embedding int8）尚未改入 spec，等裁定后一次性同步。**
