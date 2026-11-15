@@ -41,6 +41,8 @@ import { EmbeddingModelManager } from './context/embedding/model-manager.ts'
 import { LocalEmbeddingRuntime } from './context/embedding/runtime.ts'
 import { CONTEXT_MODEL_ROLES, contextRoleModelsFromSettings, contextRoleSettingKey, normalizeContextRoleEntry, resolveContextRoleRoute, validateContextRoleEntry, type ContextModelRole, type ContextRoleModels } from './context/role-models.ts'
 import { ContextRoleRuntime } from './context/role-runtime.ts'
+import type { ContextRecallQuery } from './context/recall.ts'
+import { ContextService } from './context/service.ts'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
 import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, createTeamContextProjectionConfig, createTeamContextProjectionDefinition, foldTeamContextProjection, retainedTopicsThrough, TeamContextProjectionHost } from './context-projection.ts'
 import { AGENT_TEAM_HUMAN_HANDLE, AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamLedger, agentTeamAssistantActor, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
@@ -210,6 +212,10 @@ import type {
   AgentTeamSetHumanProfileResult,
   AgentTeamSetGatewayConfigRequest,
   AgentTeamSetGatewayConfigResult,
+  AgentTeamContextRecallRequest,
+  AgentTeamContextRecallSnapshot,
+  AgentTeamContextRecallSnapshotRequest,
+  AgentTeamContextRecallToolOutcome,
   AgentTeamContextRoleConfig,
   AgentTeamContextRoleConfigRequest,
   AgentTeamContextRoleName,
@@ -1082,6 +1088,8 @@ export default class AgentTeam extends TypertRemoteService {
   private readonly embeddingModel = new EmbeddingModelManager()
   /** Local ONNX runtime over the built-in model; degrades when the optional dependency is absent. */
   private readonly localEmbedding = new LocalEmbeddingRuntime({ manager: this.embeddingModel })
+  /** Derived context index, opened on first recall; rebuildable and never Team authority. */
+  private contextService: ContextService | undefined
   /** Functional role runtime, built on first use once the LLM service exists. */
   private roleRuntime: ContextRoleRuntime | undefined
   private lifecycleTail: Promise<void> = Promise.resolve()
@@ -1505,6 +1513,8 @@ export default class AgentTeam extends TypertRemoteService {
       this.pressurePolicy.dispose()
       this.roleRuntime?.dispose()
       this.localEmbedding.dispose()
+      this.contextService?.close()
+      this.contextService = undefined
       if (this.attachmentGcTimer !== undefined) clearInterval(this.attachmentGcTimer)
       this.attachmentGcTimer = undefined
       this.emitChanged()
@@ -6261,6 +6271,74 @@ export default class AgentTeam extends TypertRemoteService {
     // The agent surface only ever releases; the idempotency assertion above
     // guarantees a retried call resolves to this call's own `released` record.
     return { interruptRef: result.value.interruptRef, resolution: 'released' }
+  }
+
+  /**
+   * Agent-only recall over the derived context index. Read-only and model-free:
+   * the index is rebuilt from Session events and holds no Team authority, so an
+   * unavailable index answers with `index-unavailable` instead of throwing.
+   */
+  async contextRecallForAgent(agent: Agent, request: AgentTeamContextRecallRequest): Promise<AgentTeamContextRecallToolOutcome> {
+    const member = this.memberForAgent(agent)
+    if (member === undefined || member.state !== 'enabled') throw new Error('context_recall requires an active Team Member')
+    const result = this.contextIndex().recall(this.contextRecallQuery(agent, member.memberId, request))
+    return Object.freeze({
+      items: result.items.map(item => Object.freeze({ ...item, sources: [...item.sources] })),
+      degraded: [...result.degraded],
+      ...(result.reason === undefined ? {} : { reason: result.reason }),
+    })
+  }
+
+  /**
+   * Pre-step snapshot for the Member's current turn. `undefined` means there is
+   * nothing to inject (no query, empty index, or index unavailable), so the
+   * caller appends no empty block. Reads the local index synchronously; no model
+   * is awaited on the pre-step path.
+   */
+  async contextRecallSnapshotForAgent(agent: Agent, request: AgentTeamContextRecallSnapshotRequest): Promise<AgentTeamContextRecallSnapshot | undefined> {
+    const member = this.memberForAgent(agent)
+    if (member === undefined || member.state !== 'enabled' || request.query.trim() === '') return undefined
+    return this.contextIndex().snapshot(this.contextRecallQuery(agent, member.memberId, { query: request.query, limit: 3 }))
+  }
+
+  /** Open the derived index on demand; a failure leaves it unavailable, not fatal. */
+  private contextIndex(): ContextService {
+    this.contextService ??= new ContextService({
+      onError: (error, stage) => {
+        this.ctx.logger.warn(`agent-team: context index ${stage} failed: ${error instanceof Error ? error.message : String(error)}`)
+      },
+    })
+    return this.contextService
+  }
+
+  /** Normalize one tool/snapshot request into the recall query the index owns. */
+  private contextRecallQuery(agent: Agent, memberId: AgentTeamMemberId, request: AgentTeamContextRecallRequest): ContextRecallQuery {
+    const from = this.recallInstant(request.timeRange?.from)
+    const to = this.recallInstant(request.timeRange?.to)
+    const timeRange = request.timeRange === undefined
+      ? undefined
+      : {
+          ...(from === undefined ? {} : { fromMs: from }),
+          ...(to === undefined ? {} : { toMs: to }),
+        }
+    return {
+      memberId,
+      sessionId: agent.session.id,
+      query: request.query,
+      ...(request.mode === undefined ? {} : { mode: request.mode }),
+      ...(request.limit === undefined ? {} : { limit: request.limit }),
+      ...(request.includeSuperseded === undefined ? {} : { includeSuperseded: request.includeSuperseded }),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      ...(timeRange === undefined ? {} : { timeRange }),
+      ...(request.subjects === undefined ? {} : { subjects: request.subjects }),
+      ...(request.roles === undefined ? {} : { roles: request.roles }),
+    }
+  }
+
+  private recallInstant(value: string | undefined): number | undefined {
+    if (value === undefined) return undefined
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
   }
 
   /** Whether one opaque ref is a resolved anchor of this Member's current lineage window. */

@@ -13,7 +13,7 @@ dsh-crew 基于 [dsh-agent-team](https://github.com/wowyuarm/dsh-agent-team) 扩
 ## 能力概览
 
 - 持久化的单 Host Team：Channel、Message、Task、Thread、Claim、Agent membership，以及成员级私有 memory、notes 与 skills。
-- 隔离的 `team-member` preset，带十二个面向模型的工具：`team_inbox`、`team_thread`、`team_message`、`team_claim`、`team_view`、`team_supervise`、`team_watch`、`team_job`、`context_rollover`、`context_checkpoint`、`context_timeline`、`context_interrupt`。
+- 隔离的 `team-member` preset，带十三个面向模型的工具：`team_inbox`、`team_thread`、`team_message`、`team_claim`、`team_view`、`team_supervise`、`team_watch`、`team_job`、`context_rollover`、`context_checkpoint`、`context_timeline`、`context_interrupt`、`context_recall`。
 - Human 的 Web Client 就嵌在普通 DSH UI 里：创建 Channel 与 Agent、管理成员、发送与管理消息、看收件箱、打开 Thread、处理 Task。
 - 拉取式协作协议。Agent Inbox admission 是持久化事实，但不表示模型已经处理了更新。
 - 一个 DSH home 对应一个 Team 协作域；append-only operation ledger 是权威，UI、Remote response、tools、Inbox 都是它的 projection。普通 DSH Session 不会获得 Team tools 或 guidance。
@@ -22,7 +22,7 @@ dsh-crew 基于 [dsh-agent-team](https://github.com/wowyuarm/dsh-agent-team) 扩
 
 - **外部 Agent 网关。** 可选启用的 localhost HTTP 网关，附带客户端脚本与 skill：本进程之外的 agent harness 能以无会话的轮询 Member 身份加入；同机多 agent 按 handle 隔离状态；DM 与收件通知经 watch 轮询送达；外部 agent 上下文经成员心跳保持同步。网关开关就在 Team 设置里实时生效。
 - **消息中心与消息管理。** 从 ledger facts 投影的 Human 消息中心，消息编辑 / 撤回 / 回复，带批量验收的 Human 任务列表页，以及接管全部系统通知投递的 Team Assistant 系统身份。
-- **更多成员工具。** `team_watch`（仅 Leader 可用的成员观察）、`team_job`（后台作业，配套 LLM 路由故障转移）、`context_interrupt`（待继续的打断栈，支持记录、查询与释放）。
+- **更多成员工具。** `team_watch`（仅 Leader 可用的成员观察）、`team_job`（后台作业，配套 LLM 路由故障转移）、`context_interrupt`（待继续的打断栈，支持记录、查询与释放），以及 `context_recall`（对派生上下文索引的只读检索，融合精确、词法、facet、向量与图多路）。
 - **成员 prompt 画像与上下文控制。** 成员级上下文窗口覆盖与 fresh-start 策略、在回合边界换装的自定义 prompt 段落（带保护标记的段落裁剪）、section 用量投影与可确认的自动修剪、prompt 对话框中 propose-only 的 LLM 精选。
 - **续行与韧性。** 上下文相关性判断自动为 fresh 成员续期、按 Workspace 重新武装的 idle continuation watcher、输出截断升级机制，以及带继任历史继承与配置同步的监督交接。
 - **成员任务队列**（支持任务转派征询），外加联络员机制——成员完工后自动汇报并推送后续 Task。

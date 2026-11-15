@@ -16,7 +16,7 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 /** On-disk layout version stored in `PRAGMA user_version`. */
-export const CONTEXT_SCHEMA_VERSION = 1
+export const CONTEXT_SCHEMA_VERSION = 2
 
 /** Which FTS tokenizers this SQLite build accepted. */
 export interface ContextFtsCapabilities {
@@ -117,6 +117,29 @@ CREATE TABLE IF NOT EXISTS outbox (
   last_error   TEXT
 ) STRICT;
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(kind, available_at);
+
+CREATE TABLE IF NOT EXISTS vector (
+  owner_kind TEXT NOT NULL,
+  owner_id   TEXT NOT NULL,
+  model      TEXT NOT NULL,
+  dim        INTEGER NOT NULL,
+  vector     BLOB NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (owner_kind, owner_id)
+) STRICT, WITHOUT ROWID;
+`
+
+/** Additive migration from the P1.1 layout; safe to re-run. */
+const MIGRATE_1_TO_2 = `
+CREATE TABLE IF NOT EXISTS vector (
+  owner_kind TEXT NOT NULL,
+  owner_id   TEXT NOT NULL,
+  model      TEXT NOT NULL,
+  dim        INTEGER NOT NULL,
+  vector     BLOB NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (owner_kind, owner_id)
+) STRICT, WITHOUT ROWID;
 `
 
 const FTS_WORD = "CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(unit_id UNINDEXED, body, tokenize='unicode61 remove_diacritics 2')"
@@ -142,11 +165,12 @@ export function openContextDatabase(path: string, options: OpenContextDatabaseOp
 
     const row = db.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
     const onDisk = row?.user_version ?? 0
-    if (onDisk !== 0 && onDisk !== CONTEXT_SCHEMA_VERSION) {
+    if (onDisk !== 0 && onDisk !== 1 && onDisk !== CONTEXT_SCHEMA_VERSION) {
       throw new Error(`context database at "${actual}" has schema version ${onDisk}, incompatible with this build (${CONTEXT_SCHEMA_VERSION})`)
     }
 
     db.exec(CORE_SCHEMA)
+    if (onDisk === 1) db.exec(MIGRATE_1_TO_2)
 
     let word = false
     let trigram = false
@@ -165,7 +189,7 @@ export function openContextDatabase(path: string, options: OpenContextDatabaseOp
       }
     }
 
-    if (onDisk === 0) db.exec(`PRAGMA user_version = ${CONTEXT_SCHEMA_VERSION}`)
+    if (onDisk !== CONTEXT_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${CONTEXT_SCHEMA_VERSION}`)
     return { db, fts: { word, trigram } }
   } catch (error) {
     db.close()

@@ -1820,6 +1820,57 @@ export interface AgentTeamListInterruptsToolOutcome {
   readonly items: readonly AgentTeamInterruptView[]
 }
 
+/* ------------------------------------------------------------------ *
+ * Derived context recall (L1 index; never Team authority)
+ * ------------------------------------------------------------------ */
+
+/** One model-facing recall request; the Host derives the Member and Session. */
+export interface AgentTeamContextRecallRequest {
+  readonly query: string
+  readonly mode?: 'auto' | 'exact' | 'lexical' | 'facet' | 'vector' | 'graph'
+  readonly limit?: number
+  readonly includeSuperseded?: boolean
+  /** ISO instants; an absent bound is open-ended. */
+  readonly timeRange?: { readonly from?: string; readonly to?: string }
+  readonly subjects?: readonly string[]
+  readonly roles?: readonly string[]
+}
+
+/** One recalled context unit. `ref` is stable across rebuilds. */
+export interface AgentTeamContextRecallItem {
+  readonly ref: string
+  readonly sessionId: string
+  readonly recordedAt: string
+  readonly kind: string
+  readonly status: 'active' | 'superseded' | 'expired'
+  readonly importance: number
+  readonly score: number
+  readonly snippet: string
+  readonly sources: readonly string[]
+}
+
+/**
+ * `degraded` names routes that could not run (for example `graph-unavailable`);
+ * empty means every applicable route produced a result.
+ */
+export interface AgentTeamContextRecallToolOutcome {
+  readonly items: readonly AgentTeamContextRecallItem[]
+  readonly degraded: readonly string[]
+  readonly reason?: string
+}
+
+/** One pre-step recall snapshot request, derived from the current user turn. */
+export interface AgentTeamContextRecallSnapshotRequest {
+  readonly query: string
+}
+
+/** A rendered snapshot; `hash` keys the inject-only-when-changed check. */
+export interface AgentTeamContextRecallSnapshot {
+  readonly text: string
+  readonly hash: string
+  readonly itemCount: number
+}
+
 /** Release one pending interrupt without returning to it. */
 export interface AgentTeamReleaseInterruptToolRequest {
   /** The calling tool invocation's id; the stable idempotency key of this release. */

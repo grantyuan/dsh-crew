@@ -83,15 +83,26 @@ describe('ContextStore unit writes', () => {
   it('keeps the WAL journal and schema version on a file database', () => {
     const path = tempDatabase()
     const store = openStore(path)
-    expect(store.capabilities).toMatchObject({ word: true, trigram: true, schemaVersion: 1 })
+    expect(store.capabilities).toMatchObject({ word: true, trigram: true, schemaVersion: 2 })
 
     const check = new DatabaseSync(path)
     try {
       expect(check.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
     } finally {
       check.close()
     }
+  })
+
+  it('migrates a version-1 database additively', () => {
+    const path = tempDatabase()
+    const legacy = new DatabaseSync(path)
+    legacy.exec('PRAGMA user_version = 1')
+    legacy.close()
+
+    const store = openStore(path)
+    expect(store.capabilities.schemaVersion).toBe(2)
+    expect(store.pendingVectorUnits(10)).toEqual([])
   })
 
   it('writes units when FTS is unavailable', () => {
@@ -190,5 +201,53 @@ describe('ContextStore recall state', () => {
     store.setRecallState('m1', 's1', 'snapshot', 'hash-b')
     expect(store.getRecallState('m1', 's1', 'snapshot')).toBe('hash-b')
     expect(store.getRecallState('m2', 's1', 'snapshot')).toBeUndefined()
+  })
+})
+
+describe('ContextStore vectors and recall routes', () => {
+  function seed(store: ContextStore): void {
+    store.writeUnit(makeUnit({ seq: 1, text: 'Fixed error TS2339 at packages/agent-team/src/index.ts for @alice', recordedAt: '2026-11-15T06:00:00.000Z' }))
+    store.writeUnit(makeUnit({ seq: 2, text: 'Pinned granite-embedding-97m as the default embedding model', recordedAt: '2026-11-15T07:00:00.000Z' }))
+  }
+
+  it('round-trips unit vectors, tracks pending units, and filters by model', () => {
+    const store = openStore()
+    seed(store)
+    expect(store.pendingVectorUnits(10, 'm1').map(unit => unit.unitId)).toEqual(['cu:s1:1', 'cu:s1:2'])
+
+    store.upsertVector('cu:s1:1', 'granite-97m', Float32Array.from([1, 0]))
+    expect(store.getVector('cu:s1:1')).toMatchObject({ unitId: 'cu:s1:1', model: 'granite-97m', dim: 2 })
+    expect([...(store.getVector('cu:s1:1')?.values ?? [])]).toEqual([1, 0])
+    expect(store.getVector('cu:s1:2')).toBeUndefined()
+    expect(store.listVectors('m1').map(vector => vector.unitId)).toEqual(['cu:s1:1'])
+    expect(store.listVectors('m1', 'granite-97m').map(vector => vector.unitId)).toEqual(['cu:s1:1'])
+    expect(store.listVectors('m1', 'other-model')).toEqual([])
+    expect(store.pendingVectorUnits(10, 'm1').map(unit => unit.unitId)).toEqual(['cu:s1:2'])
+  })
+
+  it('answers exact, facet, FTS and LIKE routes', () => {
+    const store = openStore()
+    seed(store)
+
+    expect(store.searchExactTerms('m1', ['TS2339'], 5)).toEqual([{ unitId: 'cu:s1:1', score: 1 }])
+    expect(store.searchExactTerms('m1', [], 5)).toEqual([])
+    expect(store.searchExactTerms('m2', ['TS2339'], 5)).toEqual([])
+
+    expect(store.searchFacetFilters('m1', [{ dimension: 'subject', value: 'member:alice' }], 5)).toEqual([{ unitId: 'cu:s1:1', score: 1 }])
+    expect(store.searchFacetFilters('m1', [{ dimension: 'subject', value: 'member:nobody' }], 5)).toEqual([])
+
+    expect(store.searchLexicalFts('m1', '"embedding"', 5, 'word').map(hit => hit.unitId)).toEqual(['cu:s1:2'])
+    expect(store.searchLexicalFts('m1', '"granite-embedding-97m"', 5, 'trigram').map(hit => hit.unitId)).toEqual(['cu:s1:2'])
+    expect(store.searchLexicalFts('m1', '"embedding"', 5, 'word')[0]?.score).toBeGreaterThan(0)
+
+    expect(store.searchLexicalLike('m1', ['granite'], 5)).toEqual([{ unitId: 'cu:s1:2', score: 1 }])
+    expect(store.searchLexicalLike('m1', [], 5)).toEqual([])
+  })
+
+  it('returns no FTS hits when the tokenizers are unavailable', () => {
+    const store = openStore(':memory:', true)
+    seed(store)
+    expect(store.searchLexicalFts('m1', '"embedding"', 5, 'word')).toEqual([])
+    expect(store.searchLexicalFts('m1', '"embedding"', 5, 'trigram')).toEqual([])
   })
 })

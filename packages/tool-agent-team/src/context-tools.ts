@@ -26,7 +26,7 @@ import {
   type ContinuityToolText,
   type RolloverToolRequest,
 } from '@wowyuarm/dsh-context-continuity'
-import type { AgentTeamContextCheckpointRef, AgentTeamInterruptRef, AgentTeamInterruptView, AgentTeamTaskRef, AgentTeamThreadRef } from '@grantyuan/dsh-crew/types'
+import type { AgentTeamContextCheckpointRef, AgentTeamContextRecallItem, AgentTeamContextRecallRequest, AgentTeamInterruptRef, AgentTeamInterruptView, AgentTeamTaskRef, AgentTeamThreadRef } from '@grantyuan/dsh-crew/types'
 import { MAX_TIMELINE_LIMIT } from '@grantyuan/dsh-crew/host'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { member, service } from './host-access.ts'
@@ -310,6 +310,116 @@ const contextInterrupt = defineTool({
   },
 })
 
+/**
+ * Focused retrieval over the derived context index. This is the model-driven
+ * complement to the automatic `<recall-snapshot>`: the snapshot only carries
+ * what the current turn already matched, while this tool lets the Member ask
+ * for a specific earlier decision, error, path, or conclusion. Read-only and
+ * local — it never changes Team facts or the Session log, and an unavailable
+ * index answers with a reason instead of failing the turn.
+ */
+const contextRecall = defineTool({
+  name: 'context_recall',
+  description: 'Search your own derived context index for earlier passages worth re-reading: exact identifiers (paths, URLs, issue and commit ids, versions, commands, quoted phrases), keywords, facets (time, Workspace, role, subject), and — when a background embedding pass has caught up — semantic neighbours. Results are fused from independent routes and ranked; routes that could not run are named under `degraded`, so an empty `items` with a `degraded` entry means the index is incomplete, not that nothing exists. Use it when you suspect earlier work holds the answer (a decision, an error signature, a file path, a previous conclusion). Do not use it for current Team state — Threads, Tasks, Claims, and Inbox are team_view/team_thread/team_inbox authority. `includeSuperseded` asks why a conclusion changed and is the only way superseded units appear; the default hides them. The returned `ref` is a stable derived-context identifier and is never a checkpoint ref: only context_checkpoint/context_timeline produce refs that context_rollover accepts.',
+  parameters: {
+    query: { type: 'string', required: true, description: 'What to look for, in natural language or as exact identifiers. Keep it short: identifiers and distinctive phrases rank best.' },
+    mode: { type: 'string', description: 'auto (default) | exact | lexical | facet | vector | graph. Restrict the route only when you know which signal is missing.' },
+    limit: { type: 'number', description: 'Maximum number of units to return (default 5, at most 8).' },
+    includeSuperseded: { type: 'boolean', description: 'Include units superseded by a later correction (default false).' },
+    timeRange: { type: 'object', additionalProperties: false, properties: {
+      from: { type: 'string', description: 'ISO instant lower bound; omit for open-ended.' },
+      to: { type: 'string', description: 'ISO instant upper bound; omit for open-ended.' },
+    } },
+    subjects: { type: 'array', items: { type: 'string' }, description: 'Subject facets to require, for example an owner handle or a service name.' },
+    roles: { type: 'array', items: { type: 'string' }, description: 'Role facets to require, for example planner or implementer.' },
+  },
+  output: {
+    schema: { type: 'object', additionalProperties: false, properties: {
+      items: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        ref: { type: 'string', required: true },
+        sessionId: { type: 'string', required: true },
+        recordedAt: { type: 'string', required: true },
+        kind: { type: 'string', required: true },
+        status: { type: 'string', required: true },
+        importance: { type: 'number', required: true },
+        score: { type: 'number', required: true },
+        snippet: { type: 'string', required: true },
+        sources: { type: 'array', required: true, items: { type: 'string' } },
+      } } },
+      degraded: { type: 'array', required: true, items: { type: 'string' } },
+      reason: { type: 'string' },
+    } },
+    render: (args, value) => {
+      if (value.items.length === 0) {
+        const why = value.reason === undefined ? '' : ` (${value.reason})`
+        const routes = value.degraded.length === 0 ? '' : ` Degraded routes: ${value.degraded.join(', ')}.`
+        return [{ type: 'text', text: `No context units matched "${typeof args.query === 'string' ? args.query : ''}"${why}.${routes}` }]
+      }
+      const lines = [`Recalled ${value.items.length} context unit(s) for "${typeof args.query === 'string' ? args.query : ''}", best first:`]
+      for (const item of value.items) {
+        const route = item.sources.length === 0 ? '' : ` [${item.sources.join(', ')}]`
+        const status = item.status === 'active' ? '' : ` ${item.status}`
+        lines.push(`- ${item.ref} · ${item.recordedAt} · ${item.kind}${status}${route}\n  ${item.snippet}`)
+      }
+      if (value.degraded.length > 0) lines.push(`Degraded routes: ${value.degraded.join(', ')} — results above may be incomplete.`)
+      if (value.reason !== undefined) lines.push(`Note: ${value.reason}.`)
+      return [{ type: 'text', text: lines.join('\n') }]
+    },
+  },
+  async execute(args, exec) {
+    const agent = agentOf(exec)
+    const query = typeof args.query === 'string' ? args.query.trim() : ''
+    if (query === '') throw new Error('context_recall requires a non-empty query')
+    const mode = typeof args.mode === 'string' && RECALL_MODES.has(args.mode)
+      ? args.mode as NonNullable<AgentTeamContextRecallRequest['mode']>
+      : undefined
+    const outcome = await service(agent).contextRecallForAgent(agent, {
+      query,
+      ...(mode === undefined ? {} : { mode }),
+      ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+      ...(args.includeSuperseded === true ? { includeSuperseded: true } : {}),
+      ...(args.timeRange === undefined ? {} : { timeRange: args.timeRange }),
+      ...(args.subjects === undefined ? {} : { subjects: args.subjects }),
+      ...(args.roles === undefined ? {} : { roles: args.roles }),
+    })
+    return {
+      items: outcome.items.map(toRecallItem),
+      degraded: [...outcome.degraded],
+      ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+    }
+  },
+})
+
+const RECALL_MODES = new Set(['auto', 'exact', 'lexical', 'facet', 'vector', 'graph'])
+
+/** The tool output contract carries mutable plain arrays across the Host seam. */
+interface RecallItemView {
+  readonly ref: string
+  readonly sessionId: string
+  readonly recordedAt: string
+  readonly kind: string
+  readonly status: 'active' | 'superseded' | 'expired'
+  readonly importance: number
+  readonly score: number
+  readonly snippet: string
+  readonly sources: string[]
+}
+
+/** The Host result is deeply immutable; the tool output contract carries plain values. */
+function toRecallItem(item: AgentTeamContextRecallItem): RecallItemView {
+  return {
+    ref: item.ref,
+    sessionId: item.sessionId,
+    recordedAt: item.recordedAt,
+    kind: item.kind,
+    status: item.status === 'superseded' || item.status === 'expired' ? item.status : 'active',
+    importance: item.importance,
+    score: item.score,
+    snippet: item.snippet,
+    sources: [...item.sources],
+  }
+}
+
 /** Non-blank string argument, or a rejection naming the field the model missed. */
 function requireString(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.trim() === '') throw new Error(`context_interrupt requires a non-empty ${name}`)
@@ -345,11 +455,12 @@ function toInterruptViewItem(item: AgentTeamInterruptView): InterruptViewItem {
 }
 
 export function registerContextTools(ctx: { readonly tools: { register(tool: unknown): void } }): void {
-  // The engine's two, then the Team's own timeline and interrupt stack: one
-  // registration each, and the roster the Host validates against stays the
-  // same four names.
+  // The engine's two, then the Team's own timeline, interrupt stack, and recall:
+  // one registration each, and the roster the Host validates against stays the
+  // same five names.
   ctx.tools.register(engineTools.rollover)
   ctx.tools.register(engineTools.checkpoint)
   ctx.tools.register(contextTimeline)
   ctx.tools.register(contextInterrupt)
+  ctx.tools.register(contextRecall)
 }

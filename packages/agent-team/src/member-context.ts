@@ -25,7 +25,7 @@ const BEGIN = '<team-member-private-memory>'
 const END = '</team-member-private-memory>'
 
 export function apply(ctx: Context): void {
-  ctx.on('agent/pre-step', async ({ agent, signal }, next): Promise<PreStepDecision> => {
+  ctx.on('agent/pre-step', async ({ agent, signal, step }, next): Promise<PreStepDecision> => {
     const decision = await next()
     if (decision.kind === 'reject' || signal.aborted) return decision
     // The Host service is resolved at step time, never through plugin inject:
@@ -49,24 +49,49 @@ export function apply(ctx: Context): void {
     }
     const workspaces = renderMemberWorkspaces(host.workspacesForAgent(agent))
     const text = `${renderMemberIdentity(member)}\n\n${memory}${workspaces === '' ? '' : `\n\n${workspaces}`}`
-    const latestText = agent.session.surface.nodes.toReversed().flatMap(sequence => {
+    // One backward walk feeds three questions: the newest identity block, the
+    // newest recall snapshot this producer appended, and the newest ordinary
+    // user message — the recall query for this step.
+    let latestIdentity: string | undefined
+    let latestRecall: string | undefined
+    let latestUserText: string | undefined
+    for (const sequence of agent.session.surface.nodes.toReversed()) {
       // `nodes` are event identities (SessionSeq); snapshotEvents takes log
       // offsets. Re-entering through the validating constructor keeps the two
       // number domains explicit (the seq = log.length contiguity contract).
       const event = agent.session.snapshotEvents(SessionLogOffset(sequence), SessionLogOffset(sequence + 1))[0]
-      return event?.type === 'user/message'
-        && matchesProducerKind(event.data.source.kind, name)
-        && event.data.content[0]?.type === 'text'
-        ? [event.data.content[0].text]
-        : []
-    })[0]
-    const alreadyVisible = latestText === text
-    if (alreadyVisible) return decision
-    const message = createUserMessage({
-      content: [{ type: 'text', text }],
-      source: { kind: name, form: 'instructions' },
-    })
-    return { kind: 'enter', messages: [...decision.messages, message] }
+      if (event?.type !== 'user/message') continue
+      const textBlock = event.data.content.find(block => block.type === 'text')
+      if (textBlock?.type !== 'text') continue
+      if (matchesProducerKind(event.data.source.kind, name)) {
+        if ('form' in event.data.source && event.data.source.form === 'recall') {
+          latestRecall ??= textBlock.text
+        } else {
+          latestIdentity ??= textBlock.text
+        }
+      } else if (event.data.source.kind === 'user') {
+        latestUserText ??= textBlock.text
+      }
+      if (latestIdentity !== undefined && latestRecall !== undefined && latestUserText !== undefined) break
+    }
+    const messages = [...decision.messages]
+    if (latestIdentity !== text) {
+      messages.push(createUserMessage({ content: [{ type: 'text', text }], source: { kind: name, form: 'instructions' } }))
+    }
+    // The snapshot is derived from local index reads only; no model is awaited
+    // on this path, and any index failure leaves the step exactly as it was.
+    // Only the turn's first step injects: later steps reuse the committed block.
+    if (step === 1 && latestUserText !== undefined && typeof host.contextRecallSnapshotForAgent === 'function') {
+      try {
+        const snapshot = await host.contextRecallSnapshotForAgent(agent, { query: latestUserText })
+        if (snapshot !== undefined && snapshot.text !== latestRecall) {
+          messages.push(createUserMessage({ content: [{ type: 'text', text: snapshot.text }], source: { kind: name, form: 'recall' } }))
+        }
+      } catch {
+        // Recall is an optimization; a broken derived index never blocks a turn.
+      }
+    }
+    return messages.length === decision.messages.length ? decision : { kind: 'enter', messages }
   }, { prepend: true })
 }
 

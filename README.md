@@ -13,7 +13,7 @@ dsh-crew is extended from [dsh-agent-team](https://github.com/wowyuarm/dsh-agent
 ## Features
 
 - A durable single-host Team: Channels, Messages, Tasks, Threads, Claims, Agent membership, and per-member private memory, notes, and skills.
-- An isolated `team-member` preset with twelve model-facing tools: `team_inbox`, `team_thread`, `team_message`, `team_claim`, `team_view`, `team_supervise`, `team_watch`, `team_job`, `context_rollover`, `context_checkpoint`, `context_timeline`, `context_interrupt`.
+- An isolated `team-member` preset with thirteen model-facing tools: `team_inbox`, `team_thread`, `team_message`, `team_claim`, `team_view`, `team_supervise`, `team_watch`, `team_job`, `context_rollover`, `context_checkpoint`, `context_timeline`, `context_interrupt`, `context_recall`.
 - A Human Web Client inside the ordinary DSH UI: create Channels and Agents, manage membership, send and manage Messages, read the Inbox, open Threads, and handle Tasks.
 - A pull-based collaboration protocol. Agent Inbox admission is durable, but it does not claim that the model has already processed the update.
 - One collaboration domain per DSH home; the append-only operation ledger is the authority, and UI, Remote responses, tools, and Inbox are projections of it. Ordinary DSH Sessions never receive Team tools or guidance.
@@ -22,7 +22,7 @@ dsh-crew is extended from [dsh-agent-team](https://github.com/wowyuarm/dsh-agent
 
 - **External Agent gateway.** An opt-in localhost HTTP gateway with a shipped client script and skill: an agent harness outside this process joins as a session-less polling Member, multi-agent machines isolate state per handle, DMs and Inbox notices arrive through the watch poll, and the external agent's context stays in sync via member heartbeats. The gateway is a live control in Team settings.
 - **Message center and messaging control.** A Human Message center projected from ledger facts, message edit / recall / reply, a Human task list page with batch acceptance, and a Team Assistant system identity that delivers all system notifications.
-- **More member tools.** `team_watch` (leader-only observation of Members), `team_job` (background jobs with LLM routing failover), and `context_interrupt` (a pending interrupt stack that can be recorded, queried, and released).
+- **More member tools.** `team_watch` (leader-only observation of Members), `team_job` (background jobs with LLM routing failover), `context_interrupt` (a pending interrupt stack that can be recorded, queried, and released), and `context_recall` (read-only retrieval over the derived context index, fused from exact, lexical, facet, vector, and graph routes).
 - **Member prompt profile and context control.** Per-Member context window override and a fresh-start policy, custom prompt paragraphs that swap at the turn boundary with protected drops, section usage projection with confirmable auto-prune, and propose-only LLM curation in the prompt dialog.
 - **Continuation and resilience.** Context-relevance judgment renews fresh Members automatically, an idle continuation watcher re-arms per Workspace, output-truncation escalation, and supervision with a retired-successor handover that inherits history and configuration.
 - **Member task queue** with reassignment consultation, and a completion liaison that reports and pushes follow-up Tasks after a Member finishes.

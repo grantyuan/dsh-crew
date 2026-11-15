@@ -287,4 +287,58 @@ describe('context tools render the model-facing decision surface', () => {
     const released = renderText(tools.get('context_interrupt')!, { action: 'release' }, { kind: 'released', interruptRef: 'interrupt:bbb' })
     expect(released).toContain('Interrupt released (interrupt:bbb)')
   })
+
+  it('context_recall renders each hit with its derived ref, route, timestamp and snippet', () => {
+    const tools = contextTools()
+    expect(tools.has('context_recall')).toBe(true)
+    expect([...AGENT_TEAM_TOOL_NAMES]).toContain('context_recall')
+    const text = renderText(tools.get('context_recall')!, { query: 'TS2339' }, {
+      items: [
+        {
+          ref: 'cu:s1:1', sessionId: 's1', recordedAt: '2026-11-15T06:00:00.000Z', kind: 'decision',
+          status: 'active', importance: 2, score: 0.032, snippet: 'Fixed error TS2339 in the recall fold',
+          sources: ['exact', 'lexical'],
+        },
+        {
+          ref: 'cu:s1:2', sessionId: 's1', recordedAt: '2026-11-14T06:00:00.000Z', kind: 'note',
+          status: 'superseded', importance: 1, score: 0.01, snippet: 'The earlier guess about token weights',
+          sources: ['lexical'],
+        },
+      ],
+      degraded: ['graph-unavailable'],
+    })
+    // The ref is how the model cites a unit back to itself; without it the
+    // render is unusable for follow-up recall.
+    expect(text).toContain('cu:s1:1')
+    expect(text).toContain('2026-11-15T06:00:00.000Z')
+    expect(text).toContain('decision')
+    expect(text).toContain('Fixed error TS2339 in the recall fold')
+    expect(text).toContain('[exact, lexical]')
+    // A superseded row must be marked as such, not silently mixed with active
+    // conclusions.
+    expect(text).toContain('superseded')
+    // A degraded route must be named so an empty hit list is not read as
+    // "nothing exists".
+    expect(text).toContain('graph-unavailable')
+  })
+
+  it('context_recall states an unavailable index instead of implying an empty history', () => {
+    const tools = contextTools()
+    const text = renderText(tools.get('context_recall')!, { query: 'anything' }, {
+      items: [],
+      degraded: [],
+      reason: 'index-unavailable',
+    })
+    expect(text).toContain('No context units matched "anything"')
+    expect(text).toContain('index-unavailable')
+    const degraded = renderText(tools.get('context_recall')!, { query: 'anything' }, {
+      items: [],
+      degraded: ['lexical-like'],
+    })
+    expect(degraded).toContain('Degraded routes: lexical-like')
+    // The description has to keep the Team-authority boundary explicit: recall
+    // is history, not current Thread/Task/Claim state.
+    expect(tools.get('context_recall')!.description).toContain('team_view/team_thread/team_inbox authority')
+    expect(tools.get('context_recall')!.description).toContain('never a checkpoint ref')
+  })
 })
