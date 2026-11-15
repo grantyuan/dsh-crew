@@ -58,6 +58,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import { HumanSettingsSection } from './HumanSettingsSection.tsx'
+import { ContextRoleSettingsSection } from './ContextRoleSettingsSection.tsx'
 import { TeamHumanIdentity } from './human-identity.ts'
 import { TeamEnvironmentCheck } from './environment-check.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
@@ -549,6 +550,42 @@ function applyUi(ctx: ClientContext): void {
       },
     }),
   }, HumanSettingsSection as never))
+
+  // Functional model roles: a second Team section right after the profile.
+  // Every field is optional, so the page reads the Host's live route/health
+  // view and saves one role at a time; the Host answers with the post-write
+  // view (a rejected endpoint returns the Host's reason). The built-in
+  // embedding model shows its own download state and can be retried here.
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'team-context-roles',
+    order: 6,
+    label: () => ctx.locale.bind(NS)('contextRolesNav'),
+    locale: NS,
+    inject: () => ({
+      read: async () => {
+        const read = await ctx.remote.agentTeam.contextRoleConfig({})
+        if (!read.ok) throw new Error(read.error.message)
+        return read.value
+      },
+      save: async (request: {
+        role: 'assistant' | 'embedding' | 'decision' | 'extraction'
+        baseURL?: string
+        model?: string
+        apiKey?: string | null
+        enabled?: boolean
+      }) => {
+        const saved = await ctx.remote.agentTeam.setContextRole(request)
+        if (!saved.ok) throw new Error(saved.error.message)
+        return saved.value
+      },
+      retryEmbedding: async () => {
+        const retried = await ctx.remote.agentTeam.retryContextEmbeddingModel({})
+        if (!retried.ok) throw new Error(retried.error.message)
+        return retried.value
+      },
+    }),
+  }, ContextRoleSettingsSection as never))
 }
 
 export async function apply(ctx: ClientContext): Promise<void> {

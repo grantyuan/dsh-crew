@@ -3565,6 +3565,89 @@ it('configures the Human profile from Settings in real Web', async () => {
 }, 180_000)
 
 /**
+ * Functional context roles, the second Team settings page. It is deliberately
+ * independent of any dialogue choice: four optional endpoint cards, one save
+ * per role, and a built-in embedding model that needs no input. This journey
+ * pins the two facts a reader cares about — a filled role is persisted on the
+ * Host and its resolved route is stated back, and a saved key is never echoed
+ * (the field only reports that one exists, and can be cleared).
+ */
+it('configures optional context model roles from Settings in real Web', async () => {
+  await installLocalBundle(false)
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'team-workspace')
+
+  await page.getByRole('button', { name: '账号菜单' }).click()
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click()
+  const panel = page.getByRole('dialog')
+  await panel.getByRole('button', { name: '上下文模型' }).click()
+
+  const assistant = panel.locator('[data-role="assistant"]')
+  await assistant.waitFor()
+  // Every role is present and optional; the embedding card names the built-in
+  // tier instead of asking for a file or a model id.
+  expect(await panel.locator('[data-role]').count()).toBe(4)
+  expect(await panel.locator('[data-embedding]').textContent()).toContain('granite-embedding-97m-multilingual-r2')
+  expect(await assistant.textContent()).toContain('端点与模型都留空时不启用')
+  // Nothing is enabled before an endpoint and a model exist: the switch is
+  // disabled on an empty pairing instead of storing an empty enabled role.
+  expect(await assistant.getByLabel('启用摘要助手').isDisabled()).toBe(true)
+
+  await assistant.getByLabel('端点地址').fill('https://role.test/v1')
+  await assistant.getByLabel('模型名').fill('stub-model')
+  await assistant.getByLabel('密钥（可选）').fill('secret-key')
+  await assistant.getByLabel('启用摘要助手').check()
+  await assistant.getByRole('button', { name: '保存', exact: true }).click()
+
+  // The Host resolves the filled role to its own transport and says so; the
+  // key is reported as present, never as a value.
+  await expect.poll(async () => await assistant.textContent()).toContain('当前调用：专用模型 · stub-model')
+  await expect.poll(async () => await assistant.getByLabel('密钥（可选）').getAttribute('placeholder')).toBe('已保存，留空保持不变')
+  expect(await assistant.getByLabel('密钥（可选）').inputValue()).toBe('')
+  await page.screenshot({ path: join(UI09_SHOTS, 'context-roles.png'), fullPage: true })
+
+  // A reload proves the entries live in Host settings, not in page state.
+  await page.reload()
+  await settleLayout(page)
+  await page.getByRole('button', { name: '账号菜单' }).click()
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click()
+  const reopened = page.getByRole('dialog')
+  await reopened.getByRole('button', { name: '上下文模型' }).click()
+  const persisted = reopened.locator('[data-role="assistant"]')
+  await expect.poll(async () => await persisted.textContent()).toContain('当前调用：专用模型 · stub-model')
+  expect(await persisted.getByLabel('模型名').inputValue()).toBe('stub-model')
+  await expect.poll(async () => await persisted.getByLabel('密钥（可选）').getAttribute('placeholder')).toBe('已保存，留空保持不变')
+
+  // Clearing is explicit: the button sends `null`, the Host drops the secret,
+  // and the placeholder returns to the no-key state.
+  await persisted.getByRole('button', { name: '清除密钥' }).click()
+  await expect.poll(async () => await persisted.getByLabel('密钥（可选）').getAttribute('placeholder')).toBe('不需要密钥时留空')
+
+  // 390×844: four cards stack in one column with no horizontal overflow, and
+  // the dialog keeps its own geometry.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await settleLayout(page)
+  await page.screenshot({ path: join(UI09_SHOTS, 'context-roles-narrow.png'), fullPage: true })
+  const narrow = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  }))
+  expect(narrow.scrollWidth).toBeLessThanOrEqual(narrow.clientWidth)
+  const first = (await persisted.boundingBox())!
+  const decision = (await reopened.locator('[data-role="decision"]').boundingBox())!
+  expect(Math.abs(first.x - decision.x)).toBeLessThanOrEqual(1)
+  expect(first.y).toBeLessThan(decision.y)
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await settleLayout(page)
+
+  expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
+}, 180_000)
+
+/**
  * The environment check above the version footnote. The versions it prints are
  * the whole point: `0.1.15` comes from the installed manifest and the DSH
  * version from the running Host's own reader, so this journey proves the Host
