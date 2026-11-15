@@ -204,10 +204,11 @@
               config:
                 # The Team owns both compaction policy entry points (the pressure notice
                 # and the hard-limit forced reduction in its Host coordinator), so the
-                # plugin's own automatic listeners stay off; the engine implementation is
-                # still reused for member-initiated /compact and the Team policy.
+                # plugin's own automatic listeners stay off. This Team-owned engine wraps
+                # the shipped Basic engine and routes /compact through the assistant role
+                # when that role is configured; otherwise it behaves exactly as before.
                 - id: compaction-basic
-                  name: '@deepseek-ai/dsh-compaction-basic'
+                  name: '@grantyuan/dsh-crew/compaction'
                   config:
                     auto: false
 

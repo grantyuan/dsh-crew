@@ -1237,6 +1237,16 @@ P2 [x] 探针实测 gemma-3-4b 吞吐（118 tok/s, 40.8ms prompt）— 证据 ma
 - `AssistantCompactionEngine` 继承 `BasicCompactionEngine`，仅覆写 `summarize()`：有预生成摘要时直接用（provider `prepared` / model `epoch-cache`），否则调用 assistant 角色，失败回退 `super.summarize()`。Host 的 manual/overflow 路径按 `contextRoleModels().assistant.enabled` 选择引擎。
 - **占位/缺口**：idle/pre-step 的自动预生成调度尚未接线，本轮通过 `ContextService.prepareCompaction/commitCompaction` API 与单测验证；真实 Session 的 unit intake 仍待后续票，因此自动压缩尚不能在真实会话触发。preset 内 `/compact` 仍走 `BasicCompactionEngine`。L3 `generations` 与图内汇总未实现。
 
+**P1.5 落地（真实集成）**：
+
+- 真实 Session 摄入：`session/event` 监听器把事件交给 [`pipeline.ts`](file:///home/yus/work/dsh-agent-team-cac/packages/agent-team/src/context/pipeline.ts) 的 `recordSessionEvent()`，由 [`intake.ts`](file:///home/yus/work/dsh-agent-team-cac/packages/agent-team/src/context/intake.ts) 归一化为 unit 后同步写入 L1（0 模型调用）。只接受 `user/message`（`source.kind === 'user'`）、`assistant/message` 与 `tool/result`；Team 自己注入的身份/召回消息不进入索引。
+- embedding 回填：每次落库与 idle 边界异步 `drainEmbeddings()`，按 Member 取最多 8 条 `pendingVectorUnits` 批量嵌入；角色关闭或调用失败进入冷却（词法/关闭 300s，其余 30s），turn 路径不等待。
+- 查询向量：`user/message` 落库时按文本 prime；下一次 pre-step 的召回快照只在当前查询文本与缓存文本完全一致时带上向量，避免把上一条消息的向量套到新查询。
+- idle 预生成与提交点：idle 时 `prepare()` 在后台调 assistant 角色生成 pending digest（assistant 未启用则直接跳过）；pre-step 内 `commit()` 只读 pending digest 并推进 frontier，不调用模型。
+- preset `/compact`：`cordis.patch.yml` 的 `compaction-basic` 行替换为 `@grantyuan/dsh-crew/compaction`，导出 `TeamCompactionEngine extends BasicCompactionEngine`，仅覆写 `summarize()`；Host 通过 `globalThis` 上的字符串键注册表把「Member 的 assistant 路由」交给 preset 内模块实例，绕过 Host/preset 模块实例不共享的问题。assistant 未配置或调用失败时回退 Basic 原行为。
+- 闸门：`contextIndexingEnabled()` 要求任一生效角色或本地嵌入可用；异步 `extraction` 只在 `extraction`/`assistant` 角色启用时入队，默认配置不会用主模型做后台 facet。
+- **仍未完成（留给后续票）**：L3 代际汇总（`generations` 与图内 rollup）不在本票；`context_recall` 的 `read` 子命令与原文下钻按 §8.1 留待后续；P1.5 计划中的 `scripts/context-perf.mjs`、`test:perf` 与六份维护文档更新不在本轮用户指定范围。
+
 ### P3 — L3 拓扑图 + top-3 召回 + 冲突标记 + `context_review`
 
 - 图构建、有效区间、取代链、top-3 召回与尾部注入、冲突判定、复盘工具、缓存/陈旧排序。

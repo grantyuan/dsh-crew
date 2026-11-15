@@ -42,6 +42,8 @@ import { EmbeddingModelManager } from './context/embedding/model-manager.ts'
 import { LocalEmbeddingRuntime } from './context/embedding/runtime.ts'
 import { CONTEXT_MODEL_ROLES, contextRoleModelsFromSettings, contextRoleSettingKey, normalizeContextRoleEntry, resolveContextRoleRoute, validateContextRoleEntry, type ContextModelRole, type ContextRoleModels } from './context/role-models.ts'
 import { ContextRoleRuntime } from './context/role-runtime.ts'
+import { ContextPipeline } from './context/pipeline.ts'
+import { resetTeamCompactionSummarizerResolver, setTeamCompactionSummarizerResolver, type TeamCompactionSummarizer } from './context/compaction-plugin.ts'
 import type { ContextRecallQuery } from './context/recall.ts'
 import { ContextService } from './context/service.ts'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
@@ -1093,6 +1095,7 @@ export default class AgentTeam extends TypertRemoteService {
   private readonly localEmbedding = new LocalEmbeddingRuntime({ manager: this.embeddingModel })
   /** Derived context index, opened on first recall; rebuildable and never Team authority. */
   private contextService: ContextService | undefined
+  private contextPipeline: ContextPipeline | undefined
   /** Functional role runtime, built on first use once the LLM service exists. */
   private roleRuntime: ContextRoleRuntime | undefined
   private lifecycleTail: Promise<void> = Promise.resolve()
@@ -1216,6 +1219,9 @@ export default class AgentTeam extends TypertRemoteService {
         this.ctx.logger.warn(`agent-team: external gateway reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
       })
     })
+    // The preset's compaction engine cannot read Host role settings, so it
+    // resolves them through this bridge at summarize time.
+    setTeamCompactionSummarizerResolver(agent => this.compactionSummarizerForAgent(agent))
   }
 
   /** Current human display name; the single source for team_view and @ matching. */
@@ -1397,6 +1403,7 @@ export default class AgentTeam extends TypertRemoteService {
           this.supervisionExhausted.delete(member.memberId)
         }
         this.emitMemberPresenceChanged(member)
+        this.scheduleContextIdle(member.memberId, agent.session.id)
       }
     })
     // The store's dispatch carrier is untagged, so a scope-tagged listener
@@ -1410,6 +1417,11 @@ export default class AgentTeam extends TypertRemoteService {
       const memberId = this.memberBySessionId.get(session.id)
       if (memberId === undefined) return
       this.memberActivity.set(memberId, Date.now())
+      try {
+        this.contextPipelineOrUndefined()?.recordSessionEvent(memberId, session.id, event)
+      } catch (error) {
+        this.ctx.logger.warn(`agent-team: context intake failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
       const handle = this.handles.get(memberId)
       if (handle === undefined || handle.agent.session.id !== session.id) return
       // A successful assistant response ends any open provider-overflow
@@ -1501,6 +1513,7 @@ export default class AgentTeam extends TypertRemoteService {
     this.ctx.effect(() => async () => {
       this.accepting = false
       await this.stopExternalApi()
+      resetTeamCompactionSummarizerResolver()
       this.recovery.dispose()
       this.responseGuard.dispose()
       this.supervisor.dispose()
@@ -4478,6 +4491,16 @@ export default class AgentTeam extends TypertRemoteService {
     })
   }
 
+  /** Whether any context role is on (or a local embedding model is ready). */
+  private contextIndexingEnabled(): boolean {
+    const roles = this.contextRoleModels()
+    return roles.assistant.enabled === true
+      || roles.embedding.enabled === true
+      || roles.decision.enabled === true
+      || roles.extraction.enabled === true
+      || this.localEmbedding.available()
+  }
+
   /** Build the role runtime on first use; the LLM service may not exist yet at construction. */
   private contextRoleRuntimeOrUndefined(): ContextRoleRuntime | undefined {
     const llm = this.ctx.get('llm')
@@ -4500,29 +4523,48 @@ export default class AgentTeam extends TypertRemoteService {
       auto: false,
       ...(selection === undefined ? {} : { summarizationProvider: selection.provider, summarizationModel: selection.model }),
     }
+    const summarize = this.assistantSummarizerFor(memberId)
+    if (summarize === undefined) return new BasicCompactionEngine(this.ctx, config)
+    const engine = new AssistantCompactionEngine(this.ctx, config, { summarize })
+    // The L2 commit point already paid for this digest; installing it makes the
+    // next compaction model-free instead of re-summarizing the same window.
+    const prepared = this.contextPipelineOrUndefined()?.takePreparedSummary(memberId)
+    if (prepared !== undefined) engine.usePreparedSummary(prepared)
+    return engine
+  }
+
+  /**
+   * Assistant-role summarizer for one Member, or `undefined` when the role is
+   * off or the LLM/runtime is unavailable. Shared by the Host engine and the
+   * preset's `/compact` engine so both honour the same setting.
+   */
+  private assistantSummarizerFor(memberId: AgentTeamMemberId): TeamCompactionSummarizer | undefined {
     const runtime = this.contextRoleRuntimeOrUndefined()
-    if (runtime === undefined || this.contextRoleModels().assistant.enabled !== true) {
-      return new BasicCompactionEngine(this.ctx, config)
-    }
+    if (runtime === undefined || this.contextRoleModels().assistant.enabled !== true) return undefined
     let main: AgentTeamModelSelection | undefined
     try {
       main = this.currentModelSelectionOf(memberId)
     } catch {
       main = undefined
     }
-    return new AssistantCompactionEngine(this.ctx, config, {
-      summarize: async ({ text, signal }) => {
-        const outcome = await runtime.chat('assistant', 'summarize', { text }, {
-          priority: 'background',
-          key: memberId,
-          ...(main === undefined ? {} : { main }),
-          ...(signal === undefined ? {} : { signal }),
-        })
-        return outcome.ok
-          ? { text: outcome.text, provider: outcome.route.model, model: outcome.route.model }
-          : undefined
-      },
-    })
+    return async ({ text, signal }) => {
+      const outcome = await runtime.chat('assistant', 'summarize', { text }, {
+        priority: 'background',
+        key: memberId,
+        ...(main === undefined ? {} : { main }),
+        ...(signal === undefined ? {} : { signal }),
+      })
+      return outcome.ok
+        ? { text: outcome.text, provider: outcome.route.model, model: outcome.route.model }
+        : undefined
+    }
+  }
+
+  /** Resolver the preset's compaction engine calls; an unknown Agent keeps the shipped path. */
+  private compactionSummarizerForAgent(agent: Agent): TeamCompactionSummarizer | undefined {
+    const member = this.memberForAgent(agent)
+    if (member === undefined || member.state !== 'enabled') return undefined
+    return this.assistantSummarizerFor(member.memberId)
   }
 
   /**
@@ -6349,7 +6391,8 @@ export default class AgentTeam extends TypertRemoteService {
   async contextRecallSnapshotForAgent(agent: Agent, request: AgentTeamContextRecallSnapshotRequest): Promise<AgentTeamContextRecallSnapshot | undefined> {
     const member = this.memberForAgent(agent)
     if (member === undefined || member.state !== 'enabled' || request.query.trim() === '') return undefined
-    return this.contextIndex().snapshot(this.contextRecallQuery(agent, member.memberId, { query: request.query, limit: 3 }))
+    const vector = this.contextPipelineOrUndefined()?.queryVector(member.memberId, request.query)
+    return this.contextIndex().snapshot(this.contextRecallQuery(agent, member.memberId, { query: request.query, limit: 3 }, vector))
   }
 
   /** Open the derived index on demand; a failure leaves it unavailable, not fatal. */
@@ -6362,8 +6405,57 @@ export default class AgentTeam extends TypertRemoteService {
     return this.contextService
   }
 
+  /**
+   * Live intake/backfill pipeline over the derived index. Built lazily because
+   * the LLM service and the embedding runtime may arrive after the Host.
+   */
+  private contextPipelineOrUndefined(): ContextPipeline | undefined {
+    const service = this.contextIndex()
+    if (service.contextStore() === undefined) return undefined
+    if (this.contextPipeline !== undefined) return this.contextPipeline
+    const runtime = this.contextRoleRuntimeOrUndefined()
+    this.contextPipeline = new ContextPipeline({
+      service,
+      ...(runtime === undefined ? {} : { runtime }),
+      main: memberId => this.currentModelSelectionOf(memberId as AgentTeamMemberId),
+      canIndex: () => this.contextIndexingEnabled(),
+      canEnrich: () => {
+        const roles = this.contextRoleModels()
+        return roles.extraction.enabled === true || roles.assistant.enabled === true
+      },
+      canSummarize: () => this.contextRoleModels().assistant.enabled === true,
+      canEmbed: () => this.contextRoleModels().embedding.enabled === true || this.localEmbedding.available(),
+      onError: (error, stage) => {
+        this.ctx.logger.warn(`agent-team: context ${stage} failed: ${error instanceof Error ? error.message : String(error)}`)
+      },
+    })
+    return this.contextPipeline
+  }
+
+  /**
+   * Idle boundary work: backfill embeddings/enrichment and prepare the next L2
+   * digest. Nothing here is awaited by a turn; a disabled or failing role only
+   * leaves the work queued for a later idle.
+   */
+  private scheduleContextIdle(memberId: AgentTeamMemberId, sessionId: string): void {
+    const pipeline = this.contextPipelineOrUndefined()
+    if (pipeline === undefined) return
+    void pipeline.drainEmbeddings(memberId)
+    void pipeline.drainEnrichment()
+    void pipeline.prepare(memberId, sessionId)
+  }
+
+  /** Pre-step commit: consumes a prepared digest, never calls a model. */
+  private async commitContextPending(memberId: AgentTeamMemberId, sessionId: string): Promise<void> {
+    try {
+      await this.contextPipelineOrUndefined()?.commit(memberId, sessionId)
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: context commit failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** Normalize one tool/snapshot request into the recall query the index owns. */
-  private contextRecallQuery(agent: Agent, memberId: AgentTeamMemberId, request: AgentTeamContextRecallRequest): ContextRecallQuery {
+  private contextRecallQuery(agent: Agent, memberId: AgentTeamMemberId, request: AgentTeamContextRecallRequest, queryVector?: Float32Array): ContextRecallQuery {
     const from = this.recallInstant(request.timeRange?.from)
     const to = this.recallInstant(request.timeRange?.to)
     const timeRange = request.timeRange === undefined
@@ -6383,6 +6475,7 @@ export default class AgentTeam extends TypertRemoteService {
       ...(timeRange === undefined ? {} : { timeRange }),
       ...(request.subjects === undefined ? {} : { subjects: request.subjects }),
       ...(request.roles === undefined ? {} : { roles: request.roles }),
+      ...(queryVector === undefined ? {} : { queryVector }),
     }
   }
 
@@ -6862,6 +6955,9 @@ export default class AgentTeam extends TypertRemoteService {
           this.contextManagement.captureQueuedInput(agent)
         })
         agentCtx.on('agent/pre-step', async ({ agent, messages }, next) => {
+          // The L2 commit point is model-free: it only publishes the digest the
+          // idle boundary already prepared, so awaiting it cannot stall a turn.
+          await this.commitContextPending(member.memberId, agent.session.id)
           // Check before AND after the waterfall: a rollover pending at either
           // edge must reject this old-generation step, preserving its claimed
           // input for the new generation instead of letting it run or drop.

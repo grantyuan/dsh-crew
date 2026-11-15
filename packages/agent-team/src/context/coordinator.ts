@@ -36,7 +36,13 @@ export interface ContextEnrichmentRuntime {
 export interface ContextCoordinatorOptions {
   readonly store: ContextStore
   readonly runtime?: ContextEnrichmentRuntime
-  readonly main?: () => AgentTeamModelSelection | undefined
+  readonly main?: (memberId: string) => AgentTeamModelSelection | undefined
+  /**
+   * Async extraction is opt-in with the generative roles. While it is off, no
+   * outbox row is written, so a default configuration never spends a main-model
+   * call on background facets.
+   */
+  readonly enrichmentEnabled?: () => boolean
   readonly now?: () => Date
   readonly onError?: (error: unknown) => void
   /** Delay before a failed enrichment row is retried; defaults to 30 s. */
@@ -165,7 +171,8 @@ export class ContextCoordinator {
   /** Write one Session event into the L1 index. Never calls a model. */
   record(input: ContextUnitInput): ContextUnitWriteResult {
     const unit = buildContextUnit(input, this.options.now === undefined ? {} : { now: this.options.now })
-    return this.store.writeUnit(unit, { enqueueEnrichment: shouldEnrichUnit(unit) })
+    const enqueueEnrichment = this.options.enrichmentEnabled?.() !== false && shouldEnrichUnit(unit)
+    return this.store.writeUnit(unit, { enqueueEnrichment })
   }
 
   /**
@@ -173,7 +180,7 @@ export class ContextCoordinator {
    * trigger and an explicit retry cannot process the same row twice.
    */
   async drainEnrichment(options: DrainEnrichmentOptions = {}): Promise<ContextEnrichmentDrainResult> {
-    if (this.draining) return EMPTY_DRAIN
+    if (this.draining || this.options.enrichmentEnabled?.() === false) return EMPTY_DRAIN
     this.draining = true
     try {
       const limit = Math.max(1, Math.min(32, options.limit ?? 8))
@@ -200,7 +207,7 @@ export class ContextCoordinator {
           continue
         }
 
-        const main = this.options.main?.()
+        const main = this.options.main?.(row.memberId)
         let outcome: ContextRoleChatOutcome
         try {
           outcome = await runtime.chat('extraction', 'enrich', {

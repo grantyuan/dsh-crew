@@ -4,11 +4,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 
 /** Structural copies of the engine's protected summarization seam. */
-interface SummarizationInputLike {
+export interface SummarizationInputLike {
   readonly messages: readonly Message[]
 }
 
-type SummaryResultLike = {
+export type SummaryResultLike = {
   summary: ContentBlock[]
   provider: string
   model: string

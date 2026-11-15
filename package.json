@@ -143,6 +143,10 @@
       "types": "./packages/tool-agent-team/lib/types/index.d.ts",
       "default": "./packages/tool-agent-team/lib/index.js"
     },
+    "./compaction": {
+      "types": "./packages/agent-team/lib/types/context/compaction-plugin.d.ts",
+      "default": "./packages/agent-team/lib/context/compaction-plugin.js"
+    },
     "./client": {
       "types": "./packages/client-agent-team/lib/types/client/index.d.ts",
       "default": "./packages/client-agent-team/lib/client.js"

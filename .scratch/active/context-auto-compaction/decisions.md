@@ -38,6 +38,8 @@
 
 **P1.4 占位与依赖**：自动预生成的 idle/pre-step 调度、真实 Session 的 unit intake、preset `/compact` 的 Assistant 引擎替换、L3 图内汇总均未在本轮接线；当前通过 `ContextService.prepareCompaction/commitCompaction` API 与单测验证，待后续票接入。
 
+**P1.5 落地（真实集成）**：`session/event` 经 `contextUnitFromEvent()` 同步写入 L1 unit（0 模型），只收 user/assistant/tool 结果，跳过 Team 注入消息；embedding 在落库后与 idle 边界异步批量回填（每 Member 8 条，失败/角色关闭冷却，不阻塞 turn）；查询向量按 user 文本 prime，召回快照只在文本一致时使用。idle 后台 `prepare()` 生成 pending digest（assistant 关闭即跳过），pre-step `commit()` 只读缓存、不调模型。preset 的 `compaction-basic` 行替换为 `@grantyuan/dsh-crew/compaction`，`TeamCompactionEngine` 仅覆写 `summarize()`，assistant 未配置/失败时回退 Basic。异步 `extraction` 只在 `extraction`/`assistant` 启用时入队，避免默认配置下用主模型做后台 facet。**仍未完成**：L3 代际汇总（`generations` / 图内 rollup）、`context_recall` 的 `read` 原文下钻，均留给后续票。
+
 ## 完整推荐组合
 
 ```text
