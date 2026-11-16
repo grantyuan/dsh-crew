@@ -8,6 +8,8 @@ import type {
   AgentTeamMemberId,
   AgentTeamMemberWatchRef,
   AgentTeamMemberWatchSnapshot,
+  AgentTeamQueueEntryItem,
+  AgentTeamQueueEntryRef,
   AgentTeamRequestId,
   AgentTeamSupervisionStatus,
   AgentTeamTaskRef,
@@ -73,6 +75,19 @@ interface ClaimView {
 
 function claimView(claim: { readonly claimRef: AgentTeamClaimRef; readonly direction: string; readonly state: string; readonly owner: string }): ClaimView {
   return { claimRef: claim.claimRef, direction: claim.direction, state: claim.state, owner: claim.owner }
+}
+
+/** Model-facing queue entry: the projection item trimmed to what the checklist renders. */
+function queueEntryView(entry: AgentTeamQueueEntryItem) {
+  return {
+    entryRef: entry.entryRef as string,
+    taskRef: entry.task.taskRef as string,
+    taskNumber: entry.task.taskNumber,
+    subject: entry.task.subject,
+    ...(entry.note === undefined ? {} : { note: entry.note }),
+    standing: entry.standing,
+    addedBy: entry.addedBy as string,
+  }
 }
 
 function activityFactView(
@@ -630,7 +645,7 @@ const teamClaim = defineTool({
 
 const teamView = defineTool({
   name: 'team_view',
-  description: 'Discover your authorized Team addresses: current Channels, a newest-first page of top-level Threads (each with its bounded anchor subject; Task standing inline on taskful rows), current Members — each Agent row carries its context-start policy, so before you dispatch you know whether a mentioned Member is renewed into a fresh context or reads your Message in its live Session — and an「active task threads」section listing the work in flight right now — every in_progress / in_review Task Thread in your Channels, with its subject and the Members already on it. This is an address book, not a work queue: unread work lives in team_inbox, and a Thread is read with team_thread read. Consult the active-task-threads section when a Workspace change surprises you, or before you claim or commit, to tell in-flight work from a real conflict and avoid riding onto someone else\'s unpushed work — it is independent of your own unread. The cursor pages Thread rows only.',
+  description: 'Discover your authorized Team addresses: current Channels, a newest-first page of top-level Threads (each with its bounded anchor subject; Task standing inline on taskful rows), current Members — each Agent row carries its context-start policy (so before you dispatch you know whether a mentioned Member is renewed into a fresh context or reads your Message in its live Session) and the length of its private task queue (the Leader backlog view; contents stay in team_queue list) — and an「active task threads」section listing the work in flight right now — every in_progress / in_review Task Thread in your Channels, with its subject and the Members already on it. This is an address book, not a work queue: unread work lives in team_inbox, and a Thread is read with team_thread read. Consult the active-task-threads section when a Workspace change surprises you, or before you claim or commit, to tell in-flight work from a real conflict and avoid riding onto someone else\'s unpushed work — it is independent of your own unread. The cursor pages Thread rows only.',
   parameters: {
     channelRef: { type: 'string', description: "Full branded Channel ref exactly as returned by Team tools, including the 'channel:' prefix. An unambiguous abbreviation of the first 6+ UUID hex characters also resolves." },
     limit: { type: 'number' }, cursor: { type: 'number' }, workspace: workspaceParam,
@@ -644,6 +659,7 @@ const teamView = defineTool({
         memberId: { type: 'string', required: true }, kind: { type: 'string', required: true }, handle: { type: 'string', required: true }, description: { type: 'string', required: true }, presence: { type: 'string', required: true },
         contextStart: { type: 'string' },
         capabilityScore: { type: 'number' },
+        queueCount: { type: 'number' },
       } } },
       threads: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
         threadRef: { type: 'string', required: true }, channelRef: { type: 'string', required: true }, revision: { type: 'number', required: true }, messageCount: { type: 'number', required: true }, subject: { type: 'string', required: true },
@@ -684,7 +700,7 @@ const teamView = defineTool({
       if (!continuation) {
         lines.push('', 'Members — current')
         if (value.members.length === 0) lines.push('No visible Members.')
-        else lines.push(...value.members.map(m => `${m.memberId} · @${m.handle} (${m.kind}, ${m.presence}${m.contextStart === undefined ? '' : `, ${m.contextStart}`}${m.capabilityScore === undefined ? '' : `, capability ${m.capabilityScore}/10`})${m.description === '' ? '' : ` — ${m.description}`}`))
+        else lines.push(...value.members.map(m => `${m.memberId} · @${m.handle} (${m.kind}, ${m.presence}${m.contextStart === undefined ? '' : `, ${m.contextStart}`}${m.capabilityScore === undefined ? '' : `, capability ${m.capabilityScore}/10`}${m.queueCount === undefined ? '' : `, ${m.queueCount} queued task${m.queueCount === 1 ? '' : 's'}`})${m.description === '' ? '' : ` — ${m.description}`}`))
         lines.push('', 'Active task threads — work in flight right now')
         if (value.activeTaskThreads.length === 0) lines.push('No task thread is in flight in this Workspace.')
         else lines.push(...value.activeTaskThreads.map(t => `${t.threadRef} · ${t.channelRef} · ${t.status}${t.taskNumber === undefined ? '' : ` · #${t.taskNumber}`}${t.members.length === 0 ? '' : ` · ${t.members.map(m => `@${m.name}`).join(', ')}`} — ${t.subject} · last activity ${formatTeamTimestamp(t.lastActivityAt)}`))
@@ -700,6 +716,7 @@ const teamView = defineTool({
     const workspaceId = workspaceOf(args, agent)
     const view = host.viewForAgent(agent, { workspaceId, ...(args.channelRef === undefined ? {} : { channelRef: args.channelRef as never }), ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.cursor === undefined ? {} : { cursor: args.cursor }), topLevelOnly: true, includeActivities: false, direction: 'before' })
     const visibleMemberIds = new Set(view.members.map(membership => membership.memberId))
+    const queueCounts = new Map(host.queueCountsForAgent(agent, { workspaceId }).map(row => [row.memberId, row.queueCount] as const))
     return {
       workspaceId,
       workspaces: view.workspaces.map(participation => ({ workspaceId: participation.workspaceId,
@@ -708,10 +725,14 @@ const teamView = defineTool({
       members: [
         { memberId: view.humanMemberId, kind: 'human', handle: host.humanHandle(), description: 'Human Team Member', presence: 'available' },
         { memberId: AGENT_TEAM_ASSISTANT_MEMBER_ID, kind: 'assistant', handle: AGENT_TEAM_ASSISTANT_HANDLE, description: 'Team Host supervision program — sends system notices; it reads nothing and cannot be messaged', presence: 'available' },
-        ...host.members().filter(status => visibleMemberIds.has(status.member.memberId)).map(status => ({ memberId: status.member.memberId,
-          kind: 'agent', handle: status.member.handle, description: status.member.description, presence: status.presence,
-          contextStart: status.member.contextStartPolicy === 'fresh' ? 'fresh context per task' : 'continues its context',
-          ...(status.member.capabilityScore === undefined ? {} : { capabilityScore: status.member.capabilityScore }) })),
+        ...host.members().filter(status => visibleMemberIds.has(status.member.memberId)).map(status => {
+          const queueCount = queueCounts.get(status.member.memberId)
+          return { memberId: status.member.memberId,
+            kind: 'agent', handle: status.member.handle, description: status.member.description, presence: status.presence,
+            contextStart: status.member.contextStartPolicy === 'fresh' ? 'fresh context per task' : 'continues its context',
+            ...(status.member.capabilityScore === undefined ? {} : { capabilityScore: status.member.capabilityScore }),
+            ...(queueCount === undefined ? {} : { queueCount }) }
+        }),
       ],
       threads: view.items.map(item => {
         const thread = item.thread
@@ -1112,11 +1133,111 @@ const teamJob = defineTool({
   },
 })
 
+const queueRow = (position: number, entry: { entryRef: string; taskRef: string; taskNumber: number; subject: string; note?: string; standing: string; addedBy: string }): string =>
+  `${position}. ${entry.entryRef} · Task #${entry.taskNumber} "${entry.subject}" · ${entry.standing}${entry.note === undefined ? '' : ` — ${entry.note}`}`
+
+const teamQueue = defineTool({
+  name: 'team_queue',
+  description: 'Read or manage a Member\'s private task queue — the ordered todo-list the Human and the Leader assign work through; you walk it top-down and the Host wakes you for the next entry when a hand-off or a release lands. list shows one Member\'s queue in execution order (pending / working / awaiting standings); without memberRef it is your own queue, and only the Leader may name another Member. assign, remove, modify, reorder, and reassign are Leader-only writes the ledger enforces: assign queues open unclaimed Tasks (append, or insert at atIndex to rank them); remove drops one pending entry; modify retunes one entry\'s note (omit note to clear it); reorder rewrites the whole pending order; reassign moves one pending entry to another Member\'s queue. You have no queue write of your own: never ask for one, and never re-derive priorities — if the queue looks wrong, tell the Leader. Before starting a new task, review your whole queue: propose merges or splits to the Leader and wait for confirmation before restructuring (splits become parentTaskRef sub-tasks you start with team_message).',
+  parameters: {
+    action: { type: 'string', required: true, enum: ['list', 'assign', 'remove', 'modify', 'reorder', 'reassign'] },
+    memberRef: { type: 'string', description: "Full branded Member ref exactly as returned by Team tools, including the 'member:' prefix. list defaults to your own queue; a Leader names another Member to read or edit theirs. assign, remove, modify, reorder, and reassign require the queue-owning Member." },
+    toMemberRef: { type: 'string', description: "reassign: the receiving Member — an enabled Agent Member of the Workspace that has joined the Task's Channel. Required for reassign." },
+    taskRefs: { type: 'array', items: { type: 'string' }, description: "assign: open unclaimed Task refs (1-6), each exactly as Team tools returned them with the 'task:' prefix. Already-queued or started Tasks refuse." },
+    note: { type: 'string', description: 'assign: one bounded note placed on every entry in this assignment (e.g. "unblock the release first"). modify: the replacement note; omit it to clear the entry\'s note.' },
+    atIndex: { type: 'number', description: 'assign: zero-based insert position inside the target queue; omitted appends to the end. Queue position is execution order.' },
+    entryRef: { type: 'string', description: "Full branded queue-entry ref exactly as team_queue list returned it, including the 'entry:' prefix. Required for remove and modify." },
+    order: { type: 'array', items: { type: 'string' }, description: "reorder: the queue's full new order as entry refs — every current entry exactly once." },
+    workspace: workspaceParam,
+  },
+  output: {
+    schema: { type: 'object', additionalProperties: false, properties: {
+      action: { type: 'string', required: true },
+      kind: { type: 'string', required: true },
+      memberId: { type: 'string' },
+      toMemberId: { type: 'string' },
+      reason: { type: 'string' },
+      entries: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        entryRef: { type: 'string', required: true }, taskRef: { type: 'string', required: true }, taskNumber: { type: 'number', required: true },
+        subject: { type: 'string', required: true }, note: { type: 'string' }, standing: { type: 'string', required: true }, addedBy: { type: 'string', required: true },
+      } } },
+    } },
+    // A queue reads like a checklist: numbered execution order, one standing
+    // word per entry, the note inline. Writes answer with the resulting queue
+    // so the Leader sees the ranking it just made without a second call.
+    render: (_args, value) => {
+      if (value.kind === 'refused') {
+        return [{ type: 'text', text: [`Queue ${value.action} refused.`, value.reason ?? '', 'Fix the named condition (a started entry, a missing Channel membership, an already-queued Task) and retry, or hand the change to the Human.'].filter(line => line !== '').join('\n') }]
+      }
+      const entries = value.entries ?? []
+      const rows = entries.map((entry, index) => queueRow(index + 1, entry))
+      if (value.action === 'list') {
+        const owner = value.memberId === undefined ? 'your' : 'the named Member\'s'
+        return [{ type: 'text', text: entries.length === 0
+          ? [`${owner.charAt(0).toUpperCase()}${owner.slice(1)} task queue is empty.`, 'The Human or the Leader places work here with team_queue assign; you never queue yourself.'].join('\n')
+          : [`Task queue (${owner.trim()}s) — execution order, top is next:`, ...rows].join('\n') }]
+      }
+      return [{ type: 'text', text: [
+        `Committed — queue ${value.action}.`,
+        ...rows,
+        'Assignments wake the Member with the routing notice; order and priorities stay a Leader or Human decision.',
+      ].join('\n') }]
+    },
+  },
+  async execute(args, exec) {
+    const agent = exec.agent
+    if (agent === undefined) throw new Error('team_queue requires an Agent session')
+    const host = service(agent)
+    const workspaceId = workspaceOf(args, agent)
+    const parseEntryRefs = (refs: readonly string[] | undefined) => (refs ?? []).map(ref => ref as AgentTeamQueueEntryRef)
+    try {
+      if (args.action === 'list') {
+        const entries = host.queueForAgent(agent, { workspaceId, ...(args.memberRef === undefined ? {} : { memberId: args.memberRef as AgentTeamMemberId }) })
+        return { action: 'list', kind: 'listed', ...(args.memberRef === undefined ? {} : { memberId: args.memberRef }), entries: entries.map(queueEntryView) }
+      }
+      if (args.memberRef === undefined) throw new Error(`team_queue ${args.action} requires the queue-owning Member (memberRef)`)
+      const memberId = args.memberRef as AgentTeamMemberId
+      if (args.action === 'assign') {
+        if (args.taskRefs === undefined || args.taskRefs.length === 0) throw new Error('team_queue assign requires at least one Task ref (taskRefs)')
+        const result = await host.queueAssignForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId, memberId,
+          items: args.taskRefs.map(taskRef => ({ taskRef: taskRef as AgentTeamTaskRef, ...(args.note === undefined ? {} : { note: args.note }) })),
+          ...(args.atIndex === undefined ? {} : { atIndex: args.atIndex }) })
+        return { action: 'assign', kind: 'committed', memberId, entries: result.queue.map(queueEntryView) }
+      }
+      if (args.action === 'remove') {
+        if (args.entryRef === undefined) throw new Error('team_queue remove requires entryRef')
+        const result = await host.queueAmendForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId, memberId, action: 'remove', entryRef: args.entryRef as AgentTeamQueueEntryRef })
+        return { action: 'remove', kind: 'committed', memberId, entries: result.queue.map(queueEntryView) }
+      }
+      if (args.action === 'modify') {
+        if (args.entryRef === undefined) throw new Error('team_queue modify requires entryRef')
+        const result = await host.queueAmendForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId, memberId, action: 'modify',
+          entryRef: args.entryRef as AgentTeamQueueEntryRef, ...(args.note === undefined ? {} : { note: args.note }) })
+        return { action: 'modify', kind: 'committed', memberId, entries: result.queue.map(queueEntryView) }
+      }
+      if (args.action === 'reorder') {
+        if (args.order === undefined || args.order.length === 0) throw new Error('team_queue reorder requires the full new order (order)')
+        const result = await host.queueAmendForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId, memberId, action: 'reorder', order: parseEntryRefs(args.order) })
+        return { action: 'reorder', kind: 'committed', memberId, entries: result.queue.map(queueEntryView) }
+      }
+      if (args.toMemberRef === undefined) throw new Error('team_queue reassign requires the receiving Member (toMemberRef)')
+      if (args.entryRef === undefined) throw new Error('team_queue reassign requires entryRef')
+      const result = await host.queueReassignForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId,
+        entryRef: args.entryRef as AgentTeamQueueEntryRef, fromMemberId: memberId, toMemberId: args.toMemberRef as AgentTeamMemberId })
+      return { action: 'reassign', kind: 'committed', memberId, toMemberId: result.toMemberId, entries: result.toQueue.map(queueEntryView) }
+    } catch (error) {
+      return { action: args.action, kind: 'refused', ...(args.memberRef === undefined ? {} : { memberId: args.memberRef }),
+        reason: error instanceof Error ? error.message : String(error), entries: [] }
+    }
+  },
+})
+
 export function apply(ctx: Context): void {
   ctx.tools.register(teamInbox)
   ctx.tools.register(teamThread)
   ctx.tools.register(teamMessage)
   ctx.tools.register(teamClaim)
+  ctx.tools.register(teamQueue)
   ctx.tools.register(teamView)
   ctx.tools.register(teamRate)
   ctx.tools.register(teamSupervise)

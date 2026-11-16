@@ -32,25 +32,22 @@ import type {
   AgentTeamMemberId,
   AgentTeamMemberModelSchedule,
   AgentTeamModelSelection,
+  AgentTeamScheduleRecurrence,
 } from './types.ts'
-import { TEAM_ZONE_OFFSET_MINUTES } from './time-format.ts'
+import {
+  MINUTES_PER_DAY,
+  TEAM_ZONE_OFFSET_MS,
+  describeRecurrence,
+  scheduleCandidateDays,
+  windowCoversInstant,
+  windowOccurrenceOn,
+} from './schedule-recurrence.ts'
 
 /** How often the monitor re-derives desired routes; matches the watch/liaison cadence. */
 export const MODEL_SCHEDULE_PASS_INTERVAL_MS = 30 * 1000
 
 /** How far ahead a route-changing boundary earns a heads-up. */
 export const MODEL_SCHEDULE_NOTICE_AHEAD_MS = 10 * 60 * 1000
-
-/** Minutes in one day — the wrap-around modulus of every Team-zone minute computation. */
-export const MINUTES_PER_DAY = 24 * 60
-export const TEAM_ZONE_OFFSET_MS = TEAM_ZONE_OFFSET_MINUTES * 60_000
-
-/** Parse one `HH:MM` schedule bound into Team-zone day minutes (0..1439). */
-export function parseScheduleMinute(text: string): number {
-  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(text)
-  if (match === null) throw new Error(`invalid model schedule time '${text}'`)
-  return Number(match[1]) * 60 + Number(match[2])
-}
 
 /** One epoch instant rendered as its Team-zone minute of the day (0..1439). */
 export function teamMinuteOfDay(epochMs: number): number {
@@ -63,29 +60,16 @@ export function teamAbsoluteMinute(epochMs: number): number {
 }
 
 /**
- * Whether one window covers the given Team-zone day minute (start inclusive,
- * end exclusive, wrap allowed). The bounds-only shape is the shared window
- * arithmetic: the model schedule's routed windows and the stop schedule's
- * plain spans both satisfy it.
+ * The route the schedule demands at one instant: the FIRST window whose
+ * expanded occurrence covers the moment wins (config order is priority), and
+ * no cover — or a disabled schedule — demands no override, leaving the Member
+ * on its pinned route. A window whose recurrence does not match the day is
+ * simply not an occurrence.
  */
-export function scheduleWindowCovers(window: { readonly start: string; readonly end: string }, minuteOfDay: number): boolean {
-  const start = parseScheduleMinute(window.start)
-  const end = parseScheduleMinute(window.end)
-  if (start === end) return false
-  return start < end
-    ? minuteOfDay >= start && minuteOfDay < end
-    : minuteOfDay >= start || minuteOfDay < end
-}
-
-/**
- * The route the schedule demands at one day minute: the FIRST covering
- * window wins (config order is priority), and no cover — or a disabled
- * schedule — demands no override, leaving the Member on its pinned route.
- */
-export function resolveScheduleRoute(schedule: AgentTeamMemberModelSchedule, minuteOfDay: number): AgentTeamModelSelection | undefined {
+export function resolveScheduleRoute(schedule: AgentTeamMemberModelSchedule, nowMs: number): AgentTeamModelSelection | undefined {
   if (!schedule.enabled) return undefined
   for (const window of schedule.windows) {
-    if (scheduleWindowCovers(window, minuteOfDay)) return window.selection
+    if (windowCoversInstant(window, nowMs)) return window.selection
   }
   return undefined
 }
@@ -109,31 +93,40 @@ export interface ModelScheduleBoundary {
   readonly absoluteMinute: number
   /** The route demanded from the boundary on; undefined means the schedule stops overriding. */
   readonly incoming: AgentTeamModelSelection | undefined
+  /** The recurrence of the window whose occurrence owns the boundary (notice phrasing only). */
+  readonly recurrence: AgentTeamScheduleRecurrence | undefined
 }
 
 /**
  * Boundaries in `(now, now + horizonMs]` where the schedule's resolved
- * route changes — window starts and ends whose crossing leaves the route
- * exactly as it was earn nothing (no reminder, and no switch, because the
- * effective route never moved). Deduplicated by absolute minute: a Member
- * gets one heads-up per change instant, not one per window touching it.
+ * route changes — the start and end of every expanded window occurrence
+ * around the moment (see the shared recurrence arithmetic; a day the
+ * window's recurrence does not match contributes no occurrence at all).
+ * Crossings that leave the route exactly as it was earn nothing (no
+ * reminder, and no switch, because the effective route never moved).
+ * Deduplicated by absolute minute: a Member gets one heads-up per change
+ * instant, not one per window touching it.
  */
 export function upcomingRouteChanges(schedule: AgentTeamMemberModelSchedule, nowMs: number, horizonMs = MODEL_SCHEDULE_NOTICE_AHEAD_MS): readonly ModelScheduleBoundary[] {
   if (!schedule.enabled) return []
-  const minuteOfDay = teamMinuteOfDay(nowMs)
   const byMinute = new Map<number, ModelScheduleBoundary>()
+  const days = scheduleCandidateDays(nowMs)
   for (const window of schedule.windows) {
-    for (const boundaryMinute of [parseScheduleMinute(window.start), parseScheduleMinute(window.end)]) {
-      const delta = (boundaryMinute - minuteOfDay + MINUTES_PER_DAY) % MINUTES_PER_DAY
-      // delta === 0: the crossing minute is already running — the pass itself
-      // applies the change (if due), a heads-up now would be a note after the fact.
-      if (delta === 0 || delta * 60_000 > horizonMs) continue
-      const before = resolveScheduleRoute(schedule, (boundaryMinute + MINUTES_PER_DAY - 1) % MINUTES_PER_DAY)
-      const after = resolveScheduleRoute(schedule, boundaryMinute)
-      if (sameScheduleRoute(before, after)) continue
-      const atMs = nowMs - ((nowMs + TEAM_ZONE_OFFSET_MS) % 60_000) + delta * 60_000
-      const absoluteMinute = teamAbsoluteMinute(atMs)
-      if (!byMinute.has(absoluteMinute)) byMinute.set(absoluteMinute, { atMs, absoluteMinute, incoming: after })
+    for (const day of days) {
+      const occurrence = windowOccurrenceOn(window, day)
+      if (occurrence === undefined) continue
+      for (const boundaryMs of [occurrence.startMs, occurrence.endMs]) {
+        // delta === 0: the crossing minute is already running — the pass itself
+        // applies the change (if due), a heads-up now would be a note after the fact.
+        if (boundaryMs <= nowMs || boundaryMs - nowMs > horizonMs) continue
+        const before = resolveScheduleRoute(schedule, boundaryMs - 1)
+        const after = resolveScheduleRoute(schedule, boundaryMs)
+        if (sameScheduleRoute(before, after)) continue
+        const absoluteMinute = teamAbsoluteMinute(boundaryMs)
+        if (!byMinute.has(absoluteMinute)) {
+          byMinute.set(absoluteMinute, { atMs: boundaryMs, absoluteMinute, incoming: after, recurrence: window.recurrence })
+        }
+      }
     }
   }
   return [...byMinute.values()].sort((a, b) => a.absoluteMinute - b.absoluteMinute)
@@ -203,7 +196,6 @@ export class ModelScheduleMonitor {
     if (this.disposed || this.passRunning) return
     this.passRunning = true
     try {
-      const minuteOfDay = teamMinuteOfDay(now)
       for (const member of this.options.members()) {
         if (member.state !== 'enabled' || member.external === true) {
           this.pendingSwitch.delete(member.memberId)
@@ -211,7 +203,7 @@ export class ModelScheduleMonitor {
         }
         const schedule = member.modelSchedule
         const desired = schedule !== undefined && schedule.enabled
-          ? resolveScheduleRoute(schedule, minuteOfDay)
+          ? resolveScheduleRoute(schedule, now)
           : undefined
         const desiredKey = scheduleRouteKey(desired)
         // Drive a switch when the durable applied route disagrees with the
@@ -260,12 +252,13 @@ export function modelScheduleSwitchNoticeText(input: {
   readonly memberHandle: string
   readonly whenText: string
   readonly incoming: AgentTeamModelSelection | undefined
+  readonly recurrence?: AgentTeamScheduleRecurrence
 }): string {
   const route = input.incoming === undefined
     ? 'back onto its pinned route (no scheduled window covers the moment)'
     : `onto ${input.incoming.provider}/${input.incoming.model}`
   const lines = [
-    `@${input.memberHandle} Model switch notice: your Team model schedule switches your model route ${route} at ${input.whenText}. The switch lands through a context reset — a fresh Session starts empty on the new route, and you will remember nothing of this one.`,
+    `@${input.memberHandle} Model switch notice: your Team model schedule switches your model route ${route} at ${input.whenText} (${describeRecurrence(input.recurrence)}). The switch lands through a context reset — a fresh Session starts empty on the new route, and you will remember nothing of this one.`,
     'Prepare before it lands: finish or stop the work you are mid-way through (jobs included), write the current state and your next steps into your private memory, and post to the relevant Thread whatever the Team must not lose with this context.',
     'After the reset, re-orient through your memory index, team_view, and team_inbox before continuing.',
   ]

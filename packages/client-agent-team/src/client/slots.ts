@@ -79,6 +79,11 @@ import type {
   AgentTeamTasksRequest,
   AgentTeamMemberTasks,
   AgentTeamMemberTasksRequest,
+  AgentTeamQueueAssignRequest,
+  AgentTeamQueueAmendRequest,
+  AgentTeamQueueReassignRequest,
+  AgentTeamQueueResult,
+  AgentTeamQueueReassignResult,
   AgentTeamSendMessageRequest,
   AgentTeamSendMessageResult,
   AgentTeamUpdateChannelRequest,
@@ -136,13 +141,17 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
   & {
     navigation: TeamNavigationSource
     loadMembers: (request: AgentTeamMembersRequest) => Promise<RemoteResult<readonly AgentTeamClientMemberStatus[]>>
-    /** One Workspace's per-Member working queues behind the Agents panel's task surfaces. */
+    /** One Workspace's per-Member private task queues behind the Agents panel's queue dialog. */
     loadMemberTasks: (request: AgentTeamMemberTasksRequest) => Promise<RemoteResult<AgentTeamMemberTasks>>
+    /** One Workspace's whole Task list behind the queue dialog's append picker. */
+    loadTasks: (request: AgentTeamTasksRequest) => Promise<RemoteResult<AgentTeamTasks>>
+    /** Human queue writes behind the Agents panel's queue dialog; refusals ride the error message. */
+    queueAssign: (request: AgentTeamQueueAssignRequest) => Promise<RemoteResult<AgentTeamQueueResult>>
+    queueAmend: (request: AgentTeamQueueAmendRequest) => Promise<RemoteResult<AgentTeamQueueResult>>
+    queueReassign: (request: AgentTeamQueueReassignRequest) => Promise<RemoteResult<AgentTeamQueueReassignResult>>
     /**
-     * Human-sent Message into one Channel — the Agent panel's only write lane.
-     * The task-reassignment consultation rides it: one Message to the Team
-     * leader's own Channel naming the Task and the requested taker, and the
-     * leader decides and arranges from there.
+     * Human-sent Message into one Channel — the Agents panel's consultation
+     * lane (rare; queue writes go through the queue remotes above).
      */
     sendMessage: (request: AgentTeamSendMessageRequest) => Promise<RemoteResult<AgentTeamSendMessageResult>>
     /** Human direct-only Inbox slice; the badge sums each visible Workspace's total. */

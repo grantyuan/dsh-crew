@@ -38,10 +38,11 @@ import { AGENT_TEAM_PLUGIN_ID, continuationCheckpointRefOf, handoffOf, isCheckpo
 import { RECOVERY_DELAY_MS } from '../src/recovery.ts'
 import { RELEVANCE_JUDGE_SYSTEM_PREFIX } from '../src/context-relevance.ts'
 import { COMPLETION_MARKER } from '../src/response-guard.ts'
-import { CONTINUATION_NUDGE_MARKER, continuationNudgeText } from '../src/continuation-watcher.ts'
-import { LIAISON_REPORT_GRACE_MS } from '../src/completion-liaison.ts'
+import { CONTINUATION_NUDGE_MARKER, CONTINUATION_QUIET_MS, CONTINUATION_REARM_MS, continuationNudgeText } from '../src/continuation-watcher.ts'
+import { LIAISON_COOLDOWN_MS, LIAISON_REPORT_GRACE_MS } from '../src/completion-liaison.ts'
 import type { AgentTeamChannelRef, AgentTeamClaimRef, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId } from '../src/types.ts'
 import { AgentTeamLedger } from '../src/ledger.ts'
+import { carriedSystemPromptFromEvents } from '../src/member-prompt-carry.ts'
 import { MemoryStorageBackend } from './helpers/memory-backend.ts'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -1703,7 +1704,7 @@ describe('Agent Team Member lifecycle', () => {
   })
 
   it('validates the final Team tool marker during unpublished setup', async () => {
-    expect(AGENT_TEAM_TOOL_NAMES).toEqual(['team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_view', 'team_rate', 'team_supervise', 'team_watch', 'team_job', 'context_rollover', 'context_checkpoint', 'context_timeline', 'context_interrupt'])
+    expect(AGENT_TEAM_TOOL_NAMES).toEqual(['team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_queue', 'team_view', 'team_rate', 'team_supervise', 'team_watch', 'team_job', 'context_rollover', 'context_checkpoint', 'context_timeline', 'context_interrupt'])
     const definition = markAgentTeamPreset({ name: 'team_message' })
     expect(Reflect.get(definition, Symbol.for('@grantyuan/dsh-crew.preset'))).toBe(true)
   })
@@ -5741,6 +5742,98 @@ describe('Agent Team member context control (ticket 01)', () => {
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
+  it('extends one report-check chain per checked Member and folds the earlier checks in the hint', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('liaison-chain-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const chief = await ctx.agentTeam.addMember({ requestId: requestId('liaison-chain-chief'), workspaceId, handle: 'chief', description: 'Leads the team', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const worker = await ctx.agentTeam.addMember({ requestId: requestId('liaison-chain-worker'), workspaceId, handle: 'scout', description: 'Does the work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const workerId = worker.status.member.memberId
+    const chiefId = chief.status.member.memberId
+    await ctx.agentTeam.updateMember({ requestId: requestId('liaison-chain-designate'), memberId: chiefId, handle: 'chief', description: 'Leads the team', leader: true })
+    for (let turn = 0; turn < 8; turn += 1) adapter.enqueue(textResponse('Acknowledged.'))
+
+    // Episode one: the worker finishes without reporting; the liaison prompts
+    // the leader with one top-level check that opens the Member's chain.
+    const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('liaison-chain-start'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate the flaky test', recipients: [workerId] })
+    if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
+    await waitForIdle(ctx, ctx.agents.get(worker.status.member.sessionId)!)
+    const clockOne = Date.now() + LIAISON_REPORT_GRACE_MS + 1_000
+    await ctx.agentTeam.runCompletionLiaisonPass(clockOne)
+    const bodies = () => ctx.agentTeam.view({ workspaceId }).items.map(item => item.message.body)
+    await waitFor(() => bodies().some(body => body.includes('Team report check:')) ? true : undefined)
+    const chiefAgent = ctx.agents.get(chief.status.member.sessionId)!
+    await waitForIdle(ctx, chiefAgent)
+
+    // Episode two inside the cooldown: the worker finishes again without
+    // reporting, and the next prompt extends the same chain instead of
+    // minting a second Thread.
+    const pinged = await ctx.agentTeam.sendMessage({ requestId: requestId('liaison-chain-ping'), workspaceId, channelRef: channel.channel.channelRef, body: 'Please finish your current round too', recipients: [workerId] })
+    if (pinged.kind !== 'committed') throw new Error(`expected committed ping, received ${pinged.kind}`)
+    await waitForIdle(ctx, ctx.agents.get(worker.status.member.sessionId)!)
+    await ctx.agentTeam.runCompletionLiaisonPass(clockOne + LIAISON_COOLDOWN_MS + LIAISON_REPORT_GRACE_MS + 1_000)
+    await waitFor(() => bodies().filter(body => body.includes('Team report check:')).length === 2 ? true : undefined)
+
+    const checkItems = ctx.agentTeam.view({ workspaceId }).items.filter(item => item.message.body.includes('Team report check:'))
+    expect(checkItems).toHaveLength(2)
+    expect(new Set(checkItems.map(item => item.thread.threadRef)).size).toBe(1)
+    expect(checkItems[0]!.message.topLevel).toBe(true)
+    expect(checkItems[1]!.message.topLevel).toBe(false)
+
+    // The leader's wake renders only the newest delivery: the earlier check
+    // stays a durable unread fact but collapses into the supersede summary.
+    const requestIndex = await waitFor(() => {
+      const index = adapter.requests.findIndex((request, probeIndex) =>
+        adapter.requestSessions[probeIndex] === chiefAgent.session.id
+        && JSON.stringify(request.messages).includes('1 earlier Team report check'))
+      return index >= 0 ? index : undefined
+    })
+    // The newest hint is the last Inbox notice in that request's history: the
+    // earlier turn's hint is also in there and must not leak into the count.
+    const history = adapter.requests[requestIndex]!.messages
+    const hint = [...history].reverse()
+      .map(message => JSON.stringify(message))
+      .find(text => text.includes('Team Inbox has unread work'))!
+    expect(hint).toContain('Team report check:')
+    expect(hint).toContain('Superseded Team notices are omitted from this context')
+    expect(hint).toContain('1 earlier Team report check')
+    expect(hint.split('Direct Team mention')).toHaveLength(2)
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it('extends the continuation nudge chain instead of minting a Thread per episode', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('nudge-chain-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const chief = await ctx.agentTeam.addMember({ requestId: requestId('nudge-chain-chief'), workspaceId, handle: 'chief', description: 'Leads the team', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    await ctx.agentTeam.updateMember({ requestId: requestId('nudge-chain-designate'), memberId: chief.status.member.memberId, handle: 'chief', description: 'Leads the team', leader: true })
+    for (let turn = 0; turn < 6; turn += 1) adapter.enqueue(textResponse('Acknowledged.'))
+
+    // One open Task and an all-idle Workspace: the watcher fires after the
+    // quiet hold, then re-arms past the re-arm window and fires again.
+    const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('nudge-chain-start'), workspaceId, channelRef: channel.channel.channelRef, body: 'Keep the board moving', recipients: [chief.status.member.memberId] })
+    if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
+    await waitForIdle(ctx, ctx.agents.get(chief.status.member.sessionId)!)
+
+    const bodies = () => ctx.agentTeam.view({ workspaceId }).items.map(item => item.message.body)
+    const t0 = Date.now()
+    await ctx.agentTeam.runContinuationWatcherPass(t0)
+    await ctx.agentTeam.runContinuationWatcherPass(t0 + CONTINUATION_QUIET_MS + 1_000)
+    await waitFor(() => bodies().some(body => body.includes(CONTINUATION_NUDGE_MARKER)) ? true : undefined)
+    const chiefAgent = ctx.agents.get(chief.status.member.sessionId)!
+    await waitForIdle(ctx, chiefAgent)
+    await ctx.agentTeam.runContinuationWatcherPass(t0 + CONTINUATION_QUIET_MS + CONTINUATION_REARM_MS + 1_000)
+    await ctx.agentTeam.runContinuationWatcherPass(t0 + 2 * CONTINUATION_QUIET_MS + CONTINUATION_REARM_MS + 2_000)
+    await waitFor(() => bodies().filter(body => body.includes(CONTINUATION_NUDGE_MARKER)).length === 2 ? true : undefined)
+
+    const nudgeItems = ctx.agentTeam.view({ workspaceId }).items.filter(item => item.message.body.includes(CONTINUATION_NUDGE_MARKER))
+    expect(nudgeItems).toHaveLength(2)
+    expect(new Set(nudgeItems.map(item => item.thread.threadRef)).size).toBe(1)
+    expect(nudgeItems[0]!.message.topLevel).toBe(true)
+    expect(nudgeItems[1]!.message.topLevel).toBe(false)
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
   it('pushes the open Tasks to the Member itself when no leader exists, relays its refusal to @human, and never re-pushes', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
@@ -5871,6 +5964,132 @@ describe('Agent Team member context control (ticket 01)', () => {
     expect(aged.watch).toMatchObject({ watchRef: replaced.watchRef, state: 'stopped' })
     expect(aged.watch.stateMinutes).toBeGreaterThanOrEqual(6)
     expect(aged.watch.stateMinutes).toBeLessThan(8)
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+})
+
+describe('Agent Team carried system prompt across context renewals', () => {
+  interface CarryHarness {
+    readonly ctx: Awaited<ReturnType<typeof realHarness>>['ctx']
+    readonly workspaceId: Awaited<ReturnType<typeof realHarness>>['workspaceId']
+    readonly memberId: AgentTeamMemberId
+    readonly firstSessionId: SessionId
+    readonly carried: string
+    readonly adapter: ScriptedAdapter
+    readonly setDrift: (value: string) => void
+  }
+
+  /** Boot a harness whose assembly carries a mutable drift section: the live registry's text changes between generations, so a rebuilt prompt would differ where a carried one must not. */
+  async function carryHarness(handle: string): Promise<CarryHarness> {
+    const adapter = new ScriptedAdapter()
+    const harness = await realHarness(adapter)
+    const { ctx, workspaceId } = harness
+    let drift = 'carry-mark-A'
+    const disposeDrift = ctx.systemPrompt.section({ name: 'test:carry-drift', order: 5000, text: () => drift })
+    cleanups.push(async () => { disposeDrift() })
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId(`carry-channel-${handle}`), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId(`carry-add-${handle}`), workspaceId, handle, description: 'Carries the prompt', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const live = ctx.agents.get(added.status.member.sessionId)!
+    adapter.enqueue(textResponse('Initial work finished.'))
+    live.followup(createUserMessage({ content: [{ type: 'text', text: 'Start working.' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, live)
+    const carried = carriedSystemPromptFromEvents(live.session.ownEvents())
+    expect(carried).toContain('carry-mark-A')
+    return {
+      ctx, workspaceId,
+      memberId: added.status.member.memberId,
+      firstSessionId: added.status.member.sessionId,
+      carried: carried!,
+      adapter,
+      setDrift: value => { drift = value },
+    }
+  }
+
+  it('reuses the retiring generation prompt verbatim on a reset instead of reassembling it', async () => {
+    const harness = await carryHarness('carry-reset')
+    const { ctx, workspaceId, memberId, firstSessionId, carried, adapter } = harness
+    harness.setDrift('carry-mark-B')
+
+    // The reset notice opens the fresh generation's first turn: one scripted reply.
+    adapter.enqueue(textResponse('Re-oriented from the Team history.'))
+    const cleared = await ctx.agentTeam.clearMemberContext({ requestId: requestId('carry-clear'), workspaceId, memberId })
+    expect(cleared.status.member.sessionId).not.toBe(firstSessionId)
+    const liveAfter = await waitFor(() => ctx.agents.get(cleared.status.member.sessionId)!)
+    await waitForIdle(ctx, liveAfter)
+    expect(ctx.agents.get(firstSessionId)).toBeUndefined()
+
+    // The fresh generation's head prompt is the retired one byte for byte —
+    // the drift value the live registry would now assemble never appears.
+    expect(carriedSystemPromptFromEvents(liveAfter.session.ownEvents())).toBe(carried)
+
+    // The freeze holds across the generation's own later turns.
+    adapter.enqueue(textResponse('Still frozen.'))
+    liveAfter.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue.' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, liveAfter)
+    expect(carriedSystemPromptFromEvents(liveAfter.session.ownEvents())).toBe(carried)
+
+    // A member created after the drift change assembles live: the carry is
+    // per generation, never a global freeze.
+    const second = await ctx.agentTeam.addMember({ requestId: requestId('carry-second'), workspaceId, handle: 'carrier-two', description: 'Second member', presetId: 'team-member', channelRefs: [] })
+    const secondLive = ctx.agents.get(second.status.member.sessionId)!
+    adapter.enqueue(textResponse('Second member work.'))
+    secondLive.followup(createUserMessage({ content: [{ type: 'text', text: 'Start.' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, secondLive)
+    expect(carriedSystemPromptFromEvents(secondLive.session.ownEvents())).toContain('carry-mark-B')
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it('releases the carried prompt when the Human edits the member prompt profile', async () => {
+    const harness = await carryHarness('carry-edit')
+    const { ctx, workspaceId, memberId, carried, adapter } = harness
+    harness.setDrift('carry-mark-B')
+    adapter.enqueue(textResponse('Re-oriented from the Team history.'))
+    const cleared = await ctx.agentTeam.clearMemberContext({ requestId: requestId('carry-edit-clear'), workspaceId, memberId })
+    const liveAfter = await waitFor(() => ctx.agents.get(cleared.status.member.sessionId)!)
+    await waitForIdle(ctx, liveAfter)
+    expect(carriedSystemPromptFromEvents(liveAfter.session.ownEvents())).toBe(carried)
+
+    // The prompt-profile edit releases the freeze: the next assembly rebuilds
+    // from current inputs, so the edited paragraph and the live registry text
+    // both reach the model.
+    const edited = await ctx.agentTeam.updateMember({
+      requestId: requestId('carry-edit-profile'), memberId, handle: 'carry-edit', description: 'Carries the prompt',
+      prompt: { customPrompt: 'The edited paragraph mark.' },
+    })
+    expect(edited.status.availability).toBe('active')
+    adapter.enqueue(textResponse('After the edit.'))
+    liveAfter.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue after the edit.' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, liveAfter)
+    const rebuilt = carriedSystemPromptFromEvents(liveAfter.session.ownEvents())
+    expect(rebuilt).toContain('The edited paragraph mark.')
+    expect(rebuilt).toContain('carry-mark-B')
+    expect(rebuilt).not.toBe(carried)
+  })
+
+  it('carries the retiring prompt through a model-initiated context rollover', async () => {
+    const harness = await carryHarness('carry-rollover')
+    const { ctx, memberId, firstSessionId, carried, adapter } = harness
+    const handoff = 'Objective: land the carried prompt. Verified: the bytes match. Next: continue on the new generation.'
+    adapter.enqueue(toolCallResponse('call-carry-nc', 'context_rollover', { handoff }))
+    adapter.enqueue(textResponse('Continuing from the handoff.'))
+    const liveBefore = ctx.agents.get(firstSessionId)!
+    liveBefore.followup(createUserMessage({ content: [{ type: 'text', text: 'Please hand off now.' }], source: { kind: 'user' } }))
+    const renewed = await waitFor(() => {
+      const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
+      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+    })
+    const liveAfter = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    await waitForIdle(ctx, liveAfter)
+    expect(liveAfter.session.header.parentSession).toBe(firstSessionId)
+    expect(carriedSystemPromptFromEvents(liveAfter.session.ownEvents())).toBe(carried)
+
+    // Flip the live registry while the fresh generation is idle: its next
+    // turn must still assemble the carried bytes, not the drifted text.
+    harness.setDrift('carry-mark-B')
+    adapter.enqueue(textResponse('Still frozen after the handoff.'))
+    liveAfter.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue on the new generation.' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, liveAfter)
+    expect(carriedSystemPromptFromEvents(liveAfter.session.ownEvents())).toBe(carried)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 })

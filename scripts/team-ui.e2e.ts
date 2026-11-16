@@ -681,13 +681,29 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await stopEditor.getByRole('button', { name: '添加停止区间' }).waitFor()
   await expect.poll(async () => await editSave.isDisabled()).toBe(true)
   await stopEditor.getByRole('button', { name: '添加停止区间' }).click()
-  await stopEditor.getByLabel('停止区间 #1 开始').fill('9:00')
+  await stopEditor.getByLabel('停止区间 #1 开始').fill('9:5')
   await stopEditor.getByText('每个停止区间需要 HH:MM(UTC+8) 的开始与结束时间;开始与结束不能相同;启用日程至少需要一个完整区间。').waitFor()
   await expect.poll(async () => await editSave.isDisabled()).toBe(true)
   await stopEditor.getByLabel('停止区间 #1 开始').fill('22:00')
   await stopEditor.getByLabel('停止区间 #1 结束').fill('06:00')
   await expect.poll(() => stopEditor.getByText('每个停止区间需要 HH:MM(UTC+8) 的开始与结束时间;开始与结束不能相同;启用日程至少需要一个完整区间。').count()).toBe(0)
+  // A window repeats daily until the Human says otherwise; picking a pattern
+  // reveals only that pattern's parameters, and the interval below rides the
+  // same draft the save commits.
+  const recurrenceTrigger = stopEditor.getByRole('button', { name: '停止区间 #1 周期' })
+  await expect.poll(() => recurrenceTrigger.textContent()).toContain('每天')
+  await recurrenceTrigger.click()
+  await page.getByRole('menuitem', { name: '每隔若干天' }).click()
+  await expect.poll(() => recurrenceTrigger.textContent()).toContain('每隔若干天')
+  await stopEditor.getByLabel('停止区间 #1 周期 间隔天数').fill('3')
   await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule.png'), fullPage: true })
+  // The recurrence line wraps at the narrow breakpoint instead of pushing the
+  // dialog past the viewport.
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await stopEditor.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true)
+  expect((await stopEditor.boundingBox())!.width).toBeLessThanOrEqual(390)
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-mobile.png'), fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 960 })
   await editSave.click()
   await expect.poll(() => page.getByRole('dialog', { name: '编辑 Agent' }).count()).toBe(0, { timeout: 30_000 })
   await builderRow.hover()
@@ -696,6 +712,8 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const stopReopen = page.getByRole('dialog', { name: '编辑 Agent' })
   await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 开始').inputValue()).toBe('22:00')
   await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 结束').inputValue()).toBe('06:00')
+  await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).textContent()).toContain('每隔若干天')
+  await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 周期 间隔天数').inputValue()).toBe('3')
   await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-echo.png'), fullPage: true })
   await stopReopen.getByRole('button', { name: '关闭', exact: true }).click()
 
@@ -2917,6 +2935,44 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.setViewportSize({ width: 1440, height: 960 })
   await historyPage.getByRole('button', { name: '返回' }).click()
   await historyPage.waitFor({ state: 'detached' })
+
+  // The Member's private task queue dialog: the Host hands the Human one real
+  // queued entry (assigned through the same queueAssign Remote the dialog
+  // writes), and the dialog renders 正在处理/待开始 with the Task, note, and
+  // assigner. Screenshots carry the desktop and 390×844 dialog surfaces.
+  const queueReviewer = scaffold.ctx.agentTeam.members({ workspaceId: inboxWorkspace.id })
+    .find((status: { member: { handle: string } }) => status.member.handle === 'reviewer')
+  expect(queueReviewer).toBeDefined()
+  const queueTask = (await scaffold.ctx.agentTeam.sendMessage({
+    requestId: 'm2-10-queue-task' as never, workspaceId: inboxWorkspace.id, channelRef: deliveryChannel.channelRef,
+    body: '队列验收任务', asTask: true,
+  })) as { task?: { taskRef: string } }
+  expect(queueTask.task).toBeDefined()
+  const queueAssigned = await scaffold.ctx.agentTeam.queueAssign({
+    requestId: 'm2-10-queue-assign' as never, workspaceId: inboxWorkspace.id, memberId: (queueReviewer! as unknown as { member: { memberId: string } }).member.memberId,
+    items: [{ taskRef: queueTask.task!.taskRef, note: '按队列顺序执行' }],
+  })
+  expect(queueAssigned).toMatchObject({ kind: 'committed' })
+  const queueAgentsSection = page.getByRole('button', { name: 'Agents', exact: true })
+  if (await queueAgentsSection.getAttribute('aria-expanded') !== 'true') await queueAgentsSection.click()
+  const queueAgentRow = page.locator('[class*="agentRow"]').filter({ hasText: 'reviewer' }).first()
+  await queueAgentRow.hover()
+  await queueAgentRow.getByRole('button', { name: 'reviewer 的操作' }).click()
+  await page.getByRole('menuitem', { name: '任务队列' }).click()
+  const queueDialog = page.getByRole('dialog', { name: '任务队列：reviewer' })
+  await queueDialog.waitFor()
+  await expect.poll(() => queueDialog.getByRole('heading', { name: '待开始' }).count()).toBe(1)
+  await expect.poll(() => queueDialog.getByText('按队列顺序执行').count()).toBe(1)
+  await settleLayout(page)
+  await page.screenshot({ path: join(UI07_SHOTS, 'member-queue-dialog.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await settleLayout(page)
+  await page.screenshot({ path: join(UI07_SHOTS, 'member-queue-dialog-narrow.png'), fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  // The Modal carries both an X close and the footer 关闭; Escape is the one
+  // unambiguous close and doubles as the keyboard path the dialog must offer.
+  await page.keyboard.press('Escape')
+  await queueDialog.waitFor({ state: 'detached' })
 
   const channelKeyboard = page.getByRole('button', { name: '# delivery' })
   await channelKeyboard.focus()

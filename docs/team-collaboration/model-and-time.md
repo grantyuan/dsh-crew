@@ -34,7 +34,11 @@ Time never drives Task semantics: no deadlines, SLAs, or staleness-driven state 
 
 ## Time-interval model routing
 
-A Member may carry a `modelSchedule`: an ordered list of daily `HH:MM` windows in the Team coordination zone UTC+8, each demanding one provider route. Windows resolve in list order — the first covering window wins — a window whose end is at or before its start wraps past midnight, and hours no window covers (or a disabled schedule) leave the Member on its pinned model. The intent rides the Member entity like `model` and edits through the same `updateMember` Remote; a schedule edit never touches a live Session by itself.
+A Member may carry a `modelSchedule`: an ordered list of daily `HH:MM` windows in the Team coordination zone UTC+8, each demanding one provider route. Windows resolve in list order — the first covering window wins — a window whose end is at or before its start wraps past midnight, and hours no window covers (or a disabled schedule) leave the Member on its pinned model.
+
+Each window may also carry a `recurrence` deciding which days it opens: every day (the default), workdays (Monday–Friday), every N days from an explicit anchor date, a weekday set, a day of each month, or a month and day each year. Matching is anchored on the window's start day, so a `22:00–08:00` workday window still runs into Saturday morning from Friday; a short month's 31st or a common year's 02-29 opens no window at all instead of shifting to a nearby day. Hours on a non-matching day are simply not covered.
+
+The intent rides the Member entity like `model` and edits through the same `updateMember` Remote; a schedule edit never touches a live Session by itself.
 
 The Host's model-schedule monitor re-derives the desired route each pass and compares it with the durable applied route (`scheduledModel` on the Member entity, moved only by the `team/member-model-scheduled` operation the monitor commits under delegated Human authority). Every actual change lands through the shared context-renewal path — the same reset the Human menu uses — so a switch always starts a fresh generation activating on the new route.
 
@@ -45,6 +49,8 @@ Ten minutes before a route-changing boundary the monitor posts one heads-up in t
 ## Time-interval stop-run scheduling
 
 A Member may carry a `stopSchedule`: an ordered list of daily `HH:MM` windows in the Team coordination zone UTC+8 during which the Member must not run. Bounds follow the model-schedule window shape — `start` inclusive, `end` exclusive, wrapping past midnight when `end` is at or before `start` — and the intent edits through the same `updateMember` Remote, riding the Member entity like `modelSchedule`.
+
+A window may carry the same optional `recurrence` the model schedule uses, with the same anchored-on-the-start-day rules: a window only stops running on days its recurrence matches, and an absent field means every day. Every notice states the pattern (`Active days: on workdays.`), so a resumed Member knows when its stop window next opens.
 
 The Host's stop-schedule monitor turns the windows into Team Assistant notifications only. Half an hour before a window opens, a Member whose Session is live receives the wrap-up notice: stop running when the window starts, finish or park the in-flight work, write the handover document into private memory, and report progress and wrap-up status to the Manager (the designated Leader) before finishing, stating the stop interval.
 

@@ -640,6 +640,12 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
     memberTaskQueues = rows.map(({ workspaceId, queue }) => (workspaceId === undefined ? { queue } : { workspaceId, queue }))
     wakeAll()
   }
+  // The Agents panel's queue-dialog write doubles: committed answers whose
+  // only job is to let the spec assert the exact ledger request the dialog
+  // authored — the projection refresh comes from the seeded memberTasks read.
+  const queueAssign = vi.fn(async () => ({ ok: true as const, value: { kind: 'committed' as const, receipt: {}, memberId: '', queue: [] } }))
+  const queueAmend = vi.fn(async () => ({ ok: true as const, value: { kind: 'committed' as const, receipt: {}, memberId: '', queue: [] } }))
+  const queueReassign = vi.fn(async () => ({ ok: true as const, value: { kind: 'committed' as const, receipt: {}, entry: {}, fromMemberId: '', toMemberId: '', toQueue: [] } }))
   const changes = vi.fn(async function* (request: AgentTeamChangesRequest, signal?: AbortSignal) {
     let pending = false
     let resume: (() => void) | undefined
@@ -770,7 +776,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   // refuses by contract.
   runtime.remote.provideNamespaces({
     session: { modelCatalog },
-    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, messageCenter, tasks, memberTasks, readThread, threadHistory: loadThreadHistory, threadObservations, summarizeThread, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar },
+    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, messageCenter, tasks, memberTasks, queueAssign, queueAmend, queueReassign, readThread, threadHistory: loadThreadHistory, threadObservations, summarizeThread, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar },
   })
   Object.assign(runtime.remote, {
     $stream: <T,>(options: ConstructorParameters<typeof RemoteStream<T>>[1]) => new RemoteStream(connection, options),
@@ -842,5 +848,5 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; workspaceId?: s
   const disposeSettings = runtime.slots.register({ name: 'sidebar.settings', priority: 0 }, BaselineSettings as never)
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
-  return { runtime, team, view, sidebarTabTypes: tabTypes, openResource, openTab, teamTabs: () => tabStore.getSnapshot().tabs, failSidebarOpens: (active: boolean) => { throwOpens.active = active }, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, sidebarColumn: { isExpanded, toggleExpanded }, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, openSession, summarizeThread, seedDigest, failDigest }
+  return { runtime, team, view, sidebarTabTypes: tabTypes, openResource, openTab, teamTabs: () => tabStore.getSnapshot().tabs, failSidebarOpens: (active: boolean) => { throwOpens.active = active }, disposeWorkspace, disposeSettings, openRightbar, closeRightbar, sidebarColumn: { isExpanded, toggleExpanded }, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, compactMemberContext, memberSessions, memberSessionTranscript, archiveMember, modelCatalog, joinChannel, removeChannelMember, sendMessage, reply, changeTask, changeTasks, promoteThread, resolveTaskRefs, publishAgentReply, publishPresence, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, messageCenter, seedMessageCenterTopics, seedMessageCenterMessages, failMessageCenter, tasks, seedTasks, memberTasks, seedMemberTasks, queueAssign, queueAmend, queueReassign, openSession, summarizeThread, seedDigest, failDigest }
 }

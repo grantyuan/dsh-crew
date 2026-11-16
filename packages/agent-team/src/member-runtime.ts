@@ -31,6 +31,7 @@ import type {
 } from './types.ts'
 import * as memberSkills from './member-skills.ts'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
+import { CARRIED_PROMPT_SECTION_NAME } from './member-prompt-carry.ts'
 
 /**
  * Read-only core skills shipped beside the preset (the meta skill first:
@@ -46,6 +47,7 @@ export const AGENT_TEAM_TOOL_NAMES = Object.freeze([
   'team_thread',
   'team_message',
   'team_claim',
+  'team_queue',
   'team_view',
   'team_rate',
   'team_supervise',
@@ -72,10 +74,14 @@ export const MEMBER_PROMPT_SECTION_NAME = 'team:member-prompt'
  * (`tool:<name>`) — tool-agent-team registers none today (its guidance rides
  * tool descriptions in `assembly.tools`), so those entries are a fixed forward
  * defense should guidance sections ever ship. The deployment persona prefix
- * is appended at the check, so Harness persona renames stay covered.
+ * is appended at the check, so Harness persona renames stay covered. The
+ * carried system prompt is the frozen verbatim reuse a renewal captured: it
+ * is not a curatable section, and dropping it would silently unfreeze the
+ * generation instead of removing one topic.
  */
 const PROTECTED_PROMPT_SECTIONS: ReadonlySet<string> = new Set([
   MEMBER_PROMPT_SECTION_NAME,
+  CARRIED_PROMPT_SECTION_NAME,
   ...AGENT_TEAM_TOOL_NAMES.map(toolName => `tool:${toolName}`),
 ])
 
@@ -202,6 +208,8 @@ export class MemberRuntime {
   private readonly memberPromptSections = new Map<AgentTeamMemberId, () => void>()
   /** Live per-Member section-drop waterfall disposers; released with the Member's agent scope. */
   private readonly memberSectionDrops = new Map<AgentTeamMemberId, () => void>()
+  /** Live per-Member carried-prompt freeze disposers; released with the Member's agent scope. */
+  private readonly memberCarriedPrompts = new Map<AgentTeamMemberId, () => void>()
 
   constructor(private readonly deps: MemberRuntimeDeps) {}
 
@@ -245,6 +253,7 @@ export class MemberRuntime {
 
   /** Swap a live Member's tool policy at a turn boundary: dispose the old restriction, apply the new. */
   reapplyMemberToolPolicy(member: AgentTeamAgentMember): void {
+    this.releaseCarriedPrompt(member.memberId)
     this.releaseMemberToolPolicy(member.memberId)
     this.applyMemberToolPolicy(this.deps.liveMemberContext(member.memberId), member)
   }
@@ -282,6 +291,7 @@ export class MemberRuntime {
 
   /** Swap a live Member's role paragraph: release the old section, then re-register from the stored profile. */
   reapplyMemberPromptSection(member: AgentTeamAgentMember): void {
+    this.releaseCarriedPrompt(member.memberId)
     this.releaseMemberPromptSection(member.memberId)
     this.applyMemberPromptSection(this.deps.liveMemberContext(member.memberId), member)
   }
@@ -322,8 +332,45 @@ export class MemberRuntime {
 
   /** Swap a live Member's drop list at a turn boundary: release the old listener, then re-register from the stored profile. */
   reapplyMemberSectionDrops(member: AgentTeamAgentMember): void {
+    this.releaseCarriedPrompt(member.memberId)
     this.releaseMemberSectionDrops(member.memberId)
     this.applyMemberSectionDrops(this.deps.liveMemberContext(member.memberId), member)
+  }
+
+  /**
+   * Freeze one freshly activated generation's system prompt to the text its
+   * retiring generation carried: a scoped `system-prompt/assemble` waterfall
+   * listener replaces the assembled sections with the captured prompt as one
+   * literal (`interpolate: false`) section, so the rendered prompt — and the
+   * head system node the loop projects — reproduces the previous generation's
+   * bytes exactly, and the provider prefix cache behind that prompt survives
+   * the renewal. Registered LAST in setup, after the restriction and drop
+   * seams: the carried text already embeds whatever those seams contributed
+   * when the captured generation assembled, and the replacement is the final
+   * authority over the section list. Applies to every assembly of this scope,
+   * read-side ones included, so the Prompt dialog shows the prompt the model
+   * actually gets.
+   */
+  applyCarriedSystemPrompt(agentCtx: Context, memberId: AgentTeamMemberId, carried: string): void {
+    this.releaseCarriedPrompt(memberId)
+    this.memberCarriedPrompts.set(memberId, agentCtx.on('system-prompt/assemble', (assembly, _context, next) => {
+      assembly.sections = [{ name: CARRIED_PROMPT_SECTION_NAME, text: carried, interpolate: false }]
+      return next()
+    }))
+  }
+
+  /**
+   * Release one Member's carried-prompt freeze; safe to call twice. Any live
+   * prompt-shaping swap (tool policy, role paragraph, section drops) releases
+   * it first: the Human's edit must reach the next assembly, so the generation
+   * rebuilds from current inputs and the next renewal captures the rebuilt
+   * prompt as its carry.
+   */
+  releaseCarriedPrompt(memberId: AgentTeamMemberId): void {
+    const dispose = this.memberCarriedPrompts.get(memberId)
+    if (dispose === undefined) return
+    this.memberCarriedPrompts.delete(memberId)
+    dispose()
   }
 
   /** Release one Member's section-drop disposer; safe to call twice. */
@@ -468,6 +515,7 @@ export class MemberRuntime {
     this.releaseMemberToolPolicy(memberId)
     this.releaseMemberPromptSection(memberId)
     this.releaseMemberSectionDrops(memberId)
+    this.releaseCarriedPrompt(memberId)
   }
 
   /** Dispose every registered per-Member seam; service shutdown only. */
@@ -481,6 +529,8 @@ export class MemberRuntime {
     this.memberPromptSections.clear()
     for (const dispose of this.memberSectionDrops.values()) dispose()
     this.memberSectionDrops.clear()
+    for (const dispose of this.memberCarriedPrompts.values()) dispose()
+    this.memberCarriedPrompts.clear()
     this.capabilityWarnings.clear()
   }
 }

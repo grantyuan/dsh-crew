@@ -28,6 +28,7 @@ import type {
   AgentTeamMessageRef,
   AgentTeamModelSelection,
   AgentTeamOperationId,
+  AgentTeamQueueEntryRef,
   AgentTeamRequestId,
   AgentTeamTask,
   AgentTeamTaskActivity,
@@ -1062,6 +1063,66 @@ export interface AgentTeamTasksBatchResult {
   readonly outcomes: readonly AgentTeamTaskBatchOutcome[]
 }
 
+/**
+ * Human or Leader intent to queue open Tasks onto one Member's private task
+ * queue — append, or insert at an explicit position to rank the work.
+ */
+export interface AgentTeamQueueAssignRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  /** The Agent Member whose queue receives the assignment. */
+  readonly memberId: AgentTeamMemberId
+  readonly items: readonly { readonly taskRef: AgentTeamTaskRef; readonly note?: string }[]
+  /** Insert position inside the Member's queue; absent appends to the end. */
+  readonly atIndex?: number
+}
+
+/** Human or Leader intent to amend one Member's queue in place. */
+export interface AgentTeamQueueAmendRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly memberId: AgentTeamMemberId
+  /** Remove a pending entry, retune one entry's note (absent clears), or reorder the whole queue. */
+  readonly action: 'remove' | 'modify' | 'reorder'
+  /** The entry to remove or retune (remove/modify). */
+  readonly entryRef?: AgentTeamQueueEntryRef
+  /** The replacement note (modify); absent clears the note. */
+  readonly note?: string | undefined
+  /** The queue's full new order (reorder) — a permutation of the current entry refs. */
+  readonly order?: readonly AgentTeamQueueEntryRef[]
+}
+
+/** Human or Leader intent to move one pending queue entry to another Member's queue atomically. */
+export interface AgentTeamQueueReassignRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly entryRef: AgentTeamQueueEntryRef
+  readonly fromMemberId: AgentTeamMemberId
+  readonly toMemberId: AgentTeamMemberId
+}
+
+/** The post-commit shape of one Member's queue; always committed — a refused queue write throws. */
+export interface AgentTeamQueueCommittedResult {
+  readonly kind: 'committed'
+  readonly receipt: AgentTeamOperationReceipt
+  readonly memberId: AgentTeamMemberId
+  /** The Member's full resulting queue, in execution order. */
+  readonly queue: readonly AgentTeamQueueEntryItem[]
+}
+
+/** The post-commit shape of a reassignment: the entry as it moved and the target's resulting queue. */
+export interface AgentTeamQueueReassignCommittedResult {
+  readonly kind: 'committed'
+  readonly receipt: AgentTeamOperationReceipt
+  readonly entry: AgentTeamQueueEntryItem
+  readonly fromMemberId: AgentTeamMemberId
+  readonly toMemberId: AgentTeamMemberId
+  readonly toQueue: readonly AgentTeamQueueEntryItem[]
+}
+
+export type AgentTeamQueueResult = AgentTeamQueueCommittedResult
+export type AgentTeamQueueReassignResult = AgentTeamQueueReassignCommittedResult
+
 /** Human intent to attach a real Task overlay to a taskless Thread. */
 export interface AgentTeamPromoteThreadRequest {
   readonly requestId: AgentTeamRequestId
@@ -1371,17 +1432,32 @@ export interface AgentTeamMemberTasksRequest {
   readonly workspaceId: WorkspaceId
 }
 
+/** One entry of a Member's private task queue, with its Task and derived execution standing. */
+export interface AgentTeamQueueEntryItem {
+  readonly entryRef: AgentTeamQueueEntryRef
+  readonly task: AgentTeamTaskRow
+  /** Bounded assignment note; absent when none was given. */
+  readonly note?: string
+  /** The Human or Leader Member that placed the assignment. */
+  readonly addedBy: AgentTeamMemberId
+  readonly addedAt: string
+  /**
+   * Derived from the Task's own Claims, never stored: `pending` (unclaimed,
+   * the queue's actionable order), `working` (an active Claim runs it), or
+   * `awaiting` (Claims handed off; the Task waits for Human acceptance).
+   */
+  readonly standing: 'pending' | 'working' | 'awaiting'
+}
+
 /**
- * One Member's working queue: the Tasks it currently holds Claims on, and the
- * unclaimed Tasks waiting in its Channels. Rows reuse the Task-list row so a
- * Client renders both surfaces with one grammar.
+ * One Member's private task queue: the ordered todo-list the Human and the
+ * Leader maintain and the Member walks in sequence. Rows reuse the Task-list
+ * row so a Client renders both surfaces with one grammar.
  */
 export interface AgentTeamMemberTaskQueue {
   readonly memberId: AgentTeamMemberId
-  /** Open Tasks the Member holds a live (active or done) Claim on, newest activity first. */
-  readonly current: readonly AgentTeamTaskRow[]
-  /** Unclaimed `todo` Tasks in Channels the Member has joined, Channel ordinal order. */
-  readonly queued: readonly AgentTeamTaskRow[]
+  /** Every entry in execution order (index 0 = next), each with its derived standing. */
+  readonly entries: readonly AgentTeamQueueEntryItem[]
 }
 
 /** The per-Member working-queue projection: one queue per visible Agent Member. */

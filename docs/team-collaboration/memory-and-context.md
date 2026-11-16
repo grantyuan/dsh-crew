@@ -33,12 +33,18 @@ A candidate new task is checked against other Members' active Claims first; stro
 
 Prompt-cache discipline is the same machinery seen from the cost side: a checkpoint-return seed is the source log's exact prefix — node-zero system prompt, injected instructions, and tool history included — so Harness reassembly commits no new prompt text when nothing changed. The transition also carries the retiring generation's model selection, keeping route variables stable across the handoff.
 
+Every fresh generation — a 重置 (reset), a fresh rollover, a crash-recovered renewal, a checkpoint return — also carries the retiring generation's system prompt verbatim instead of reassembling it: the renewal captures the retired generation's head prompt (everything its requests carried before the first user message) and the fresh generation freezes its assembly to those bytes as one literal carried section.
+
+Plugin and MCP section drift between the two assemblies can therefore never void the provider prefix cache on the first request. A checkpoint return derives its carry from the seed prefix itself — the era the replayed history is consistent with.
+
+The carried section is protected against drops and shows in the Prompt dialog as what the model actually gets. The freeze releases on any live prompt-shaping edit (tool policy, role paragraph, section drops), because the Human's edit must reach the model; the next renewal then captures the rebuilt prompt, so every later generation stays byte-stable again. A stored Session with no readable head prompt degrades to a normal rebuild, never to a blocked activation.
+
 A `fresh` rollover likewise keeps injected surfaces deduplicated; a Member rewrites its memory index or restates carried content only when the fact actually changed.
 
 ## Agent notification boundary
 Host derives bounded coalesced notifications from durable unread state. Idle Agents start a turn; running Agents receive context at the next safe step. Direct mentions include Message body, sender, Channel, optional Task overlay, Thread, and Message ref. Task/Claim Activities include actor, transition, and affected Task/Thread/Claim refs. Ordinary unread exposes only a body-free Thread-first route with its unread count; taskful summaries may name the Task. No notice renders a revision or write token. Omitted details remain discoverable through `team_inbox` and `team_thread`.
 
-Host-posted recurring notices — continuation checks, and the context-reset Channel announcements only ledgers that recorded the retired broadcast still carry — restate the full current state with every delivery, so an unread instance older than its kind's newest carries no information. The automatic context renders only each group's newest instance in full and folds the superseded ones into one summary line that frees their slots for live work; every Message stays durable in the Inbox.
+Host-posted recurring notices — continuation checks, the completion liaison's report checks (one group per checked Member), and the context-reset Channel announcements only ledgers that recorded the retired broadcast still carry — restate the full current state with every delivery, so an unread instance older than its group's newest carries no information. The automatic context renders only each group's newest instance in full and folds the superseded ones into one summary line that frees their slots for live work; every Message stays durable in the Inbox.
 
 Hints are at-least-once notification intent, coalesced per Member and rediscovered on restart/resume. A consumed or ignored hint does not create another turn until a later relevant durable change or recovery. Runtime recovery, error thresholds, and the two UI recovery actions remain Host behavior; they do not create ledger authority beyond their documented operations.
 

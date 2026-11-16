@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { AgentTeamMemberCapabilities, AgentTeamMemberModelSchedule, AgentTeamModelScheduleWindow, AgentTeamModelSelection } from './types.ts'
+import type { AgentTeamMemberCapabilities, AgentTeamMemberModelSchedule, AgentTeamMemberStopSchedule, AgentTeamMemberStopWindow, AgentTeamModelScheduleWindow, AgentTeamModelSelection, AgentTeamScheduleRecurrence } from './types.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -15,6 +15,7 @@ import type {
   AgentTeamMemberWatchRef,
   AgentTeamMessageRef,
   AgentTeamOperation,
+  AgentTeamQueueEntryRef,
   AgentTeamOperationId,
   AgentTeamRequestId,
   AgentTeamTaskRef,
@@ -33,6 +34,7 @@ const messageRefSchema = z.string().regex(/^message:[^:]+$/).transform(value => 
 const taskRefSchema = z.string().regex(/^task:[^:]+$/).transform(value => value as AgentTeamTaskRef)
 const threadRefSchema = z.string().regex(/^thread:[^:]+$/).transform(value => value as AgentTeamThreadRef)
 const claimRefSchema = z.string().regex(/^claim:[^:]+$/).transform(value => value as AgentTeamClaimRef)
+const queueEntryRefSchema = z.string().regex(/^entry:[^:]+$/).transform(value => value as AgentTeamQueueEntryRef)
 const interruptRefSchema = z.string().regex(/^interrupt:[^:]+$/).transform(value => value as AgentTeamInterruptRef)
 const activityRefSchema = z.string().regex(/^activity:[^:]+$/).transform(value => value as AgentTeamActivityRef)
 const memberWatchRefSchema = z.string().regex(/^watch:[^:]+$/).transform(value => value as AgentTeamMemberWatchRef)
@@ -83,23 +85,60 @@ const modelSelectionSchema = z.object({
   ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
 }))
 
-// One daily time window of a Member's model schedule. Shape rules only —
+// Shape-only recurrence: parameter ranges and calendar reality are commit
+// rules (the ledger rejects a bad recurrence before it is written), not
+// replay rules — an old ledger must stay readable even if a later release
+// tightens the range. Arithmetic treats an unreadable recurrence as never
+// active instead of refusing the whole ledger.
+const scheduleRecurrenceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('daily') }).strict(),
+  z.object({ kind: z.literal('workdays') }).strict(),
+  z.object({ kind: z.literal('everyDays'), intervalDays: z.number().int(), anchorDate: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('weekly'), weekdays: z.array(z.number().int().min(1).max(7)) }).strict(),
+  z.object({ kind: z.literal('monthly'), dayOfMonth: z.number().int() }).strict(),
+  z.object({ kind: z.literal('yearly'), month: z.number().int(), day: z.number().int() }).strict(),
+]).transform(value => value as unknown as AgentTeamScheduleRecurrence)
+
+// One time window of a Member's model schedule. Shape rules only —
 // start/end ordering is deliberately NOT checked: a window whose end is at
 // or before its start wraps past midnight (the equal case is rejected by the
 // ledger commit, not the replay schema, so ledgers stay readable). The
 // route inside rides the same pure-intent rule as `model`: provider/model
 // strings are not validated against the live catalog at replay — a catalog
-// change must never make an old ledger unreplayable.
+// change must never make an old ledger unreplayable. Recurrence is optional:
+// ledgers written before it existed omit it and keep the every-day meaning.
 const modelScheduleWindowSchema = z.object({
   start: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
   end: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
   selection: modelSelectionSchema,
-}).strict().transform(({ start, end, selection }): AgentTeamModelScheduleWindow => ({ start, end, selection }))
+  recurrence: scheduleRecurrenceSchema.optional(),
+}).strict().transform(({ start, end, selection, recurrence }): AgentTeamModelScheduleWindow => ({
+  start,
+  end,
+  selection,
+  ...(recurrence === undefined ? {} : { recurrence }),
+}))
 
 const memberModelScheduleSchema = z.object({
   enabled: z.boolean(),
   windows: z.array(modelScheduleWindowSchema).max(MEMBER_MODEL_SCHEDULE_WINDOW_MAX),
 }).strict().transform(({ enabled, windows }): AgentTeamMemberModelSchedule => ({ enabled, windows }))
+
+// The stop schedule rides the same window shape minus the route.
+const stopScheduleWindowSchema = z.object({
+  start: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
+  end: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
+  recurrence: scheduleRecurrenceSchema.optional(),
+}).strict().transform(({ start, end, recurrence }): AgentTeamMemberStopWindow => ({
+  start,
+  end,
+  ...(recurrence === undefined ? {} : { recurrence }),
+}))
+
+const memberStopScheduleSchema = z.object({
+  enabled: z.boolean(),
+  windows: z.array(stopScheduleWindowSchema).max(MEMBER_STOP_SCHEDULE_WINDOW_MAX),
+}).strict().transform(({ enabled, windows }): AgentTeamMemberStopSchedule => ({ enabled, windows }))
 
 // Pure intent: allow-list entries are plain strings. They are never
 // validated against a known-name set here — committing must survive Harness
@@ -141,6 +180,8 @@ const memberSchema = z.object({
   modelFallbacks: z.array(modelSelectionSchema).max(MEMBER_MODEL_FALLBACK_MAX).optional(),
   // Ledgers written before the time-interval schedule existed omit the field.
   modelSchedule: memberModelScheduleSchema.optional(),
+  // Ledgers written before the stop-run schedule existed omit the field.
+  stopSchedule: memberStopScheduleSchema.optional(),
   // Host-applied schedule route; written only by team/member-model-scheduled.
   scheduledModel: modelSelectionSchema.optional(),
   // Ledgers written before member capabilities existed omit the field.
@@ -284,6 +325,18 @@ const claimSchema = z.object({
   normalizedDirection: z.string().min(1),
   state: z.union([z.literal('active'), z.literal('done'), z.literal('released')]),
 }).strict()
+
+/**
+ * Shape-only queue entry: the note bound is a commit rule (the ledger rejects
+ * an oversized note before it is written), not a replay rule.
+ */
+const queueEntrySchema = z.object({
+  entryRef: queueEntryRefSchema,
+  taskRef: taskRefSchema,
+  note: z.string().min(1).optional(),
+  addedBy: memberIdSchema,
+  addedAt: z.string().datetime(),
+}).strict().transform(omitUndefined)
 
 const activityBase = {
   activityRef: activityRefSchema,
@@ -627,6 +680,41 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
   claimOperation('team/claim-created'),
   claimOperation('team/claim-done'),
   claimOperation('team/claim-released'),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/queue-assigned'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      memberId: memberIdSchema,
+      entries: z.array(queueEntrySchema),
+      atIndex: z.number().int().nonnegative().optional(),
+    }).strict().transform(omitUndefined),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/queue-amended'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      memberId: memberIdSchema,
+      action: z.union([z.literal('remove'), z.literal('modify'), z.literal('reorder')]),
+      entryRef: queueEntryRefSchema.optional(),
+      note: z.string().min(1).optional(),
+      order: z.array(queueEntryRefSchema).optional(),
+    }).strict().transform(omitUndefined),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/queue-reassigned'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      entry: queueEntrySchema,
+      fromMemberId: memberIdSchema,
+      toMemberId: memberIdSchema,
+    }).strict(),
+  }).strict(),
   z.object({
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),

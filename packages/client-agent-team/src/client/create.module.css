@@ -359,3 +359,73 @@
 .scheduleAdd {
   justify-self: start;
 }
+
+/* One window entry: the time/route row plus its recurrence line. The
+   recurrence line only appears under every window, never as a separate
+   field, so a pattern reads as part of the window it belongs to. */
+.scheduleEntry {
+  display: grid;
+  gap: 4px;
+}
+.recurrenceRow {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.recurrenceLabel {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.recurrenceTrigger {
+  min-width: 104px;
+  min-height: 28px;
+  padding: 2px 8px;
+}
+.recurrenceParam {
+  align-items: center;
+  color: var(--dsw-alias-label-secondary);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 4px;
+  line-height: 18px;
+}
+.recurrenceInput {
+  width: 48px;
+}
+.recurrenceInputDate {
+  width: 104px;
+}
+.weekdayRow {
+  display: inline-flex;
+  gap: 2px;
+}
+.weekdayChip {
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 16px;
+  padding: 2px 6px;
+}
+.weekdayChip[aria-pressed='true'] {
+  background: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+  color: #fff;
+}
+.weekdayChip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.weekdayChip:focus-visible {
+  border-color: var(--dsw-alias-brand-primary);
+  outline: none;
+}
+.recurrenceInvalid {
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+}

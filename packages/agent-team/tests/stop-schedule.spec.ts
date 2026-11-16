@@ -9,7 +9,7 @@ import {
   STOP_SCHEDULE_NOTICE_AHEAD_MS,
   type StopScheduleBoundary,
 } from '../src/stop-schedule.ts'
-import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberStopSchedule } from '../src/types.ts'
+import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberStopSchedule, AgentTeamScheduleRecurrence } from '../src/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 
@@ -18,7 +18,11 @@ const alpha = WorkspaceId('workspace:alpha')
 // Team zone is UTC+8: 2026-11-03T10:00:00Z is 18:00 Team time, minute 1080.
 const AT_18_00_TEAM = Date.UTC(2026, 10, 3, 10, 0, 0)
 
-const window = (start: string, end: string) => ({ start, end })
+const window = (start: string, end: string, recurrence?: AgentTeamScheduleRecurrence) => ({
+  start,
+  end,
+  ...(recurrence === undefined ? {} : { recurrence }),
+})
 const scheduleOf = (enabled: boolean, ...windows: readonly ReturnType<typeof window>[]): AgentTeamMemberStopSchedule => ({ enabled, windows })
 
 function member(overrides: { readonly memberId: string } & Partial<Omit<AgentTeamAgentMember, 'memberId'>>): AgentTeamAgentMember {
@@ -59,6 +63,14 @@ describe('upcomingStopBoundaries (the wrap-up heads-up picture)', () => {
     const boundaries = upcomingStopBoundaries(schedule, AT_18_00_TEAM - 10 * 60_000)
     expect(boundaries).toHaveLength(1)
     expect(boundaries.every(boundary => boundary.kind === 'stop')).toBe(true)
+  })
+
+  it('offers no heads-up on days the window recurrence does not match', () => {
+    const workday = scheduleOf(true, window('22:00', '06:00', { kind: 'workdays' }))
+    // Friday 21:30 Team: the 22:00 start belongs to a workday.
+    expect(upcomingStopBoundaries(workday, Date.parse('2026-11-06T21:30:00+08:00'))).toHaveLength(1)
+    // Saturday 21:30 Team: no start at all.
+    expect(upcomingStopBoundaries(workday, Date.parse('2026-11-07T21:30:00+08:00'))).toHaveLength(0)
   })
 })
 
@@ -108,6 +120,22 @@ describe('crossedStopBoundaries (the already-crossed picture)', () => {
     const shared = scheduleOf(true, window('09:00', '18:00'), window('09:30', '18:00'))
     expect(crossedStopBoundaries(shared, AT_18_00_TEAM)).toHaveLength(1)
     expect(crossedStopBoundaries(scheduleOf(false, window('09:00', '18:00')), AT_18_00_TEAM)).toHaveLength(0)
+  })
+
+  it('keeps a wrapping workday window running into Saturday morning but never starts it on Saturday night', () => {
+    const workday = scheduleOf(true, window('22:00', '06:00', { kind: 'workdays' }))
+    // Saturday 03:00 Team: Friday's occurrence still covers — the stop edge stands.
+    expect(crossedStopBoundaries(workday, Date.parse('2026-11-07T03:00:00+08:00')).filter(boundary => boundary.kind === 'stop')).toHaveLength(1)
+    // Saturday 23:00 Team: no Saturday occurrence ran, so neither edge fires.
+    expect(crossedStopBoundaries(workday, Date.parse('2026-11-07T23:00:00+08:00'))).toHaveLength(0)
+    // Sunday 03:00 Team: Saturday was not a workday — again nothing.
+    expect(crossedStopBoundaries(workday, Date.parse('2026-11-08T03:00:00+08:00'))).toHaveLength(0)
+  })
+
+  it('fires the resume edge of a monthly window only after its active day', () => {
+    const monthly = scheduleOf(true, window('09:00', '18:00', { kind: 'monthly', dayOfMonth: 15 }))
+    expect(crossedStopBoundaries(monthly, Date.parse('2026-11-15T18:00:00+08:00')).map(boundary => boundary.kind)).toEqual(['resume'])
+    expect(crossedStopBoundaries(monthly, Date.parse('2026-11-16T18:00:00+08:00'))).toHaveLength(0)
   })
 })
 
@@ -253,6 +281,9 @@ describe('stop schedule notice texts', () => {
     expect(text).toContain('handover document')
     expect(text).toContain('Manager')
     expect(text).toContain('from 22:00 to 06:00')
+    expect(text).toContain('Active days: every day')
+    const workday = stopScheduleWrapUpNoticeText({ memberHandle: 'worker', whenText: '2026-11-03T22:00:00+08:00', window: window('22:00', '06:00', { kind: 'workdays' }) })
+    expect(workday).toContain('Active days: on workdays')
   })
 
   it('names the boundary and the resume instruction', () => {

@@ -599,6 +599,17 @@
   font-weight: 500;
   line-height: 16px;
 }
+/* The pending entry's position number: the queue's execution order made
+   visible at a glance, colored like the row's tertiary metadata. */
+.queuePosition {
+  color: var(--dsw-alias-label-tertiary);
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 15px;
+  min-width: 12px;
+  text-align: right;
+}
 .queueRowMain small {
   color: var(--dsw-alias-label-tertiary);
   flex: none;

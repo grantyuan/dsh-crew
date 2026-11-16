@@ -39,9 +39,10 @@ import { CONTEXT_CONTINUITY_PROJECTION_KEY, readContextTimeline, type ContextPro
 import { createTeamContextManagement, TEAM_CONTEXT_CODEC } from './context-continuity-host.ts'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
 import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, createTeamContextProjectionConfig, createTeamContextProjectionDefinition, foldTeamContextProjection, retainedTopicsThrough, TeamContextProjectionHost } from './context-projection.ts'
-import { AGENT_TEAM_HUMAN_HANDLE, AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamLedger, agentTeamAssistantActor, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
+import { AGENT_TEAM_HUMAN_HANDLE, AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamLedger, agentTeamAssistantActor, agentTeamHumanActor, type AgentTeamAuthorizedAssistantReplyRequest, type AgentTeamDurableMemberResult } from './ledger.ts'
 import { LedgerFence, ledgerFenceFor } from './ledger-fence.ts'
 import { AGENT_TEAM_TOOL_NAMES, BUNDLED_SKILLS_DIRECTORY, deepCopyCapabilities, deepCopyPrompt, isProtectedPromptSection, memberMemoryDirectoryName, memberMemoryDirectoryPath, MemberRuntime, promptSectionByteLength, sectionToolMapping } from './member-runtime.ts'
+import { carriedSystemPromptFromEvents, carriedSystemPromptFromSeed, carriedSystemPromptOfSession } from './member-prompt-carry.ts'
 import { PRUNE_WINDOW_DAYS, PRUNE_WINDOW_TURNS, countLineageTurns, foldLineageUsage, type UsageFold } from './member-section-usage.ts'
 import { CURATE_MAX_TOKENS, CURATE_TIMEOUT_MS, buildCurateMessages, parseCurateProposal, type CuratePromptInput } from './member-prompt-curation.ts'
 import { DIGEST_MAX_TOKENS, DIGEST_MESSAGE_LIMIT, DIGEST_TIMEOUT_MS, buildDigestMessages, parseThreadDigest, type ThreadDigestMessage } from './thread-digest.ts'
@@ -55,11 +56,13 @@ import { MemberSupervisor, supervisionResetNotice, SUPERVISION_FAILURE_WINDOW_MS
 import { CONTINUATION_NUDGE_MARKER, TaskContinuationWatcher, continuationNudgeText, type ContinuationLeader, type ContinuationTask } from './continuation-watcher.ts'
 import { sanitizeQuotedText, unaddressedSendNoticeText } from './mentions.ts'
 import { buildQuestionAnalysisMessages, looksLikeQuestion, parseQuestionAnalysis, QUESTION_ANALYSIS_MAX_TOKENS, QUESTION_ANALYSIS_TIMEOUT_MS } from './question-memory.ts'
-import { CompletionLiaison, INTERRUPT_PUSH_SUMMARY, liaisonFeedbackText, liaisonReportCheckText, liaisonResumePushText, liaisonTaskPushText, type LiaisonInterrupt, type LiaisonLeader } from './completion-liaison.ts'
+import { CompletionLiaison, INTERRUPT_PUSH_SUMMARY, LIAISON_REPORT_CHECK_MARKER, liaisonFeedbackText, liaisonReportCheckText, liaisonResumePushText, liaisonTaskPushText, reportCheckTargetHandle, type LiaisonInterrupt, type LiaisonLeader } from './completion-liaison.ts'
 import { TruncationEscalator, truncationEscalationText, type TruncationLeader } from './truncation-escalation.ts'
 import { MemberWatchMonitor, memberWatchNoticeText, type MemberWatchNotice, type MemberWatchSample, type MemberWatchTask } from './member-watch.ts'
+import { queueAssignmentNotice, queueAdvanceNotice, queueReassignedNotice } from './queue-advance.ts'
 import { clearRouteStreak, modelFailoverNoticeText, noteRouteFailure, routeKeyOf, settlePromotion, supervisionExhaustedNoticeText, type RouteFailureState } from './model-failover.ts'
 import { ModelScheduleMonitor, modelScheduleSwitchNoticeText, sameScheduleRoute, type ModelScheduleBoundary } from './model-schedule.ts'
+import { freezeScheduleRecurrence } from './schedule-recurrence.ts'
 import { StopScheduleMonitor } from './stop-schedule.ts'
 import { CapabilityAssessor, capabilityAssessmentText, type CapabilityAssessmentTarget } from './capability-assessment.ts'
 import { BackgroundJobRegistry, backgroundJobNoticeText, type BackgroundJob, type BackgroundJobStartInput } from './background-jobs.ts'
@@ -217,6 +220,12 @@ import type {
   AgentTeamTasksRequest,
   AgentTeamMemberTasks,
   AgentTeamMemberTasksRequest,
+  AgentTeamQueueAssignRequest,
+  AgentTeamQueueAmendRequest,
+  AgentTeamQueueReassignRequest,
+  AgentTeamQueueEntryItem,
+  AgentTeamQueueResult,
+  AgentTeamQueueReassignResult,
   AgentTeamSummarizeThreadRequest,
   AgentTeamSummarizeThreadResult,
   AgentTeamThreadAttentionRequest,
@@ -262,6 +271,16 @@ const RESET_NOTICE_SUMMARY = 'Context reset: your Session was renewed.'
  */
 const CONTEXT_RESET_NOTICE_MARKER = 'Context reset notice:'
 const ORPHANED_MEMBER_DIAGNOSTIC = 'Member preset composition was lost after a reload; its tools are unavailable. Resume rebuilds the member in place.'
+
+/**
+ * The first line of one Message body — the stable marker band the recurring
+ * Host notices are recognized by, both when the Inbox projection groups a
+ * Member's unread deliveries and when a notice lane looks for the chain it
+ * should extend.
+ */
+function firstNoticeLineOf(body: string): string {
+  return body.slice(0, body.includes('\n') ? body.indexOf('\n') : body.length)
+}
 
 /** One recorded Member failure and the Session generation it happened in. */
 interface AgentTeamMemberFailureRecord {
@@ -2237,7 +2256,7 @@ export default class AgentTeam extends TypertRemoteService {
         presetId: request.presetId,
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
         ...(request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? {} : { modelFallbacks: Object.freeze(request.modelFallbacks.map(fallback => Object.freeze({ ...fallback }))) }),
-        ...(request.modelSchedule === undefined ? {} : { modelSchedule: Object.freeze({ ...request.modelSchedule, windows: Object.freeze(request.modelSchedule.windows.map(w => Object.freeze({ ...w, selection: Object.freeze({ ...w.selection }) }))) }) }),
+        ...(request.modelSchedule === undefined ? {} : { modelSchedule: Object.freeze({ ...request.modelSchedule, windows: Object.freeze(request.modelSchedule.windows.map(w => Object.freeze({ ...w, selection: Object.freeze({ ...w.selection }), ...(w.recurrence === undefined ? {} : { recurrence: freezeScheduleRecurrence(w.recurrence) }) }))) }) }),
         ...(request.capabilities === undefined ? {} : { capabilities: Object.freeze(deepCopyCapabilities(request.capabilities)) }),
         ...(request.prompt === undefined ? {} : { prompt: Object.freeze(deepCopyPrompt(request.prompt)) }),
         ...(request.contextStartPolicy === undefined ? {} : { contextStartPolicy: request.contextStartPolicy }),
@@ -2462,10 +2481,18 @@ export default class AgentTeam extends TypertRemoteService {
     this.renewedSessionByMember.set(memberId, sessionId)
     this.armedFreshStartReset.delete(memberId)
     this.keptDispatchSequence.delete(memberId)
+    // Capture the retiring generation's prompt before disposal: the fresh
+    // generation freezes its assembly to these bytes instead of rebuilding,
+    // so a registry or MCP difference between the two assemblies cannot void
+    // the provider prefix cache on the first request (see member-prompt-carry).
+    const carriedSystemPrompt = carriedSystemPromptOfSession(active.agent.session)
     await this.retireMemberGeneration(memberId, active, previousSessionId)
     // Defer the ordinary Inbox wake so the reset notice reads as the fresh
     // generation's first Team word; the wake is rederived right after it.
-    await this.activateMember(renewed, undefined, undefined, previousSessionId, { deferNotify: true })
+    await this.activateMember(renewed, undefined, undefined, previousSessionId, {
+      deferNotify: true,
+      ...(carriedSystemPrompt === undefined ? {} : { carriedSystemPrompt }),
+    })
     const reactivated = this.handles.get(memberId)
     if (reactivated === undefined) {
       // Reactivation failed; the activation diagnostic carries the reason and
@@ -3343,6 +3370,12 @@ export default class AgentTeam extends TypertRemoteService {
       // provider prefix cache mid-handoff. Only an explicit Member model
       // (or the renewal paths, which reload by contract) overrides it.
       const carriedSelection = active.agent.model.current()
+      // A blank rollover freezes the fresh assembly to the retiring
+      // generation's prompt bytes, exactly as it carries the route; a
+      // checkpoint return derives its carry from the seed instead — the
+      // prefix's own head prompt is the one era-consistent with what it
+      // replays (captured below, before disposal).
+      const carriedSystemPrompt = seed === undefined ? carriedSystemPromptOfSession(active.agent.session) : undefined
       await this.retireMemberGeneration(memberId, active, plan.previousSessionId)
       const finalEvents = active.agent.session.ownEvents()
       const finalState = foldTeamContextProjection(
@@ -3365,6 +3398,7 @@ export default class AgentTeam extends TypertRemoteService {
       await this.activateMember(rolled.member, undefined, undefined, seed === undefined ? plan.previousSessionId : seed.sourceSessionId, {
         deferNotify: true,
         ...(carriedSelection === undefined ? {} : { carriedSelection }),
+        ...(carriedSystemPrompt === undefined ? {} : { carriedSystemPrompt }),
         // The prefix is contiguous from seq 0, so its length is exactly the
         // inherited cut the child folds past.
         ...(seedEvents === undefined ? {} : { seed: seedEvents, inheritedEventCount: SessionLogOffset(seedEvents.length) }),
@@ -3460,6 +3494,15 @@ export default class AgentTeam extends TypertRemoteService {
    */
   runCompletionLiaisonPass(now?: number): Promise<void> {
     return this.completionLiaison.runPass(now)
+  }
+
+  /**
+   * Run one continuation-watcher pass now: the periodic timer calls this, and
+   * a test or an operator can drive it with a chosen clock (the quiet hold and
+   * re-arm windows measure against the passed time).
+   */
+  runContinuationWatcherPass(now?: number): Promise<void> {
+    return this.continuationWatcher.runPass(now)
   }
 
   /**
@@ -3703,11 +3746,28 @@ export default class AgentTeam extends TypertRemoteService {
    * mention path in the Team Assistant's voice — the Host's own supervision
    * identity, never the Human's — posted into the leader's Channel holding
    * the most named open Tasks (ties fall back to the oldest), with the leader
-   * as the only explicit recipient. A throw is caught by the watcher and
-   * logged — the next episode retries.
+   * as the only explicit recipient. An earlier nudge chain in this Workspace
+   * is extended instead: the new delivery replies into the Thread that
+   * chain's anchor carries, so one `team_thread read` consumes every delivery
+   * and the Workspace's notice Threads stay bounded. A throw is caught by the
+   * watcher and logged — the next episode retries.
    */
   private async announceContinuationNudge(input: { readonly workspaceId: WorkspaceId, readonly leader: ContinuationLeader, readonly tasks: readonly ContinuationTask[] }): Promise<void> {
     const ledger = this.requireLedger()
+    const body = continuationNudgeText({ leaderHandle: input.leader.handle, tasks: input.tasks })
+    const chain = ledger.assistantThreadAnchorsInWorkspace(input.workspaceId)
+      .find(entry => firstNoticeLineOf(entry.body).includes(CONTINUATION_NUDGE_MARKER))
+    if (chain !== undefined) {
+      await this.replyNoticeChainAs({
+        requestId: randomUUID() as AgentTeamRequestId,
+        workspaceId: input.workspaceId,
+        threadRef: chain.threadRef,
+        body,
+        recipients: [input.leader.memberId],
+        actor: agentTeamAssistantActor(),
+      })
+      return
+    }
     const channels = ledger.channelsForMember(input.leader.memberId, input.workspaceId)
     if (channels.length === 0) throw new Error(`leader '${input.leader.handle}' has no Channel in workspace '${input.workspaceId}'`)
     const namedRefs = new Set(input.tasks.map(task => task.taskRef))
@@ -3725,7 +3785,7 @@ export default class AgentTeam extends TypertRemoteService {
       requestId: randomUUID() as AgentTeamRequestId,
       workspaceId: input.workspaceId,
       channelRef,
-      body: continuationNudgeText({ leaderHandle: input.leader.handle, tasks: input.tasks }),
+      body,
       recipients: [input.leader.memberId],
       asTask: false,
     })
@@ -3754,15 +3814,34 @@ export default class AgentTeam extends TypertRemoteService {
    * Report-check delivery: the Team Assistant's voice names the idle Member
    * in the leader's oldest Channel of the Workspace, with the leader as the
    * only explicit recipient — the ordinary Inbox path wakes them into a turn.
+   * A chain for this checked Member is extended instead of re-opened: the
+   * delivery replies into the Thread that Member's earlier report checks
+   * anchor, so one read consumes the whole history and the checked Member's
+   * notice Threads stay bounded.
    */
   private async notifyLiaisonLeader(input: { readonly memberId: AgentTeamMemberId, readonly memberHandle: string, readonly workspaceId: WorkspaceId, readonly leader: LiaisonLeader }): Promise<void> {
-    const channelRef = this.requireLedger().channelsForMember(input.leader.memberId, input.workspaceId)[0]
+    const ledger = this.requireLedger()
+    const body = liaisonReportCheckText({ leaderHandle: input.leader.handle, memberHandle: input.memberHandle })
+    const chain = ledger.assistantThreadAnchorsInWorkspace(input.workspaceId)
+      .find(entry => reportCheckTargetHandle(entry.body) === input.memberHandle)
+    if (chain !== undefined) {
+      await this.replyNoticeChainAs({
+        requestId: randomUUID() as AgentTeamRequestId,
+        workspaceId: input.workspaceId,
+        threadRef: chain.threadRef,
+        body,
+        recipients: [input.leader.memberId],
+        actor: agentTeamAssistantActor(),
+      })
+      return
+    }
+    const channelRef = ledger.channelsForMember(input.leader.memberId, input.workspaceId)[0]
     if (channelRef === undefined) throw new Error(`leader '${input.leader.handle}' has no Channel in workspace '${input.workspaceId}'`)
     await this.sendMessageAs(agentTeamAssistantActor(), {
       requestId: randomUUID() as AgentTeamRequestId,
       workspaceId: input.workspaceId,
       channelRef,
-      body: liaisonReportCheckText({ leaderHandle: input.leader.handle, memberHandle: input.memberHandle }),
+      body,
       recipients: [input.leader.memberId],
       asTask: false,
     })
@@ -3971,6 +4050,7 @@ export default class AgentTeam extends TypertRemoteService {
         memberHandle: member.handle,
         whenText: formatTeamTimestamp(new Date(boundary.atMs).toISOString()),
         incoming: boundary.incoming,
+        ...(boundary.recurrence === undefined ? {} : { recurrence: boundary.recurrence }),
       }),
       recipients: [member.memberId],
       asTask: false,
@@ -3994,6 +4074,85 @@ export default class AgentTeam extends TypertRemoteService {
       recipients: [member.memberId],
       asTask: false,
     })
+  }
+
+  /**
+   * The queue wake: an ordinary Team Assistant Message in the Task's own
+   * Channel, addressed to the Member — durable trace first, and the direct
+   * mention is what wakes a live Session. The Member's own task queue never
+   * ships as a Host injection, so this Message is the only delivery surface.
+   * Failures log, never throw: the notice is recoverable from the queue
+   * itself (`team_queue list`), never a work loss.
+   */
+  private async announceQueueNotice(workspaceId: WorkspaceId, channelRef: AgentTeamChannelRef, memberId: AgentTeamMemberId, body: string): Promise<void> {
+    try {
+      await this.sendMessageAs(agentTeamAssistantActor(), {
+        requestId: randomUUID() as AgentTeamRequestId,
+        workspaceId,
+        channelRef,
+        body,
+        recipients: [memberId],
+        asTask: false,
+      })
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: queue notice for '${memberId}' was not delivered: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Assignment wake: name the freshly placed entries, discipline line included. */
+  private async announceQueueAssignment(request: AgentTeamQueueAssignRequest): Promise<void> {
+    try {
+      const ledger = this.requireLedger()
+      const member = ledger.getMember(request.memberId)
+      if (member === undefined) return
+      const queue = ledger.memberTasksForWorkspace({ workspaceId: request.workspaceId }).queues
+        .find(entry => entry.memberId === request.memberId)?.entries ?? []
+      const placed = request.items
+        .map(item => queue.find(entry => entry.task.taskRef === item.taskRef))
+        .filter((entry): entry is AgentTeamQueueEntryItem => entry !== undefined)
+      const channelRef = placed[0]?.task.channelRef
+      if (placed.length === 0 || channelRef === undefined) return
+      await this.announceQueueNotice(request.workspaceId, channelRef, request.memberId, queueAssignmentNotice({
+        handle: member.handle,
+        items: placed.map(entry => ({ taskNumber: entry.task.taskNumber, subject: entry.task.subject, ...(entry.note === undefined ? {} : { note: entry.note }) })),
+      }))
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: queue assignment notice was not delivered: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Advance wake after a hand-off or release: name the next pending entry, or state the queue is empty. */
+  private async announceQueueAdvance(memberId: AgentTeamMemberId, workspaceId: WorkspaceId, channelRef: AgentTeamChannelRef,
+    input: { readonly previous: { readonly kind: 'done' | 'release'; readonly taskNumber: number }
+      readonly skipTaskRef?: AgentTeamTaskRef | undefined
+      readonly next?: { readonly taskNumber: number; readonly subject: string; readonly note?: string } | undefined }): Promise<void> {
+    try {
+      const ledger = this.requireLedger()
+      const member = ledger.getMember(memberId)
+      if (member === undefined) return
+      await this.announceQueueNotice(workspaceId, channelRef, memberId, queueAdvanceNotice({
+        handle: member.handle,
+        previous: input.previous,
+        ...(input.next === undefined ? {} : { next: input.next }),
+      }))
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: queue advance notice was not delivered: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Reassignment wake for the receiving Member. */
+  private async announceQueueReassignment(byHandle: string, request: AgentTeamQueueReassignRequest, result: Extract<AgentTeamQueueReassignResult, { kind: 'committed' }>): Promise<void> {
+    try {
+      const member = this.requireLedger().getMember(request.toMemberId)
+      if (member === undefined) return
+      await this.announceQueueNotice(request.workspaceId, result.entry.task.channelRef, request.toMemberId, queueReassignedNotice({
+        handle: member.handle,
+        byHandle,
+        task: { taskNumber: result.entry.task.taskNumber, subject: result.entry.task.subject, ...(result.entry.note === undefined ? {} : { note: result.entry.note }) },
+      }))
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: queue reassignment notice was not delivered: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /**
@@ -4135,6 +4294,38 @@ export default class AgentTeam extends TypertRemoteService {
         if (outcome.kind === 'committed') this.emitCommitted(outcome.receipt)
       }
     }
+    return result.value
+  }
+
+  /** Human queue management: append or insert open Tasks into one Member's private task queue. */
+  @Remote('queueAssign')
+  async queueAssign(request: AgentTeamQueueAssignRequest): Promise<AgentTeamQueueResult> {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    const result = await this.requireLedger().queueAssign({ ...request, actor: agentTeamHumanActor() })
+    this.emitCommittedOutcome(result)
+    if (result.committed) void this.announceQueueAssignment(request)
+    return result.value
+  }
+
+  /** Human queue management: remove a pending entry, retune a note, or reorder one Member's queue. */
+  @Remote('queueAmend')
+  async queueAmend(request: AgentTeamQueueAmendRequest): Promise<AgentTeamQueueResult> {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    const result = await this.requireLedger().queueAmend({ ...request, actor: agentTeamHumanActor() })
+    this.emitCommittedOutcome(result)
+    return result.value
+  }
+
+  /** Human queue management: move one pending entry to another Member's queue atomically. */
+  @Remote('queueReassign')
+  async queueReassign(request: AgentTeamQueueReassignRequest): Promise<AgentTeamQueueReassignResult> {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    const result = await this.requireLedger().queueReassign({ ...request, actor: agentTeamHumanActor() })
+    this.emitCommittedOutcome(result)
+    if (result.committed) void this.announceQueueReassignment('the Human', request, result.value)
     return result.value
   }
 
@@ -4769,7 +4960,88 @@ export default class AgentTeam extends TypertRemoteService {
     // The same task-start boundary sweeps auto-prune candidates for an
     // opted-in Member; the switch-off default never schedules.
     if (request.action === 'claim' && result.committed) this.scheduleAutoPruneSweep(actor.memberId)
+    // The queue advance: only queued work advances. A hand-off (done) on an
+    // entry of the Member's own queue walks it to the next pending entry; a
+    // release walks past the released one so a just-given-up Task is never
+    // re-prompted in the same breath. Work outside any queue — and a queue
+    // with nothing pending next — never wakes: the idle-with-open-work nudges
+    // stay the watchers' job.
+    if ((request.action === 'done' || request.action === 'release') && result.committed && result.value.kind === 'committed') {
+      const ledger = this.requireLedger()
+      const skipTaskRef = request.action === 'release' ? request.taskRef : undefined
+      const queuedOwner = ledger.queueOwnerOf(request.taskRef)
+      const next = queuedOwner === actor.memberId
+        ? ledger.nextQueueEntryForMember(actor.memberId, request.workspaceId, skipTaskRef)
+        : undefined
+      if (next !== undefined) {
+        void this.announceQueueAdvance(actor.memberId, request.workspaceId, result.value.task.channelRef, {
+          previous: { kind: request.action, taskNumber: ledger.taskNumberOf(request.taskRef, request.workspaceId) },
+          skipTaskRef,
+          next,
+        })
+      }
+    }
     return result.value
+  }
+
+  /**
+   * Leader queue management through `team_queue`: assign open Tasks to one
+   * Member's private queue. The ledger enforces Human-or-Leader authority;
+   * the committed assignment wakes the receiving Member with the routing
+   * notice.
+   */
+  async queueAssignForAgent(agent: Agent, request: AgentTeamQueueAssignRequest): Promise<AgentTeamQueueResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const result = await this.requireLedger().queueAssign({ ...request, actor })
+    if (result.committed) {
+      this.emitCommitted(result.value.receipt)
+      void this.announceQueueAssignment(request)
+    }
+    return result.value
+  }
+
+  /** Leader queue management: remove a pending entry, retune a note, or reorder. No wake — the Member's work set only shrinks or reorders. */
+  async queueAmendForAgent(agent: Agent, request: AgentTeamQueueAmendRequest): Promise<AgentTeamQueueResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const result = await this.requireLedger().queueAmend({ ...request, actor })
+    if (result.committed) this.emitCommitted(result.value.receipt)
+    return result.value
+  }
+
+  /** Leader queue management: move one pending entry to another Member's queue; the receiver wakes, the source simply holds less. */
+  async queueReassignForAgent(agent: Agent, request: AgentTeamQueueReassignRequest): Promise<AgentTeamQueueReassignResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const result = await this.requireLedger().queueReassign({ ...request, actor })
+    if (result.committed) {
+      this.emitCommitted(result.value.receipt)
+      void this.announceQueueReassignment(actor.handle, request, result.value)
+    }
+    return result.value
+  }
+
+  /**
+   * Agent-readable queue read for `team_queue list`: a Member sees its own
+   * queue only; a Leader may name any Member of the Workspace. The queue's
+   * write path stays Human-or-Leader — this read never widens it.
+   */
+  queueForAgent(agent: Agent, request: { readonly workspaceId: WorkspaceId; readonly memberId?: AgentTeamMemberId }): readonly AgentTeamQueueEntryItem[] {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const ledger = this.requireLedger()
+    const memberId = request.memberId ?? actor.memberId
+    if (memberId !== actor.memberId) {
+      const member = ledger.getMember(actor.memberId)
+      if (member?.leader !== true) throw new Error('only the Leader can read another Member\'s queue')
+      if (!ledger.participatesIn(memberId, request.workspaceId)) throw new Error(`Member '${memberId}' does not participate in workspace '${request.workspaceId}'`)
+    }
+    return ledger.memberTasksForWorkspace({ workspaceId: request.workspaceId }).queues
+      .find(queue => queue.memberId === memberId)?.entries ?? []
+  }
+
+  /** Agent-readable queue lengths for `team_view` rows: the count, never the contents. */
+  queueCountsForAgent(agent: Agent, request: { readonly workspaceId: WorkspaceId }): readonly { readonly memberId: AgentTeamMemberId; readonly queueCount: number }[] {
+    this.memberCall(agent, request.workspaceId)
+    return this.requireLedger().memberTasksForWorkspace({ workspaceId: request.workspaceId }).queues
+      .map(queue => Object.freeze({ memberId: queue.memberId, queueCount: queue.entries.length }))
   }
 
   listClaimsForAgent(agent: Agent, request: { workspaceId: AgentTeamViewRequest['workspaceId']; taskRef: AgentTeamTask['taskRef'] }): AgentTeamClaimList {
@@ -5055,8 +5327,8 @@ export default class AgentTeam extends TypertRemoteService {
       } catch { turns = 0 }
     }
     const queue = ledger.memberTasksForWorkspace({ workspaceId }).queues.find(entry => entry.memberId === memberId)
-    const tasks: readonly MemberWatchTask[] = Object.freeze((queue?.current ?? []).map(row => Object.freeze({
-      taskRef: row.taskRef, ...(row.taskNumber === undefined ? {} : { taskNumber: row.taskNumber }), status: row.status, subject: row.subject,
+    const tasks: readonly MemberWatchTask[] = Object.freeze((queue?.entries ?? []).map(item => Object.freeze({
+      taskRef: item.task.taskRef, taskNumber: item.task.taskNumber, status: item.task.status, subject: item.task.subject,
     })))
     return Object.freeze({
       state: this.supervisionStateOf(memberId),
@@ -5157,7 +5429,7 @@ export default class AgentTeam extends TypertRemoteService {
       ...(sample.contextTokens === undefined ? {} : { contextTokens: sample.contextTokens }),
       ...(sample.contextWindow === undefined ? {} : { contextWindow: sample.contextWindow }),
       turns: sample.turns,
-      tasks: Object.freeze(ledger.memberTasksForWorkspace({ workspaceId: request.workspaceId }).queues.find(entry => entry.memberId === request.memberId)?.current ?? []),
+      tasks: Object.freeze(ledger.memberTasksForWorkspace({ workspaceId: request.workspaceId }).queues.find(entry => entry.memberId === request.memberId)?.entries.map(item => item.task) ?? []),
       intervalMinutes: watch.intervalMinutes,
       stalledMinutes: watch.stalledMinutes,
       startedSequence: watch.startedSequence,
@@ -5635,6 +5907,24 @@ export default class AgentTeam extends TypertRemoteService {
       throw new Error(`the recorded checkpoint-return anchor '${seed.checkpointRef}' no longer resolves in Session '${seed.sourceSessionId}'`)
     }
     return { prefix: inspection.events.slice(0, through) }
+  }
+
+  /**
+   * Read one stored Session's carried system prompt — the crash-recovery
+   * capture path, where the retiring generation is long disposed and only its
+   * log survives. A seed whose head prompt lives in an inherited prefix folds
+   * to nothing here (its own events exclude that prefix), degrading to a
+   * normal rebuild; unreadable logs degrade the same way, with the failure
+   * logged — a cache-optimal prompt is never worth blocking the activation
+   * the ledger already committed over.
+   */
+  private async carriedSystemPromptOfStoredSession(sessionId: SessionId): Promise<string | undefined> {
+    const read = await this.sessionReader.read(sessionId)
+    if (!read.ok) {
+      this.ctx.logger.warn(`agent-team: carrying no system prompt from Session '${sessionId}': ${read.failure.kind} (${read.failure.detail})`)
+      return undefined
+    }
+    return carriedSystemPromptFromEvents(read.inspection.events)
   }
 
   /**
@@ -6371,6 +6661,19 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   /**
+   * The Host notice chains' reply commit: the Team Assistant extends the
+   * Thread one of its own earlier deliveries anchored, so a recurring notice
+   * restates the current facts inside its existing chain instead of minting a
+   * new Thread per episode. Same commit-emission shape as {@link replyAs} —
+   * the emitted commit is what derives the named Member's Inbox wake.
+   */
+  private async replyNoticeChainAs(request: AgentTeamAuthorizedAssistantReplyRequest): Promise<AgentTeamReplyResult> {
+    const result = await this.requireLedger().assistantReply(request)
+    this.emitCommittedOutcome(result)
+    return result.value
+  }
+
+  /**
    * Record one dispatch whose sender judged the work needs the named Members'
    * live Session: their fresh-start arm stays armed but the direct work this
    * Message creates (at this ledger sequence) no longer spends it. A later
@@ -6466,7 +6769,7 @@ export default class AgentTeam extends TypertRemoteService {
     }
   }
 
-  private async activateMember(member: AgentTeamAgentMember, knownWorkspacePath?: string, knownSessions?: ReadonlySet<SessionId>, forkedFrom?: SessionId, options?: { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset; readonly carriedSelection?: AgentTeamModelSelection }): Promise<void> {
+  private async activateMember(member: AgentTeamAgentMember, knownWorkspacePath?: string, knownSessions?: ReadonlySet<SessionId>, forkedFrom?: SessionId, options?: { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset; readonly carriedSelection?: AgentTeamModelSelection; readonly carriedSystemPrompt?: string }): Promise<void> {
     // A fresh generation starts back at the pinned primary: the failover
     // memory belonged to the previous session's route.
     this.routeFailures.delete(member.memberId)
@@ -6500,6 +6803,19 @@ export default class AgentTeam extends TypertRemoteService {
       // allow-list filters the catalog by name through the live ref below.
       // `swap` is bound by the provider at activation (no-op until then).
       const skillSelection: MemberSkillSelectionRef = { current: member.capabilities?.skills?.allow, swap: () => {} }
+      // The carried prompt of this fresh generation, settled before `create`
+      // invokes setup: an explicit capture from a live retiring generation
+      // wins; otherwise a seed's own head prompt — the era the replayed
+      // prefix is consistent with; otherwise the lineage parent's stored log,
+      // all a crash-recovered renewal has left. A first generation (no seed,
+      // no parent) and every resume assemble normally.
+      let carriedSystemPrompt: string | undefined
+      if (!persisted) {
+        carriedSystemPrompt = options?.carriedSystemPrompt
+          ?? (options?.seed !== undefined && options.inheritedEventCount !== undefined
+            ? carriedSystemPromptFromSeed(options.seed)
+            : undefined)
+      }
       const setup = async (agentCtx: Context, agent: Agent) => {
         try {
           await this.ctx.agentPresets.mount(agentCtx, member.presetId)
@@ -6513,6 +6829,11 @@ export default class AgentTeam extends TypertRemoteService {
           // failures by type, not by matching message text.
           throw new PresetCompositionError(error instanceof Error ? error.message : String(error), { cause: error })
         }
+        // The carried-prompt freeze is Team runtime, not preset composition: a
+        // failure here must not surface as `preset-composition`. Registered
+        // after the preset seams, so its replacement is the last authority
+        // over the assembled section list.
+        if (carriedSystemPrompt !== undefined) this.memberRuntime.applyCarriedSystemPrompt(agentCtx, member.memberId, carriedSystemPrompt)
         if (persisted) {
           // A resumed Session re-records the activating route: the persisted
           // fold owns the effective selection, and reasoning effort survives
@@ -6599,6 +6920,18 @@ export default class AgentTeam extends TypertRemoteService {
         : recordedSeed !== undefined && recordedSeedCut !== undefined
           ? { seed: recordedSeed, inheritedEventCount: recordedSeedCut }
           : {}
+      if (!persisted && carriedSystemPrompt === undefined) {
+        // A recorded checkpoint seed re-seeds this child, so the seed's own
+        // head prompt is the carry — the era the replayed prefix was built
+        // under. Without a seed, the lineage parent's stored log is the only
+        // surviving evidence; an unreadable one degrades to a normal rebuild
+        // rather than blocking the activation the ledger already committed.
+        carriedSystemPrompt = seedOptions.seed !== undefined
+          ? carriedSystemPromptFromSeed(seedOptions.seed)
+          : lineageParent !== undefined
+            ? await this.carriedSystemPromptOfStoredSession(lineageParent)
+            : undefined
+      }
       created = persisted
         ? await this.ctx.agents.resume({ resumeSessionId: member.sessionId, agentOptions, setup })
         : await this.ctx.agents.create({
@@ -7104,17 +7437,23 @@ export default class AgentTeam extends TypertRemoteService {
   /**
    * Group key when one unread direct Message is a Host-posted recurring notice
    * whose deliveries supersede each other — a continuation nudge (one group per
-   * Workspace) or a context-reset announcement (one group per announcing
-   * Member and Workspace). Each newer delivery restates the full current state,
-   * so an older unread instance carries no information and must not be
-   * re-rendered into a Member's bounded notification context. Any other Message
-   * has no key and always renders.
+   * Workspace), a context-reset announcement (one group per announcing Member
+   * and Workspace), or a completion-liaison report check (one group per checked
+   * Member and Workspace: two checks naming different Members are different
+   * facts, but a re-check of the same Member is the same fact restated). Each
+   * newer delivery restates the full current state, so an older unread instance
+   * carries no information and must not be re-rendered into a Member's bounded
+   * notification context. Any other Message has no key and always renders.
    */
   private recurringNoticeKey(fact: AgentTeamThreadFact, workspaceId: WorkspaceId): string | undefined {
     if (fact.kind !== 'message') return undefined
     const body = fact.message.body
-    const firstLine = body.slice(0, body.includes('\n') ? body.indexOf('\n') : body.length)
+    const firstLine = firstNoticeLineOf(body)
     if (firstLine.includes(CONTINUATION_NUDGE_MARKER)) return `continuation\u0000${workspaceId}`
+    if (firstLine.includes(LIAISON_REPORT_CHECK_MARKER)) {
+      const memberHandle = reportCheckTargetHandle(body)
+      return memberHandle === undefined ? undefined : `report-check\u0000${workspaceId}\u0000${memberHandle}`
+    }
     if (body.startsWith(CONTEXT_RESET_NOTICE_MARKER)) return `reset\u0000${workspaceId}\u0000${fact.message.sender}`
     return undefined
   }
@@ -7192,7 +7531,10 @@ export default class AgentTeam extends TypertRemoteService {
       }
     }
     if (supersededCounts.size > 0) {
-      const parts = [...supersededCounts].map(([key, count]) => `${count} earlier ${key.startsWith('continuation') ? 'continuation check' : 'context-reset notice'}${count === 1 ? '' : 's'}`)
+      const labelFor = (key: string): string => key.startsWith('continuation')
+        ? 'continuation check'
+        : key.startsWith('report-check') ? 'Team report check' : 'context-reset notice'
+      const parts = [...supersededCounts].map(([key, count]) => `${count} earlier ${labelFor(key)}${count === 1 ? '' : 's'}`)
       sections.push(`Superseded Team notices are omitted from this context: ${parts.join(', ')} — only the newest delivery of each kind still carries current information.`)
     }
     if (omitted) sections.push('More unread work remains in team_inbox; the automatic context is bounded.')

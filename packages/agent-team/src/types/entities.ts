@@ -30,6 +30,9 @@ export type AgentTeamThreadRef = Branded<'AgentTeamThreadRef'>
 /** Stable identifier of one Claim. */
 export type AgentTeamClaimRef = Branded<'AgentTeamClaimRef'>
 
+/** Stable identifier of one entry in a Member's private task queue. */
+export type AgentTeamQueueEntryRef = Branded<'AgentTeamQueueEntryRef'>
+
 /** Stable identifier of one public Thread Activity. */
 export type AgentTeamActivityRef = Branded<'AgentTeamActivityRef'>
 
@@ -141,6 +144,40 @@ export interface AgentTeamModelSelection {
   readonly reasoningEffort?: ReasoningEffortId
 }
 
+/** One ISO weekday: 1 = Monday … 7 = Sunday. */
+export type AgentTeamScheduleWeekday = 1 | 2 | 3 | 4 | 5 | 6 | 7
+
+/**
+ * When one schedule window takes effect. Matching is judged on the window's
+ * START day in the fixed Team coordination zone (UTC+8): a day that does not
+ * match leaves the window entirely inactive, a matching day expands the
+ * window into one concrete interval. Absent (or `daily`) means every day, so
+ * schedules written before recurrence existed keep their behavior unchanged.
+ */
+export type AgentTeamScheduleRecurrence =
+  | { readonly kind: 'daily' }
+  | { readonly kind: 'workdays' }
+  | {
+    readonly kind: 'everyDays'
+    /** Whole days between active days, counted from `anchorDate` (1..366). */
+    readonly intervalDays: number
+    /** First active day, `YYYY-MM-DD` in the Team zone. */
+    readonly anchorDate: string
+  }
+  | { readonly kind: 'weekly'; readonly weekdays: readonly AgentTeamScheduleWeekday[] }
+  | {
+    readonly kind: 'monthly'
+    /** Day of the month (1..31); a month without this day is inactive. */
+    readonly dayOfMonth: number
+  }
+  | {
+    readonly kind: 'yearly'
+    /** Month (1..12). */
+    readonly month: number
+    /** Day of the month (1..31); a year without this day is inactive. */
+    readonly day: number
+  }
+
 /**
  * One daily time window of a Member's model schedule. `start` and `end` are
  * wall-clock times (`HH:MM`) in the fixed Team coordination zone (UTC+8),
@@ -154,6 +191,8 @@ export interface AgentTeamModelScheduleWindow {
   readonly end: string
   /** The route this window demands while it is the covering window. */
   readonly selection: AgentTeamModelSelection
+  /** Active days of this window; absent means every day. */
+  readonly recurrence?: AgentTeamScheduleRecurrence
 }
 
 /**
@@ -182,6 +221,8 @@ export interface AgentTeamMemberStopWindow {
   readonly start: string
   /** Team-zone wall-clock end `HH:MM` (exclusive; wraps past midnight when ≤ start). */
   readonly end: string
+  /** Active days of this window; absent means every day. */
+  readonly recurrence?: AgentTeamScheduleRecurrence
 }
 
 /**
@@ -621,6 +662,26 @@ export interface AgentTeamClaim {
   readonly direction: string
   readonly normalizedDirection: string
   readonly state: 'active' | 'done' | 'released'
+}
+
+/**
+ * One entry in a Member's private task queue: the durable, ordered assignment
+ * layer the Human and the Leader write and the Member walks in sequence. An
+ * entry references one open Task (the sole work authority) and adds only who
+ * assigned it and a bounded note — execution standing derives from the Task's
+ * Claims, never from a second state machine. Array position inside the
+ * Member's queue is the execution order, and only the Human and a Leader may
+ * change it.
+ */
+export interface AgentTeamQueueEntry {
+  readonly entryRef: AgentTeamQueueEntryRef
+  readonly taskRef: AgentTeamTaskRef
+  /** Bounded assignment note shown with the entry; absent when none was given. */
+  readonly note?: string | undefined
+  /** The Human or Leader Member that placed the assignment. */
+  readonly addedBy: AgentTeamMemberId
+  /** Wall-clock instant of the committing queue operation. */
+  readonly addedAt: string
 }
 
 interface AgentTeamActivityBase {

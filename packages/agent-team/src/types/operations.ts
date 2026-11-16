@@ -19,6 +19,8 @@ import type {
   AgentTeamMentionRedirect,
   AgentTeamMessage,
   AgentTeamMessageRef,
+  AgentTeamQueueEntry,
+  AgentTeamQueueEntryRef,
   AgentTeamStoredMessage,
   AgentTeamStoredThreadReadFact,
   AgentTeamTask,
@@ -397,6 +399,63 @@ export type AgentTeamClaimChangedOperation =
   | AgentTeamClaimDoneOperation
   | AgentTeamClaimReleasedOperation
 
+/**
+ * Durable assignment of one or more open Tasks to one Member's private task
+ * queue. The actor is the Human or a Leader Member; the entries are stamped
+ * here and the apply side splices them at `atIndex` (absent appends). Queue
+ * order is the execution order, so this one operation is how the assigned
+ * Member's next work is decided.
+ */
+export interface AgentTeamQueueAssignedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/queue-assigned'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly memberId: AgentTeamMemberId
+    /** The full stamped entries this operation placed, in placement order. */
+    readonly entries: readonly AgentTeamQueueEntry[]
+    /** Insert position inside the Member's queue; absent (or past-the-end) appends. */
+    readonly atIndex?: number
+  }
+}
+
+/**
+ * Durable in-place amendment of one Member's private task queue: remove one
+ * pending entry, retune one entry's note, or reorder the whole queue. Only
+ * pending entries (Tasks still unclaimed) may be removed or reordered —
+ * started work leaves the queue through its own Task lifecycle instead.
+ */
+export interface AgentTeamQueueAmendedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/queue-amended'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly memberId: AgentTeamMemberId
+    readonly action: 'remove' | 'modify' | 'reorder'
+    /** The entry removed or retuned (remove/modify). */
+    readonly entryRef?: AgentTeamQueueEntryRef
+    /** The replacement note (modify); absent clears the note. */
+    readonly note?: string | undefined
+    /** The queue's full new order (reorder) — a permutation of the current entry refs. */
+    readonly order?: readonly AgentTeamQueueEntryRef[]
+  }
+}
+
+/**
+ * Durable atomic reassignment of one pending queue entry from one Member's
+ * queue to another's — Human reassignment or a Leader moving work between
+ * Agents. One operation owns the move, so no replay order ever shows the
+ * entry in both queues or neither.
+ */
+export interface AgentTeamQueueReassignedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/queue-reassigned'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    /** The entry as it moved — identity, note, and original assignment provenance survive. */
+    readonly entry: AgentTeamQueueEntry
+    readonly fromMemberId: AgentTeamMemberId
+    readonly toMemberId: AgentTeamMemberId
+  }
+}
+
 /** Durable Human Task-resolution change. */
 export interface AgentTeamTaskChangedOperation extends AgentTeamOperationBase {
   readonly kind: 'team/task-changed'
@@ -642,6 +701,9 @@ export type AgentTeamOperation =
   | AgentTeamClaimCreatedOperation
   | AgentTeamClaimDoneOperation
   | AgentTeamClaimReleasedOperation
+  | AgentTeamQueueAssignedOperation
+  | AgentTeamQueueAmendedOperation
+  | AgentTeamQueueReassignedOperation
   | AgentTeamTaskChangedOperation
   | AgentTeamThreadAttentionChangedOperation
   | AgentTeamThreadReadOperation

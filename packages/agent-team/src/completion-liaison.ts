@@ -344,6 +344,22 @@ export function liaisonReportCheckText(input: { readonly leaderHandle: string, r
 }
 
 /**
+ * The checked Member handle one report-check notice names, parsed from the
+ * stable first line (`@<leader> Team report check: <member> finished…`).
+ * One definition serves both readers that must agree on a notice's identity:
+ * the Inbox notification projection groups a checked Member's deliveries by
+ * it, and the Host's chain lookup finds the Thread the next delivery extends.
+ */
+export function reportCheckTargetHandle(body: string): string | undefined {
+  const firstLine = body.slice(0, body.includes('\n') ? body.indexOf('\n') : body.length)
+  const at = firstLine.indexOf(LIAISON_REPORT_CHECK_MARKER)
+  if (at === -1) return undefined
+  const rest = firstLine.slice(at + LIAISON_REPORT_CHECK_MARKER.length).trimStart()
+  const handle = rest.split(/\s/, 1)[0]?.trim()
+  return handle === undefined || handle === '' ? undefined : handle
+}
+
+/**
  * The private resume notice: the Member that just closed a task is told its
  * own interrupted stack, newest first — the LIFO order the persona's
  * interruption protocol resumes in. The refs are printed bare (never in the

@@ -66,6 +66,20 @@ If the recipient has no live session or the wake fails, the operation stays dura
 
 A committed mutation names its action (Claim created, completed, or released), renders the authoritative affected Claim first — ref, resulting state, owner, direction — then Task/Thread identity, and exactly one next-write token hand-off. Rejection results (`unread_required`, `stale_revision`) share the message rejection form: `Not committed`, local refs/counts, read-before-retry recovery, and no numeric revision.
 
+## `team_queue`
+
+Every Member carries one durable, ordered task queue per Workspace — the private todo-list the Human and the Leader assign work through. An entry references one open Task plus an optional bounded note; array position is the execution order, and the entry's standing (pending / working / awaiting) derives from the Task's own Claims, never from a second state.
+
+`list` renders one Member's queue in execution order; without `memberRef` it is your own queue, and only the Leader may name another Member. `assign` (1-6 open unclaimed Tasks the target Member can read, appended or inserted at `atIndex`), `remove`, `modify`, `reorder`, and `reassign` are Leader-only writes the ledger enforces; a Member has no queue write at all, so priority discipline is structural — order changes only when the Human or the Leader makes them.
+
+Queueing occupies: a Task queued for one Member refuses every other Member's `claim` (the rejection names the queue's owner), while the queued Member claims normally, and removing or reassigning the entry frees the Task again.
+
+Reassignment moves one pending entry between two queues in one atomic operation; started entries (working or awaiting) leave the queue only through the Task lifecycle. A Task that resolves, a Channel that archives, and a Member that departs all drop the queue entries that referenced them.
+
+The Host walks the Member through the queue: an assignment wakes the receiving Member with the routing notice, and after a queued hand-off (`claim done`) or a release the Host wakes the Member with the next pending entry — a release never re-prompts the entry it released, and work outside any queue never wakes.
+
+Every wake restates the routing discipline: review the whole queue before starting, propose merges or splits to the Leader and wait for confirmation (a split is `parentTaskRef` sub-tasks), and never adjust order or priorities yourself.
+
 ## `team_supervise`
 
 `team_supervise` reads and repairs a fellow Member's health on the same evidence the periodic supervision pass acts on. `status` reports one Member's pass state — `healthy`, `settling`, or `stopped` — its presence, its recorded failure diagnostic, and how many times it errored inside the twenty-minute window; it is a read and writes no operation.

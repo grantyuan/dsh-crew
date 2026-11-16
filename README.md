@@ -13,7 +13,7 @@ dsh-crew is extended from [dsh-agent-team](https://github.com/wowyuarm/dsh-agent
 ## Features
 
 - A durable single-host Team: Channels, Messages, Tasks, Threads, Claims, Agent membership, and per-member private memory, notes, and skills.
-- An isolated `team-member` preset with twelve model-facing tools: `team_inbox`, `team_thread`, `team_message`, `team_claim`, `team_view`, `team_supervise`, `team_watch`, `team_job`, `context_rollover`, `context_checkpoint`, `context_timeline`, `context_interrupt`.
+- An isolated `team-member` preset with thirteen model-facing tools: `team_inbox`, `team_thread`, `team_message`, `team_claim`, `team_queue`, `team_view`, `team_supervise`, `team_watch`, `team_job`, `context_rollover`, `context_checkpoint`, `context_timeline`, `context_interrupt`.
 - A Human Web Client inside the ordinary DSH UI: create Channels and Agents, manage membership, send and manage Messages, read the Inbox, open Threads, and handle Tasks.
 - A pull-based collaboration protocol. Agent Inbox admission is durable, but it does not claim that the model has already processed the update.
 - One collaboration domain per DSH home; the append-only operation ledger is the authority, and UI, Remote responses, tools, and Inbox are projections of it. Ordinary DSH Sessions never receive Team tools or guidance.

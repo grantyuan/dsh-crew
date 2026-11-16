@@ -6,10 +6,12 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import {
   AgentEditorDialog,
   StopScheduleField,
+  defaultScheduleRecurrenceDraft,
   normalizeStopScheduleDraft,
   stopScheduleDraftInvalid,
   stopScheduleStoredDraft,
   type StopScheduleDraft,
+  type StopScheduleWindowDraft,
 } from '../src/client/TeamMemberEditor.tsx'
 import { zh } from '../src/client/locales.ts'
 
@@ -25,23 +27,35 @@ const loadPromptView = vi.fn(async (): Promise<RemoteResult<AgentTeamMemberPromp
   throw new Error('not used')
 })
 
+const win = (start: string, end: string, recurrence = defaultScheduleRecurrenceDraft()): StopScheduleWindowDraft => ({ start, end, recurrence })
+
 describe('stop schedule draft normalization', () => {
-  it('round-trips a stored schedule and treats absent as an empty draft', () => {
+  it('round-trips a stored schedule, treats absent as an empty draft, and shows a missing recurrence as daily', () => {
     expect(stopScheduleStoredDraft(undefined)).toEqual({ enabled: false, windows: [] })
     const stored = { enabled: true, windows: [{ start: '22:00', end: '06:00' }] }
+    expect(stopScheduleStoredDraft(stored).windows[0]?.recurrence.kind).toBe('daily')
     expect(normalizeStopScheduleDraft(stopScheduleStoredDraft(stored))).toEqual(stored)
+  })
+
+  it('round-trips a stored recurrence and drops an impossible one', () => {
+    const stored = { enabled: true, windows: [{ start: '22:00', end: '06:00', recurrence: { kind: 'workdays' } }] } as const
+    expect(normalizeStopScheduleDraft(stopScheduleStoredDraft(stored))).toEqual(stored)
+    const impossible = { ...defaultScheduleRecurrenceDraft(), kind: 'monthly' as const, dayOfMonth: '32' }
+    const draft: StopScheduleDraft = { enabled: true, windows: [win('22:00', '06:00', impossible)] }
+    expect(normalizeStopScheduleDraft(draft)).toEqual({ enabled: true, windows: [] })
+    expect(stopScheduleDraftInvalid(draft)).toBe(true)
   })
 
   it('pads lenient time inputs to the stored HH:MM and drops blank and incomplete windows', () => {
     const draft: StopScheduleDraft = {
       enabled: true,
       windows: [
-        { start: '22:00', end: '06:00' },
-        { start: '', end: '' },
-        { start: '12:00', end: '' },
+        win('22:00', '06:00'),
+        win('', ''),
+        win('12:00', ''),
         // `9:00` is what a Human naturally types; the stored form is strict
         // HH:MM, so the editor pads it instead of refusing it.
-        { start: '9:00', end: '18:00' },
+        win('9:00', '18:00'),
       ],
     }
     expect(normalizeStopScheduleDraft(draft)).toEqual({ enabled: true, windows: [{ start: '22:00', end: '06:00' }, { start: '09:00', end: '18:00' }] })
@@ -50,12 +64,12 @@ describe('stop schedule draft normalization', () => {
   it('flags incomplete windows, equal bounds, and an enabled schedule that stops nothing', () => {
     expect(stopScheduleDraftInvalid({ enabled: false, windows: [] })).toBe(false)
     expect(stopScheduleDraftInvalid({ enabled: true, windows: [] })).toBe(true)
-    expect(stopScheduleDraftInvalid({ enabled: true, windows: [{ start: '22:00', end: '06:00' }] })).toBe(false)
+    expect(stopScheduleDraftInvalid({ enabled: true, windows: [win('22:00', '06:00')] })).toBe(false)
     // Equal bounds compare padded: `9:00` and `09:00` are the same instant.
-    expect(stopScheduleDraftInvalid({ enabled: false, windows: [{ start: '9:00', end: '09:00' }] })).toBe(true)
-    expect(stopScheduleDraftInvalid({ enabled: false, windows: [{ start: '09:00', end: '09:00' }] })).toBe(true)
-    expect(stopScheduleDraftInvalid({ enabled: false, windows: [{ start: '09:00', end: '' }] })).toBe(true)
-    expect(stopScheduleDraftInvalid({ enabled: true, windows: [{ start: '', end: '' }] })).toBe(true)
+    expect(stopScheduleDraftInvalid({ enabled: false, windows: [win('9:00', '09:00')] })).toBe(true)
+    expect(stopScheduleDraftInvalid({ enabled: false, windows: [win('09:00', '09:00')] })).toBe(true)
+    expect(stopScheduleDraftInvalid({ enabled: false, windows: [win('09:00', '')] })).toBe(true)
+    expect(stopScheduleDraftInvalid({ enabled: true, windows: [win('', '')] })).toBe(true)
   })
 })
 
@@ -76,28 +90,41 @@ describe('StopScheduleField surface', () => {
 
   it('adds a labelled window row and appends it on change', () => {
     const onChange = vi.fn()
-    renderField({ enabled: true, windows: [{ start: '22:00', end: '06:00' }] }, onChange)
+    renderField({ enabled: true, windows: [win('22:00', '06:00')] }, onChange)
     fireEvent.click(screen.getByRole('button', { name: '添加停止区间' }))
     expect(onChange).toHaveBeenCalledWith({
       enabled: true,
-      windows: [{ start: '22:00', end: '06:00' }, { start: '', end: '' }],
+      windows: [win('22:00', '06:00'), win('', '')],
     })
   })
 
   it('removes the touched window through its labelled action', () => {
     const onChange = vi.fn()
-    renderField({ enabled: true, windows: [{ start: '22:00', end: '06:00' }, { start: '12:00', end: '14:00' }] }, onChange)
+    renderField({ enabled: true, windows: [win('22:00', '06:00'), win('12:00', '14:00')] }, onChange)
     fireEvent.click(screen.getByRole('button', { name: '移除停止区间 #2' }))
-    expect(onChange).toHaveBeenCalledWith({ enabled: true, windows: [{ start: '22:00', end: '06:00' }] })
+    expect(onChange).toHaveBeenCalledWith({ enabled: true, windows: [win('22:00', '06:00')] })
+  })
+
+  it('shows the recurrence control per window and switches it through the menu', () => {
+    const onChange = vi.fn()
+    renderField({ enabled: true, windows: [win('22:00', '06:00')] }, onChange)
+    const trigger = screen.getByRole('button', { name: '停止区间 #1 周期' })
+    expect(trigger.textContent).toContain('每天')
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByText('工作日'))
+    expect(onChange).toHaveBeenCalledWith({
+      enabled: true,
+      windows: [expect.objectContaining({ recurrence: expect.objectContaining({ kind: 'workdays' }) })],
+    })
   })
 
   it('surfaces the rule alert while the draft is invalid and hides it once complete', () => {
     // The lenient `9:00` input pads to a valid bound now; a malformed minute
     // is what still trips the rule.
-    const { rerender } = renderField({ enabled: true, windows: [{ start: '9:5', end: '18:00' }] })
+    const { rerender } = renderField({ enabled: true, windows: [win('9:5', '18:00')] })
     expect(screen.getByRole('alert').textContent).toContain('每个停止区间需要 HH:MM')
     rerender(
-      <StopScheduleField draft={{ enabled: true, windows: [{ start: '22:00', end: '06:00' }] }} onChange={vi.fn()} disabled={false} t={t} />,
+      <StopScheduleField draft={{ enabled: true, windows: [win('22:00', '06:00')] }} onChange={vi.fn()} disabled={false} t={t} />,
     )
     expect(screen.queryByRole('alert')).toBeNull()
   })

@@ -26,7 +26,11 @@ Agent 只能读取或修改其已参与 Workspace 中的 Channels，且仍需是
 
 ## 时间区间模型路由
 
-Member 可以携带 `modelSchedule`：一组按顺序解析的每日 `HH:MM` 时间窗（Team 协调时区 UTC+8），每个窗口指定一条 provider 路由。窗口按列表顺序解析——第一个命中的窗口生效；结束早于开始的窗口跨午夜；未被任何窗口覆盖的小时（或日程被禁用时）回到成员固定的 `model`。这份 intent 与 `model` 一样挂在 Member entity 上，通过同一个 `updateMember` Remote 编辑；编辑日程本身从不动 live Session。
+Member 可以携带 `modelSchedule`：一组按顺序解析的每日 `HH:MM` 时间窗（Team 协调时区 UTC+8），每个窗口指定一条 provider 路由。窗口按列表顺序解析——第一个命中的窗口生效；结束早于开始的窗口跨午夜；未被任何窗口覆盖的小时（或日程被禁用时）回到成员固定的 `model`。
+
+每个窗口还可以携带 `recurrence` 决定它在哪些日子生效：每天（缺省）、工作日（周一至周五）、从显式锚点日期起的每 N 天、星期集合、每月某日，或每年某月某日。匹配以窗口的起始日为准，因此 `22:00–08:00` 的工作日窗口在周五晚仍会延续到周六早晨；短月的 31 号与平年的 02-29 不产生窗口，也不会平移到相邻日期。不匹配的日子完全不覆盖。
+
+这份 intent 与 `model` 一样挂在 Member entity 上，通过同一个 `updateMember` Remote 编辑；编辑日程本身从不动 live Session。
 
 Host 的 model-schedule monitor 每个 pass 重新派生期望路由，并与持久化的已应用路由（Member entity 上的 `scheduledModel`，只由 monitor 以受托 Human authority 提交的 `team/member-model-scheduled` operation 移动）比较。每一次真实变更都经共享的 context-renewal 路径落地——与 Human 菜单的「重置」同一条路径——因此切换总是开启一个以新路由激活的全新 generation。turn 进行中的 Member 把切换推迟到第一个安静边界；跨边界宕机的 Host 在下一个 pass 收敛；持久化比较就是幂等性，切换绝不重复。
 
@@ -35,6 +39,8 @@ Host 的 model-schedule monitor 每个 pass 重新派生期望路由，并与持
 ## 时间区间停止运行
 
 Member 可以携带 `stopSchedule`：一组每日 `HH:MM` 时间窗（Team 协调时区 UTC+8），窗口内该 Member 不得运行。窗口边界与 model schedule 的窗口形状一致——`start` 含端点、`end` 不含端点，`end` 早于或等于 `start` 时跨午夜——intent 通过同一个 `updateMember` Remote 编辑，与 `modelSchedule` 一样挂在 Member entity 上。
+
+窗口可以携带与 model schedule 相同的可选 `recurrence`，规则同样以起始日为准：窗口只在周期匹配的日子停止运行，缺省字段等于每天。每条通知都会写明周期（`Active days: on workdays.`），让恢复运行的 Member 知道自己的停止窗口下次何时开启。
 
 Host 的 stop-schedule monitor 只把窗口转化为 Team Assistant 的通知。进入窗口前 30 分钟，Session 仍在的 Member 收到收尾通知：窗口开始时停止运行，完成或妥善停靠进行中的工作，把交接文档写进 private memory，并在完成前向 Manager（指定的 Leader）汇报工作进展与收尾情况，说明自己的停止区间。
 

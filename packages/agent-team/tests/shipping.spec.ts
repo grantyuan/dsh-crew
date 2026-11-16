@@ -36,8 +36,8 @@ async function shippedHarnessName(): Promise<string> {
 // improvement squeezed into the last few characters. The 2026-11-07 delegation
 // discipline (decompose implementation work into small-grained sub-tasks and
 // settle each through subagent) moved it up again on the operator's
-// instruction, replacing the old per-bullet delegation sentence.
-const PERSONA_CHARACTER_BUDGET = 15700
+// instruction, replacing the old per-bullet delegation sentence. The 2026-11-17 task-queue routing discipline (walk the private queue in order, merge/split only with the Leader's confirmation) moved it up once more.
+const PERSONA_CHARACTER_BUDGET = 16000
 
 // The team-member preset rides the shipped patch as one declarative definition
 // row; these assertions scope to exactly that row, from its `- id:` marker to
@@ -200,7 +200,7 @@ describe('Agent Team shipping contract', () => {
     expect([...dshPeerRanges(bundleManifest)]).toEqual(['>=0.2.2-rc.2 <0.2.3'])
     expect(preset).toContain('compaction: true')
     expect(preset).toContain('toolResultPruner: true')
-    expect(preset).toContain('team_inbox, team_thread, team_message, team_claim, team_view, team_rate, team_supervise, team_watch, and team_job')
+    expect(preset).toContain('team_inbox, team_thread, team_message, team_claim, team_queue, team_view, team_rate, team_supervise, team_watch, and team_job')
     expect(preset).toContain('If you are the Team Leader: team_watch watches another Member')
     // The one token story has exactly two legal surfaces: a fully drained
     // read hands off the next-write token, and a committed public mutation's
@@ -245,7 +245,7 @@ describe('Agent Team shipping contract', () => {
     expect(preset).toContain('the bundled `member-memory-manager` skill')
     const toolSource = await readFile(resolve(root, 'packages/tool-agent-team/src/index.ts'), 'utf8')
     expect([...toolSource.matchAll(/name: '(team_[a-z]+)'/g)].map(match => match[1])).toEqual([
-      'team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_view', 'team_supervise', 'team_watch', 'team_rate', 'team_job',
+      'team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_view', 'team_supervise', 'team_watch', 'team_rate', 'team_job', 'team_queue',
     ])
     // Validation errors teach the same two token surfaces as the descriptions,
     // never a single-source story.

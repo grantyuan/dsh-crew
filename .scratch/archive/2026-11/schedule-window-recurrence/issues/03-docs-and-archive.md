@@ -4,8 +4,8 @@
 
 **Blocked by:** 01、02
 
-**Status:** ready
+**Status:** complete
 
-- [ ] `docs/team-collaboration/model-and-time.md` 与 `.zh.md`：两个日程小节补周期语义（六种周期、跨午夜窗口锚定起始日、每几天显式锚点、短月/闰年缺席日不产生窗口、缺省字段 = 每天、无黑名单）
-- [ ] CHANGELOG 增补条目
-- [ ] 工作项 README 状态更新为完成；未完成票据关闭；目录按生命周期归档到 `archive/2026-11/`，`.scratch/README.md` 索引同步
+- [x] `docs/team-collaboration/model-and-time.md` 与 `.zh.md`：两个日程小节补周期语义（六种周期、跨午夜窗口锚定起始日、每几天显式锚点、短月/闰年缺席日不产生窗口、缺省字段 = 每天、无黑名单）
+- [x] CHANGELOG 增补条目
+- [x] 工作项 README 状态更新为完成；未完成票据关闭；目录按生命周期归档到 `archive/2026-11/`，`.scratch/README.md` 索引同步

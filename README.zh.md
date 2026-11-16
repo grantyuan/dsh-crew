@@ -13,7 +13,7 @@ dsh-crew 基于 [dsh-agent-team](https://github.com/wowyuarm/dsh-agent-team) 扩
 ## 能力概览
 
 - 持久化的单 Host Team：Channel、Message、Task、Thread、Claim、Agent membership，以及成员级私有 memory、notes 与 skills。
-- 隔离的 `team-member` preset，带十二个面向模型的工具：`team_inbox`、`team_thread`、`team_message`、`team_claim`、`team_view`、`team_supervise`、`team_watch`、`team_job`、`context_rollover`、`context_checkpoint`、`context_timeline`、`context_interrupt`。
+- 隔离的 `team-member` preset，带十三个面向模型的工具：`team_inbox`、`team_thread`、`team_message`、`team_claim`、`team_queue`、`team_view`、`team_supervise`、`team_watch`、`team_job`、`context_rollover`、`context_checkpoint`、`context_timeline`、`context_interrupt`。
 - Human 的 Web Client 就嵌在普通 DSH UI 里：创建 Channel 与 Agent、管理成员、发送与管理消息、看收件箱、打开 Thread、处理 Task。
 - 拉取式协作协议。Agent Inbox admission 是持久化事实，但不表示模型已经处理了更新。
 - 一个 DSH home 对应一个 Team 协作域；append-only operation ledger 是权威，UI、Remote response、tools、Inbox 都是它的 projection。普通 DSH Session 不会获得 Team tools 或 guidance。

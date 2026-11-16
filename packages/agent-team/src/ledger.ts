@@ -68,6 +68,7 @@ import type {
   AgentTeamMemberModelSchedule,
   AgentTeamMemberModelScheduledOperation,
   AgentTeamMemberStopSchedule,
+  AgentTeamScheduleRecurrence,
   AgentTeamMemberCapabilityChangedOperation,
   AgentTeamQuestionAnalyzedOperation,
   AgentTeamModelScheduleWindow,
@@ -170,6 +171,17 @@ import type {
   AgentTeamThreadPromotedOperation,
   AgentTeamPromoteThreadRequest,
   AgentTeamPromoteThreadResult,
+  AgentTeamQueueEntry,
+  AgentTeamQueueEntryRef,
+  AgentTeamQueueAssignedOperation,
+  AgentTeamQueueAmendedOperation,
+  AgentTeamQueueReassignedOperation,
+  AgentTeamQueueAssignRequest,
+  AgentTeamQueueAmendRequest,
+  AgentTeamQueueReassignRequest,
+  AgentTeamQueueEntryItem,
+  AgentTeamQueueResult,
+  AgentTeamQueueReassignResult,
   AgentTeamThreadRepliedOperation,
   AgentTeamUnreadRequired,
   AgentTeamUpdateChannelRequest,
@@ -180,6 +192,7 @@ import type {
 } from './types.ts'
 import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX, MEMBER_MODEL_SCHEDULE_WINDOW_MAX, MEMBER_STOP_SCHEDULE_WINDOW_MAX, MODEL_SCHEDULE_TIME_PATTERN } from './spec.ts'
 import { formatTeamTimestamp } from './time-format.ts'
+import { freezeScheduleRecurrence, isCalendarDate, parseAnchorDate } from './schedule-recurrence.ts'
 import { resolveBodyMentions, scanBodyHandles } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
 
@@ -349,6 +362,20 @@ export interface AgentTeamAuthorizedRolloverMemberSessionRequest {
  */
 export const MAX_PENDING_INTERRUPTS = 8
 
+/**
+ * How many entries one Member's private task queue may hold. The queue is
+ * the Human's and the Leader's routing surface, not a backlog dump: a deeper
+ * list means more work was assigned than the Member can meaningfully walk
+ * in order, so a full queue rejects until entries complete or are removed.
+ */
+export const MAX_QUEUE_ENTRIES = 20
+
+/** Open Tasks one queue assignment may place at once; deeper batches belong on the Task board. */
+export const MAX_QUEUE_ASSIGN_ITEMS = 6
+
+/** Assignment note bound: one queue entry names how to do the work, not the work itself. */
+export const QUEUE_NOTE_MAX_CHARS = 200
+
 /** Label and incomplete-state bounds: resume pointers stay compact, notes live in the Member's own memory. */
 export const INTERRUPT_LABEL_MAX_CHARS = 120
 
@@ -427,6 +454,23 @@ export interface AgentTeamAuthorizedReplyRequest extends AgentTeamReplyRequest {
   readonly resolvedAttachments?: readonly AgentTeamMessageAttachment[] | undefined
 }
 
+/**
+ * The Team Assistant's one reply lane: extend a Thread the Assistant itself
+ * anchored, so a recurring Host notice (a continuation nudge, a report check)
+ * restates the current facts in the same Thread instead of minting a new one
+ * per episode. The Thread revision is resolved under the ledger lock — the
+ * Host has no stale-revision retry — and only live Member mentions ride the
+ * body (no invitation gate exists for the Host voice).
+ */
+export interface AgentTeamAuthorizedAssistantReplyRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly threadRef: AgentTeamThreadRef
+  readonly body: string
+  readonly recipients?: readonly AgentTeamMemberId[]
+  readonly actor: AgentTeamAssistantActor
+}
+
 export interface AgentTeamAuthorizedClaimRequest extends AgentTeamClaimRequest {
   readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
 }
@@ -437,6 +481,18 @@ export interface AgentTeamAuthorizedTaskRequest extends AgentTeamTaskRequest {
 
 export interface AgentTeamAuthorizedTasksBatchRequest extends AgentTeamTasksBatchRequest {
   readonly actor: AgentTeamHumanActor
+}
+
+export interface AgentTeamAuthorizedQueueAssignRequest extends AgentTeamQueueAssignRequest {
+  readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
+}
+
+export interface AgentTeamAuthorizedQueueAmendRequest extends AgentTeamQueueAmendRequest {
+  readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
+}
+
+export interface AgentTeamAuthorizedQueueReassignRequest extends AgentTeamQueueReassignRequest {
+  readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
 }
 
 export interface AgentTeamAuthorizedPromoteThreadRequest extends AgentTeamPromoteThreadRequest {
@@ -495,7 +551,7 @@ export interface AgentTeamAuthorizedUnwatchMemberRequest extends AgentTeamUnwatc
 export interface AgentTeamLedgerOptions {
   readonly operationId?: () => AgentTeamOperationId
   readonly occurredAt?: () => string
-  readonly ref?: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'activity' | 'interrupt' | 'watch') => string
+  readonly ref?: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'entry' | 'activity' | 'interrupt' | 'watch') => string
   /**
    * Single-writer fence (see ledger-fence.ts): consulted before every queued
    * ledger call. A false answer means another host claimed the ledger's write
@@ -621,6 +677,10 @@ interface Projection {
   readonly watches: Map<AgentTeamMemberWatchRef, AgentTeamMemberWatch>
   /** One watch per (leader, target, Workspace): the pair index a second start retunes instead of duplicating. */
   readonly watchByPair: Map<string, AgentTeamMemberWatchRef>
+  /** Per-Member private task queues, keyed like `watchByPair` (member, Workspace); execution order is array order. */
+  readonly queues: Map<string, AgentTeamQueueEntry[]>
+  /** Task occupancy index: the Member whose queue references each queued Task. One Task sits in at most one queue. */
+  readonly queueByTask: Map<AgentTeamTaskRef, AgentTeamMemberId>
   /** The durable question analyses, keyed by the analyzed Human Message. */
   readonly questionAnalysesByMessage: Map<AgentTeamMessageRef, AgentTeamQuestionAnalyzedOperation>
 }
@@ -642,7 +702,7 @@ function emptyProjection(): Projection {
     anchorByThread: new Map(), taskNumberByTask: new Map(), taskCountByChannel: new Map(), attentionThreadsByMember: new Map(),
     threadsByWriter: new Map(),
     directMarkersByMember: new Map(), activityMarkersByMember: new Map(), observationsByThread: new Map(),
-    watches: new Map(), watchByPair: new Map(), questionAnalysesByMessage: new Map() }
+    watches: new Map(), watchByPair: new Map(), queues: new Map(), queueByTask: new Map(), questionAnalysesByMessage: new Map() }
 }
 
 /**
@@ -652,6 +712,15 @@ function emptyProjection(): Projection {
  */
 function memberWatchPairKey(leaderMemberId: AgentTeamMemberId, memberId: AgentTeamMemberId, workspaceId: WorkspaceId): string {
   return `${leaderMemberId}\u0000${memberId}\u0000${workspaceId}`
+}
+
+/**
+ * Identity of one Member/Workspace queue slot. A Member walks one ordered
+ * queue per Workspace it participates in, so the pair — not the entries — is
+ * what the projection indexes.
+ */
+function memberQueueKey(memberId: AgentTeamMemberId, workspaceId: WorkspaceId): string {
+  return `${memberId}\u0000${workspaceId}`
 }
 
 /**
@@ -824,6 +893,7 @@ function freezeModelSchedule(schedule: AgentTeamMemberModelSchedule | undefined)
         start: window.start,
         end: window.end,
         selection: Object.freeze({ ...window.selection }),
+        ...(window.recurrence === undefined ? {} : { recurrence: freezeScheduleRecurrence(window.recurrence) }),
       }))),
     }),
   }
@@ -838,6 +908,7 @@ function freezeStopSchedule(schedule: AgentTeamMemberStopSchedule | undefined): 
       windows: Object.freeze(schedule.windows.map(window => Object.freeze({
         start: window.start,
         end: window.end,
+        ...(window.recurrence === undefined ? {} : { recurrence: freezeScheduleRecurrence(window.recurrence) }),
       }))),
     }),
   }
@@ -880,7 +951,7 @@ export class AgentTeamLedger {
   private readonly confirmations = new Map<AgentTeamConfirmationToken, Confirmation>()
   private readonly createOperationId: () => AgentTeamOperationId
   private readonly createOccurredAt: () => string
-  private readonly createRef: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'activity' | 'interrupt' | 'watch') => string
+  private readonly createRef: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'entry' | 'activity' | 'interrupt' | 'watch') => string
   private operationTail: Promise<void> = Promise.resolve()
   /**
    * Runtime human display name. Durable identity stays `member:human`; only
@@ -2026,6 +2097,100 @@ export class AgentTeamLedger {
   }
 
   /**
+   * The Team Assistant's one reply lane: extend a Thread the Assistant itself
+   * anchored, so a recurring Host notice restates the current facts inside its
+   * existing chain instead of minting a new Thread per episode. The anchor
+   * sender is the authority boundary — the Assistant never enters a Thread a
+   * Member or the Human started — and the Thread revision is resolved under
+   * the ledger lock, so no stale-revision lane exists for the Host to retry.
+   * Unfollowed named Members are pulled into the Thread exactly like a member
+   * reply would (a newly designated leader picks up the chain), and the
+   * unread-write guard does not apply: the Assistant has no Session to read
+   * with, and its own Threads carry no fact it authored unread to itself.
+   */
+  assistantReply(request: AgentTeamAuthorizedAssistantReplyRequest): Promise<AgentTeamLedgerResult<AgentTeamReplyResult>> {
+    return this.enqueue(async () => {
+      this.assertAssistantActor(request.actor)
+      const body = request.body.trim()
+      if (body === '') throw new Error('message body must not be empty')
+      const { task, thread, channelRef } = this.threadContextFrom(this.state, request.workspaceId, { threadRef: request.threadRef })
+      const anchor = this.threadAnchor(thread.threadRef)
+      if (anchor.sender !== AGENT_TEAM_ASSISTANT_MEMBER_ID) throw new Error(`the Team Assistant may only reply into a Thread it anchored itself ('${thread.threadRef}' was anchored by '${anchor.sender}')`)
+      const channel = this.requireActiveChannel(request.workspaceId, channelRef)
+      // Recipients are resolved before the request-id lookup, so a retry
+      // re-derives the same stored list for the collision check.
+      const redirects = this.redirectedMentions(request.actor.memberId, channel, body, request.requestId)
+      const recipients = this.mergeMentionRecipients(this.mergeBodyMentions(request.actor.memberId, channel.channelRef, body, this.normalizeRecipients(request.actor, request.recipients)), redirects)
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        if (existing.kind !== 'team/thread-replied' || existing.data.workspaceId !== request.workspaceId
+          || existing.data.thread.threadRef !== request.threadRef || existing.data.message.body !== body
+          || !this.sameList(existing.data.mentions, recipients)) this.throwRequestCollision(request.requestId)
+        return this.resolved(this.replyResult(existing))
+      }
+      this.assertMentionTargets(channel, recipients)
+      if (task?.resolution === 'closed') throw new Error(`Task '${task.taskRef}' is closed; reopen it before replying`)
+      const sequence = this.nextSequence()
+      const base = this.operationBase(request, sequence)
+      const message: AgentTeamMessage = Object.freeze({
+        messageRef: this.ref('message'), channelRef, threadRef: thread.threadRef,
+        ...(task === undefined ? {} : { taskRef: task.taskRef }), sender: request.actor.memberId, body,
+        topLevel: false, sequence, occurredAt: base.occurredAt,
+      })
+      const nextThread: AgentTeamThread = Object.freeze({ ...thread, revision: sequence })
+      // A named Member that never took part in this chain joins it here: the
+      // Host voice carries the same invite-by-delivery rule a member reply
+      // does, minus the Human confirmation gate the Assistant never needs.
+      const started = recipients
+        .filter(memberId => this.state.members.has(memberId) && !this.isFollowing(thread.threadRef, memberId))
+        .map(memberId => this.startAttention(memberId, thread.threadRef, sequence))
+      const inbox = this.messageInboxDelta(message, request.actor.memberId, recipients, started)
+      const operation: AgentTeamThreadRepliedOperation = Object.freeze({
+        ...base, kind: 'team/thread-replied',
+        data: Object.freeze({ workspaceId: request.workspaceId, baseRevision: thread.revision,
+          mentions: recipients, message, ...(task === undefined ? {} : { task }), thread: nextThread, inbox,
+          ...(redirects.length === 0 ? {} : { redirectedMentions: redirects }) }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.replyResult(operation))
+    })
+  }
+
+  /**
+   * Newest-first Thread anchors the Team Assistant authored in one Workspace,
+   * bounded: the Host's notice lanes scan these for their own markers to
+   * decide whether the next delivery extends an existing chain or opens one.
+   * Only active-Channel anchors carry; the body is the untruncated anchor
+   * text the marker match needs.
+   */
+  assistantThreadAnchorsInWorkspace(workspaceId: WorkspaceId, limit = 100): readonly {
+    readonly messageRef: AgentTeamMessageRef
+    readonly threadRef: AgentTeamThreadRef
+    readonly channelRef: AgentTeamChannelRef
+    readonly taskRef?: AgentTeamTaskRef
+    readonly body: string
+    readonly sequence: number
+    readonly occurredAt: string
+  }[] {
+    const entries: { readonly messageRef: AgentTeamMessageRef; readonly threadRef: AgentTeamThreadRef; readonly channelRef: AgentTeamChannelRef; readonly taskRef?: AgentTeamTaskRef; readonly body: string; readonly sequence: number; readonly occurredAt: string }[] = []
+    for (let index = this.state.orderedFacts.length - 1; index >= 0 && entries.length < limit; index -= 1) {
+      const fact = this.state.orderedFacts[index]!
+      if (fact.kind !== 'message') continue
+      const message = fact.message
+      if (!message.topLevel || message.sender !== AGENT_TEAM_ASSISTANT_MEMBER_ID) continue
+      const channel = this.state.channels.get(message.channelRef)
+      if (channel === undefined || channel.workspaceId !== workspaceId || channel.state !== 'active') continue
+      entries.push(Object.freeze({
+        messageRef: message.messageRef, threadRef: message.threadRef, channelRef: message.channelRef,
+        ...(message.taskRef === undefined ? {} : { taskRef: message.taskRef }),
+        body: message.body, sequence: message.sequence, occurredAt: message.occurredAt ?? '',
+      }))
+    }
+    return Object.freeze(entries)
+  }
+
+  /**
    * Human correction of one Human-sent Message. The Message identity never
    * moves; the body is replaced and every mentioned Member who already read
    * the old body gets a fresh direct marker, so the corrected instruction is
@@ -2149,6 +2314,14 @@ export class AgentTeamLedger {
       if (deferred !== undefined) return this.resolved(deferred)
       if (task.resolution !== 'open') throw new Error(`Task '${task.taskRef}' is ${task.status}; reopen it before changing Claims`)
       if (actor.kind !== 'member') throw new Error('Human cannot change an Agent Claim')
+      // Queue occupancy: an assigned Task routes to its queued Member. Another
+      // Member taking it would defeat the routing decision, so only the
+      // queue's owner (or a task queued to nobody) may claim.
+      const queueOwner = this.state.queueByTask.get(task.taskRef)
+      if (request.action === 'claim' && queueOwner !== undefined && queueOwner !== actor.memberId) {
+        const owner = this.requireMember(queueOwner)
+        throw new Error(`Task '${task.taskRef}' is queued for @${owner.handle}; only the queued Member can claim it`)
+      }
       let claim: AgentTeamClaim
       let kind: AgentTeamClaimChangedOperation['kind']
       let activityKind: AgentTeamClaimActivity['kind']
@@ -2334,6 +2507,169 @@ export class AgentTeamLedger {
       return committedAny
         ? this.committed(Object.freeze({ outcomes: Object.freeze(outcomes) }))
         : this.resolved(Object.freeze({ outcomes: Object.freeze(outcomes) }))
+    })
+  }
+
+  /**
+   * Queue open Tasks onto one Member's private task queue: append, or insert
+   * at an explicit position when the Human or Leader ranks the work. Queue
+   * authority is Human-or-Leader; the target Member itself has no queue write.
+   * Occupancy follows from the assignment: once a Task is queued, only its
+   * queued Member may claim it.
+   */
+  queueAssign(request: AgentTeamAuthorizedQueueAssignRequest): Promise<AgentTeamLedgerResult<AgentTeamQueueResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameQueueAssign(existing, request)
+        return this.resolved(this.queueResult(existing))
+      }
+      this.assertQueueActor(request.actor, request.workspaceId)
+      const member = this.requireQueueMember(request.memberId, request.workspaceId)
+      if (request.items.length === 0) throw new Error('queue assignment must carry at least one Task')
+      if (request.items.length > MAX_QUEUE_ASSIGN_ITEMS) throw new Error(`queue assignment carries at most ${MAX_QUEUE_ASSIGN_ITEMS} Tasks per request`)
+      const key = memberQueueKey(member.memberId, request.workspaceId)
+      const queue = this.state.queues.get(key) ?? []
+      if (request.atIndex !== undefined && (!Number.isInteger(request.atIndex) || request.atIndex < 0)) {
+        throw new Error('queue atIndex must be a non-negative integer position')
+      }
+      if (request.atIndex !== undefined && request.atIndex > queue.length) {
+        throw new Error(`queue atIndex ${request.atIndex} is past the end of the ${queue.length}-entry queue`)
+      }
+      if (queue.length + request.items.length > MAX_QUEUE_ENTRIES) {
+        throw new Error(`queueing ${request.items.length} more Tasks would exceed the ${MAX_QUEUE_ENTRIES}-entry queue limit for '${member.handle}'`)
+      }
+      const seen = new Set<string>()
+      for (const item of request.items) {
+        if (seen.has(item.taskRef)) throw new Error(`Task '${item.taskRef}' appears twice in one assignment`)
+        seen.add(item.taskRef)
+        const task = this.state.tasks.get(this.requireRefKey(this.state.tasks, item.taskRef, 'task', 'Task'))
+        if (task === undefined) throw new Error(`unknown Task '${item.taskRef}'`)
+        if (this.workspaceOfTask(task) !== request.workspaceId) throw new Error(`Task '${item.taskRef}' does not live in Workspace '${request.workspaceId}'`)
+        if (task.resolution !== 'open' || this.deriveResolvedTaskStatus(task, this.state.claims.values()) !== 'todo') {
+          throw new Error(`Task '${item.taskRef}' is ${this.deriveResolvedTaskStatus(task, this.state.claims.values())}; only open todo Tasks can be queued`)
+        }
+        const queuedFor = this.state.queueByTask.get(task.taskRef)
+        if (queuedFor !== undefined) {
+          throw new Error(`Task '${item.taskRef}' is already queued for '${this.requireMember(queuedFor).handle}'`)
+        }
+        if (!this.isChannelMember(task.channelRef, member.memberId)) {
+          throw new Error(`Member '${member.handle}' has not joined Channel '${task.channelRef}', so it cannot read or claim '${item.taskRef}'`)
+        }
+        if (item.note !== undefined && (item.note.trim() === '' || item.note.trim().length > QUEUE_NOTE_MAX_CHARS)) {
+          throw new Error(`queue note must be non-empty and at most ${QUEUE_NOTE_MAX_CHARS} characters`)
+        }
+      }
+      const base = this.operationBase(request, this.nextSequence())
+      const entries = request.items.map(item => Object.freeze({
+        entryRef: this.ref('entry'),
+        taskRef: item.taskRef,
+        ...(item.note === undefined ? {} : { note: item.note.trim() }),
+        addedBy: request.actor.memberId,
+        addedAt: base.occurredAt,
+      })) as AgentTeamQueueEntry[]
+      const operation: AgentTeamQueueAssignedOperation = Object.freeze({
+        ...base, kind: 'team/queue-assigned',
+        data: Object.freeze({
+          workspaceId: request.workspaceId, memberId: member.memberId, entries: Object.freeze(entries),
+          ...(request.atIndex === undefined ? {} : { atIndex: request.atIndex }),
+        }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.queueResult(operation))
+    })
+  }
+
+  /**
+   * Amend one Member's queue in place: remove a pending entry, retune one
+   * entry's note, or reorder the whole queue. Removal and reordering touch
+   * pending entries only — a claimed or handed-off entry is the Task
+   * lifecycle's to retire, not the queue's.
+   */
+  queueAmend(request: AgentTeamAuthorizedQueueAmendRequest): Promise<AgentTeamLedgerResult<AgentTeamQueueResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameQueueAmend(existing, request)
+        return this.resolved(this.queueResult(existing))
+      }
+      this.assertQueueActor(request.actor, request.workspaceId)
+      const member = this.requireQueueMember(request.memberId, request.workspaceId)
+      const key = memberQueueKey(member.memberId, request.workspaceId)
+      const queue = this.state.queues.get(key)
+      if (queue === undefined || queue.length === 0) throw new Error(`Member '${member.handle}' holds no task queue here`)
+      if (request.action === 'remove') {
+        if (request.entryRef === undefined) throw new Error('queue remove requires the entry to remove')
+        const entry = this.requireQueueEntry(queue, request.entryRef)
+        if (this.queueEntryStanding(entry) !== 'pending') throw new Error(`queue entry '${entry.entryRef}' is already started; release or resolve its Task first`)
+      } else if (request.action === 'modify') {
+        if (request.entryRef === undefined) throw new Error('queue modify requires the entry to retune')
+        this.requireQueueEntry(queue, request.entryRef)
+        if (request.note !== undefined && (request.note.trim() === '' || request.note.trim().length > QUEUE_NOTE_MAX_CHARS)) {
+          throw new Error(`queue note must be non-empty and at most ${QUEUE_NOTE_MAX_CHARS} characters`)
+        }
+      } else {
+        if (request.order === undefined) throw new Error('queue reorder requires the full new order')
+        if (request.order.length !== queue.length
+          || new Set(request.order).size !== queue.length
+          || !queue.every(entry => request.order!.includes(entry.entryRef))) {
+          throw new Error('queue reorder must be a permutation of the queue\'s current entries')
+        }
+      }
+      const operation: AgentTeamQueueAmendedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/queue-amended',
+        data: Object.freeze({
+          workspaceId: request.workspaceId, memberId: member.memberId, action: request.action,
+          ...(request.entryRef === undefined ? {} : { entryRef: request.entryRef }),
+          ...(request.action === 'modify' ? { note: request.note?.trim() } : {}),
+          ...(request.order === undefined ? {} : { order: Object.freeze(request.order) }),
+        }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.queueResult(operation))
+    })
+  }
+
+  /**
+   * Move one pending queue entry from one Member's queue to another's in one
+   * atomic operation — the Human reassignment path. Both members must be able
+   * to serve the Task: the target joins the Task's Channel or the move
+   * refuses, so a queue entry never routes work its Member cannot read.
+   */
+  queueReassign(request: AgentTeamAuthorizedQueueReassignRequest): Promise<AgentTeamLedgerResult<AgentTeamQueueReassignResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameQueueReassign(existing, request)
+        return this.resolved(this.queueReassignResult(existing))
+      }
+      this.assertQueueActor(request.actor, request.workspaceId)
+      if (request.fromMemberId === request.toMemberId) throw new Error('queue reassignment needs two different Members')
+      const from = this.requireQueueMember(request.fromMemberId, request.workspaceId)
+      const to = this.requireQueueMember(request.toMemberId, request.workspaceId)
+      const fromQueue = this.state.queues.get(memberQueueKey(from.memberId, request.workspaceId))
+      if (fromQueue === undefined) throw new Error(`Member '${from.handle}' holds no task queue here`)
+      const entry = this.requireQueueEntry(fromQueue, request.entryRef)
+      if (this.queueEntryStanding(entry) !== 'pending') {
+        throw new Error(`queue entry '${entry.entryRef}' is already started; release or resolve its Task before reassigning`)
+      }
+      const task = this.state.tasks.get(this.requireRefKey(this.state.tasks, entry.taskRef, 'task', 'Task'))!
+      if (!this.isChannelMember(task.channelRef, to.memberId)) {
+        throw new Error(`Member '${to.handle}' has not joined Channel '${task.channelRef}', so it cannot read or claim '${entry.taskRef}'`)
+      }
+      const toQueue = this.state.queues.get(memberQueueKey(to.memberId, request.workspaceId)) ?? []
+      if (toQueue.length + 1 > MAX_QUEUE_ENTRIES) {
+        throw new Error(`queueing one more Task would exceed the ${MAX_QUEUE_ENTRIES}-entry queue limit for '${to.handle}'`)
+      }
+      const operation: AgentTeamQueueReassignedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/queue-reassigned',
+        data: Object.freeze({ workspaceId: request.workspaceId, entry, fromMemberId: from.memberId, toMemberId: to.memberId }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.queueReassignResult(operation))
     })
   }
 
@@ -3324,6 +3660,16 @@ export class AgentTeamLedger {
     return this.state.tasks.get(taskRef)
   }
 
+  /** One Task's Workspace ordinal — the display number the queue notices name. */
+  taskNumberOf(taskRef: AgentTeamTaskRef, workspaceId: WorkspaceId): number {
+    return this.taskNumbers(workspaceId).get(taskRef) ?? 0
+  }
+
+  /** The Member whose queue holds one Task, or undefined when it is queued nowhere — the occupancy read behind the advance gate. */
+  queueOwnerOf(taskRef: AgentTeamTaskRef): AgentTeamMemberId | undefined {
+    return this.state.queueByTask.get(taskRef)
+  }
+
   getClaim(claimRef: AgentTeamClaimRef): AgentTeamClaim | undefined {
     return this.state.claims.get(claimRef)
   }
@@ -3389,47 +3735,18 @@ export class AgentTeamLedger {
   }
 
   /**
-   * The per-Member working-queue projection: one queue per visible Agent
-   * Member of the Workspace. 「Current」 is the Tasks the Member holds a live
-   * Claim on (active or done — a finished Claim still awaits Human
-   * acceptance, so the work stays its until the Task resolves); 「queued」 is
-   * the unclaimed `todo` Tasks in Channels the Member has joined, which is
-   * exactly what it could claim next. Rows are the Task-list rows, so the
-   * Client renders one grammar on both surfaces.
+   * The per-Member private task-queue projection: one queue per visible Agent
+   * Member of the Workspace. Each queue is the Member's durable ordered
+   * todo-list (index 0 = next), every entry carrying its Task row and the
+   * execution standing derived from the Task's own Claims — the queue keeps
+   * no second state. Entries whose Task resolved leave the projection.
    */
   memberTasksForWorkspace(request: AgentTeamMemberTasksRequest): AgentTeamMemberTasks {
-    const numbers = this.taskNumbers(request.workspaceId)
-    const rowsByTaskRef = new Map([...this.state.tasks.values()]
-      .filter(task => this.workspaceOfTask(task) === request.workspaceId)
-      .map(task => [task.taskRef, this.taskRowFor(task, numbers)]))
-    // Live Claims by owner: active Claims name work in flight, done Claims
-    // name finished directions whose Task still awaits acceptance.
-    const currentByMember = new Map<AgentTeamMemberId, AgentTeamTaskRow[]>()
-    for (const claim of this.state.claims.values()) {
-      if (claim.state === 'released') continue
-      const row = rowsByTaskRef.get(claim.taskRef)
-      if (row === undefined || !isOpenTaskStatus(row.status)) continue
-      const bucket = currentByMember.get(claim.owner)
-      if (bucket === undefined) currentByMember.set(claim.owner, [row])
-      else if (!bucket.some(existing => existing.taskRef === row.taskRef)) bucket.push(row)
-    }
-    // Unclaimed Tasks per Channel, so a Member's queue reads its joined
-    // Channels only — work it could not claim is not its queue.
-    const queuedByChannel = new Map<AgentTeamChannelRef, AgentTeamTaskRow[]>()
-    for (const row of rowsByTaskRef.values()) {
-      if (row.status !== 'todo') continue
-      const bucket = queuedByChannel.get(row.channelRef)
-      if (bucket === undefined) queuedByChannel.set(row.channelRef, [row])
-      else bucket.push(row)
-    }
     const queues: AgentTeamMemberTaskQueue[] = []
     for (const member of this.state.members.values()) {
       if (member.state === 'inactive' || member.state === 'archived') continue
       if (!this.participatesIn(member.memberId, request.workspaceId)) continue
-      const current = (currentByMember.get(member.memberId) ?? [])
-        .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt))
-      const queued = (this.channelsForMember(member.memberId, request.workspaceId) ?? []).flatMap(channelRef => queuedByChannel.get(channelRef) ?? [])
-      queues.push(Object.freeze({ memberId: member.memberId, current: Object.freeze(current), queued: Object.freeze(queued) }))
+      queues.push(Object.freeze({ memberId: member.memberId, entries: this.queueItemsFor(member.memberId, request.workspaceId) }))
     }
     queues.sort((left, right) => left.memberId.localeCompare(right.memberId))
     const initialization = this.initialization()
@@ -3444,6 +3761,32 @@ export class AgentTeamLedger {
    * remind stopped Agents about, so the watcher and the Human Task list
    * intentionally disagree about that one status.
    */
+  /**
+   * The next pending queue entry for one Member, in execution order — the
+   * advance read behind the Host's automatic queue wakes. `skipTaskRef`
+   * passes over one Task (the entry a Member just released, which returned to
+   * `pending` but must not be re-prompted in the same breath); a resolved or
+   * hidden Task's entry cannot appear here because apply already dropped it.
+   */
+  nextQueueEntryForMember(memberId: AgentTeamMemberId, workspaceId: WorkspaceId, skipTaskRef?: AgentTeamTaskRef): { readonly taskRef: AgentTeamTaskRef; readonly taskNumber: number; readonly subject: string; readonly note?: string } | undefined {
+    const queue = this.state.queues.get(memberQueueKey(memberId, workspaceId))
+    if (queue === undefined) return undefined
+    const numbers = this.taskNumbers(workspaceId)
+    for (const entry of queue) {
+      if (entry.taskRef === skipTaskRef) continue
+      if (this.queueEntryStanding(entry) !== 'pending') continue
+      const task = this.state.tasks.get(entry.taskRef)
+      if (task === undefined) continue
+      return Object.freeze({
+        taskRef: entry.taskRef,
+        taskNumber: numbers.get(entry.taskRef) ?? 0,
+        subject: boundedAnchorPreview(this.threadAnchor(task.threadRef)),
+        ...(entry.note === undefined ? {} : { note: entry.note }),
+      })
+    }
+    return undefined
+  }
+
   incompleteTasksForWatch(): readonly (AgentTeamTaskRow & { readonly workspaceId: WorkspaceId })[] {
     return [...this.state.tasks.values()].flatMap(task => {
       const workspaceId = this.workspaceOfTask(task)
@@ -3747,6 +4090,12 @@ export class AgentTeamLedger {
       case 'team/claim-released':
       case 'team/task-changed':
         return [{ kind: 'channel', channelRef: operation.data.task.channelRef }, { kind: 'thread', threadRef: operation.data.thread.threadRef }]
+      case 'team/queue-assigned':
+      case 'team/queue-amended':
+      case 'team/queue-reassigned':
+        // A queue is Workspace-scoped coordination state: the Agents panel's
+        // queue dialog is what refetches it, and no Thread projection moves.
+        return [{ kind: 'workspace', workspaceId: operation.data.workspaceId }]
       case 'team/thread-attention-changed':
         return [{ kind: 'thread', threadRef: operation.data.thread.threadRef }]
       case 'team/thread-read':
@@ -3856,6 +4205,9 @@ export class AgentTeamLedger {
       case 'team/member-interrupt-resolved':
       case 'team/member-watch-started':
       case 'team/member-watch-stopped':
+      case 'team/queue-assigned':
+      case 'team/queue-amended':
+      case 'team/queue-reassigned':
         return []
       default:
         return assertUnhandledKind(operation)
@@ -4449,6 +4801,96 @@ export class AgentTeamLedger {
       }
       return
     }
+    if (operation.kind === 'team/queue-assigned' || operation.kind === 'team/queue-amended' || operation.kind === 'team/queue-reassigned') {
+      // Queue authority mirrors the commit rule: the Human, or a Leader Member.
+      // The target is always an enabled Agent Member of the Workspace — never
+      // the Human or the Team Assistant.
+      if (operation.actor.kind === 'human') assertHuman()
+      else if (assertMember().leader !== true) throw new Error(`agent-team operation ${operation.sequence} requires Human or Leader queue authority`)
+      const validQueueMember = (memberId: AgentTeamMemberId): void => {
+        if (memberId === humanMemberId || memberId === AGENT_TEAM_ASSISTANT_MEMBER_ID) throw new Error('invalid queue member')
+        const member = projection.members.get(memberId)
+        if (member === undefined || member.state !== 'enabled' || !this.participatesInFrom(projection, memberId, operation.data.workspaceId)) {
+          throw new Error('invalid queue member')
+        }
+      }
+      // The standing rule replay re-derives: only a Task with no Claims is
+      // queue-mutable, exactly like the commit path's `queueEntryStanding`.
+      const queueStandingOf = (entry: AgentTeamQueueEntry): 'pending' | 'working' | 'awaiting' => {
+        const task = projection.tasks.get(entry.taskRef)
+        if (task === undefined) return 'pending'
+        const status = this.deriveTaskStatus(entry.taskRef, projection.claims.values())
+        if (task.resolution !== 'open') return 'pending'
+        return status === 'in_progress' ? 'working' : status === 'in_review' ? 'awaiting' : 'pending'
+      }
+      const noteOk = (note: string | undefined): boolean =>
+        note === undefined || (note !== '' && note === note.trim() && note.length <= QUEUE_NOTE_MAX_CHARS)
+      if (operation.kind === 'team/queue-assigned') {
+        validQueueMember(operation.data.memberId)
+        const { entries, atIndex } = operation.data
+        if (entries.length === 0 || entries.length > MAX_QUEUE_ASSIGN_ITEMS) throw new Error('invalid queue assignment size')
+        const key = memberQueueKey(operation.data.memberId, operation.data.workspaceId)
+        const queue = projection.queues.get(key) ?? []
+        if (atIndex !== undefined && (!Number.isInteger(atIndex) || atIndex < 0 || atIndex > queue.length)) throw new Error('invalid queue insert position')
+        if (queue.length + entries.length > MAX_QUEUE_ENTRIES) throw new Error('invalid queue assignment size')
+        const seenTasks = new Set<string>()
+        for (const entry of entries) {
+          if (entry.addedBy !== operation.actor.memberId || entry.addedAt !== operation.occurredAt || !noteOk(entry.note)) {
+            throw new Error('invalid queue entry stamping')
+          }
+          if (seenTasks.has(entry.taskRef)) throw new Error('invalid queue assignment Task set')
+          seenTasks.add(entry.taskRef)
+          this.addRef(refs, entry.entryRef)
+          const task = projection.tasks.get(entry.taskRef)
+          if (task === undefined || task.resolution !== 'open'
+            || this.deriveTaskStatus(entry.taskRef, projection.claims.values()) !== 'todo') {
+            throw new Error('invalid queue assignment Task')
+          }
+          const channel = projection.channels.get(task.channelRef)
+          if (channel === undefined || channel.workspaceId !== operation.data.workspaceId || channel.state === 'archived'
+            || !this.isChannelMemberFrom(projection, task.channelRef, operation.data.memberId)) {
+            throw new Error('invalid queue assignment Channel authority')
+          }
+          if (projection.queueByTask.has(entry.taskRef)) throw new Error('invalid queue assignment occupancy')
+        }
+        return
+      }
+      if (operation.kind === 'team/queue-amended') {
+        validQueueMember(operation.data.memberId)
+        const queue = projection.queues.get(memberQueueKey(operation.data.memberId, operation.data.workspaceId))
+        if (queue === undefined || queue.length === 0) throw new Error('invalid queue amend target')
+        if (operation.data.action === 'remove') {
+          const entry = queue.find(candidate => candidate.entryRef === operation.data.entryRef)
+          if (entry === undefined || queueStandingOf(entry) !== 'pending') throw new Error('invalid queue remove')
+        } else if (operation.data.action === 'modify') {
+          const entry = queue.find(candidate => candidate.entryRef === operation.data.entryRef)
+          if (entry === undefined || !noteOk(operation.data.note)) throw new Error('invalid queue modify')
+        } else {
+          const order = operation.data.order
+          if (order === undefined || order.length !== queue.length || new Set(order).size !== queue.length
+            || !queue.every(entry => order.includes(entry.entryRef))) throw new Error('invalid queue reorder')
+        }
+        return
+      }
+      validQueueMember(operation.data.fromMemberId)
+      validQueueMember(operation.data.toMemberId)
+      if (operation.data.fromMemberId === operation.data.toMemberId) throw new Error('invalid queue reassignment pair')
+      const fromQueue = projection.queues.get(memberQueueKey(operation.data.fromMemberId, operation.data.workspaceId))
+      const entry = fromQueue?.find(candidate => candidate.entryRef === operation.data.entry.entryRef)
+      const recorded = operation.data.entry
+      if (entry === undefined || entry.taskRef !== recorded.taskRef || entry.note !== recorded.note
+        || entry.addedBy !== recorded.addedBy || entry.addedAt !== recorded.addedAt
+        || queueStandingOf(entry) !== 'pending') {
+        throw new Error('invalid queue reassignment entry')
+      }
+      const task = projection.tasks.get(recorded.taskRef)
+      if (task === undefined || !this.isChannelMemberFrom(projection, task.channelRef, operation.data.toMemberId)) {
+        throw new Error('invalid queue reassignment Channel authority')
+      }
+      const toQueue = projection.queues.get(memberQueueKey(operation.data.toMemberId, operation.data.workspaceId)) ?? []
+      if (toQueue.length + 1 > MAX_QUEUE_ENTRIES) throw new Error('invalid queue reassignment capacity')
+      return
+    }
     assertUnhandledKind(operation)
   }
 
@@ -4838,6 +5280,7 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/channel-member-removed') {
       target.memberships.get(operation.data.channelRef)?.delete(operation.data.memberId)
+      this.dropQueueEntriesForChannel(target, operation.data.memberId, operation.data.channelRef)
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
     }
@@ -4854,6 +5297,7 @@ export class AgentTeamLedger {
       for (const channel of target.channels.values()) {
         if (channel.workspaceId === operation.data.workspaceId) target.memberships.get(channel.channelRef)?.delete(operation.data.memberId)
       }
+      this.dropMemberQueue(target, operation.data.memberId, operation.data.workspaceId)
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
     }
@@ -4862,6 +5306,7 @@ export class AgentTeamLedger {
       // restore returns every Member to the Channel. Visibility filters by
       // channel state instead.
       target.channels.set(operation.data.channel.channelRef, operation.data.channel)
+      this.dropQueuesForArchivedChannel(target, operation.data.channel.channelRef)
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
     }
@@ -4869,6 +5314,7 @@ export class AgentTeamLedger {
       target.members.set(operation.data.member.memberId, operation.data.member)
       for (const membership of target.memberships.values()) membership.delete(operation.data.member.memberId)
       this.retireWatchesFor(target, operation.data.member.memberId)
+      this.dropAllMemberQueues(target, operation.data.member.memberId)
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
     }
@@ -4878,8 +5324,11 @@ export class AgentTeamLedger {
       // member state instead. The watch is not membership though: an archived
       // Member leaves the enabled set its watch demanded, so its standing
       // watches retire here and a restored Member is re-watched explicitly.
+      // The queue is not membership either: an archived Member holds no
+      // pending work, and a restored Member is re-assigned explicitly.
       target.members.set(operation.data.member.memberId, operation.data.member)
       this.retireWatchesFor(target, operation.data.member.memberId)
+      this.dropAllMemberQueues(target, operation.data.member.memberId)
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
     }
@@ -4942,6 +5391,8 @@ export class AgentTeamLedger {
       this.appendActivityFact(target, operation.data.activity, operation.occurredAt)
       target.tasks.set(operation.data.task.taskRef, operation.data.task)
       target.threads.set(operation.data.thread.threadRef, operation.data.thread)
+      // A Task that leaves open standing leaves its queue entries with it.
+      if (operation.data.task.resolution !== 'open') this.dropQueueEntriesForTask(target, operation.data.task.taskRef)
       this.recordAttentionObservations(target, operation, operation.data.inbox)
       this.applyInboxDelta(target, operation.data.inbox)
       return
@@ -4974,6 +5425,59 @@ export class AgentTeamLedger {
       target.watchByPair.delete(memberWatchPairKey(watch.leaderMemberId, watch.memberId, watch.workspaceId))
       return
     }
+    if (operation.kind === 'team/queue-assigned') {
+      const key = memberQueueKey(operation.data.memberId, operation.data.workspaceId)
+      const queue = target.queues.get(key) ?? []
+      const at = Math.min(operation.data.atIndex ?? queue.length, queue.length)
+      queue.splice(at, 0, ...operation.data.entries)
+      target.queues.set(key, queue)
+      for (const entry of operation.data.entries) target.queueByTask.set(entry.taskRef, operation.data.memberId)
+      return
+    }
+    if (operation.kind === 'team/queue-amended') {
+      const key = memberQueueKey(operation.data.memberId, operation.data.workspaceId)
+      const queue = target.queues.get(key)
+      if (queue === undefined) return
+      if (operation.data.action === 'remove') {
+        const index = queue.findIndex(entry => entry.entryRef === operation.data.entryRef)
+        if (index >= 0) {
+          const [removed] = queue.splice(index, 1)
+          if (removed !== undefined && !queue.some(remaining => remaining.taskRef === removed.taskRef)) target.queueByTask.delete(removed.taskRef)
+        }
+        return
+      }
+      if (operation.data.action === 'modify') {
+        const entry = queue.find(candidate => candidate.entryRef === operation.data.entryRef)
+        if (entry !== undefined) {
+          const next = Object.freeze({ ...entry, note: operation.data.note })
+          queue.splice(queue.indexOf(entry), 1, next)
+        }
+        return
+      }
+      // Reorder: the operation carries the full new order, so replaying in
+      // ledger sequence reproduces it regardless of how prior applies left
+      // the array.
+      const order = operation.data.order ?? []
+      const byRef = new Map(queue.map(entry => [entry.entryRef, entry] as const))
+      const reordered = order.map(entryRef => byRef.get(entryRef)).filter(entry => entry !== undefined)
+      for (const entry of queue) if (!order.includes(entry.entryRef)) reordered.push(entry)
+      target.queues.set(key, reordered)
+      return
+    }
+    if (operation.kind === 'team/queue-reassigned') {
+      const { entry, fromMemberId, toMemberId, workspaceId } = operation.data
+      const fromQueue = target.queues.get(memberQueueKey(fromMemberId, workspaceId))
+      if (fromQueue !== undefined) {
+        const index = fromQueue.findIndex(candidate => candidate.entryRef === entry.entryRef)
+        if (index >= 0) fromQueue.splice(index, 1)
+      }
+      const toKey = memberQueueKey(toMemberId, workspaceId)
+      const toQueue = target.queues.get(toKey) ?? []
+      toQueue.push(entry)
+      target.queues.set(toKey, toQueue)
+      target.queueByTask.set(entry.taskRef, toMemberId)
+      return
+    }
     assertUnhandledKind(operation)
   }
 
@@ -4990,6 +5494,65 @@ export class AgentTeamLedger {
       if (watch.leaderMemberId !== memberId && watch.memberId !== memberId) continue
       target.watches.delete(watchRef)
       target.watchByPair.delete(memberWatchPairKey(watch.leaderMemberId, watch.memberId, watch.workspaceId))
+    }
+  }
+
+  /**
+   * Drop every queue entry referencing one Task. A resolved Task leaves no
+   * queue entry behind it — the queue holds pending work only, and the Task's
+   * own lifecycle is the sole authority on when that ends. Projection-side
+   * like watch retirement, never a second durable operation.
+   */
+  private dropQueueEntriesForTask(target: Projection, taskRef: AgentTeamTaskRef): void {
+    for (const [key, queue] of [...target.queues]) {
+      if (!queue.some(entry => entry.taskRef === taskRef)) continue
+      const next = queue.filter(entry => entry.taskRef !== taskRef)
+      if (next.length === 0) target.queues.delete(key)
+      else target.queues.set(key, next)
+      target.queueByTask.delete(taskRef)
+    }
+  }
+
+  /** Drop one Member's queue entries whose Task lives in one Channel — the Member lost the authority to read or claim that work. */
+  private dropQueueEntriesForChannel(target: Projection, memberId: AgentTeamMemberId, channelRef: AgentTeamChannelRef): void {
+    for (const key of [...target.queues.keys()]) {
+      if (!key.startsWith(`${memberId}\u0000`)) continue
+      const queue = target.queues.get(key)!
+      const next = queue.filter(entry => target.tasks.get(entry.taskRef)?.channelRef !== channelRef)
+      if (next.length === queue.length) continue
+      for (const entry of queue) {
+        if (!next.some(remaining => remaining.taskRef === entry.taskRef) && target.queueByTask.get(entry.taskRef) === memberId) {
+          target.queueByTask.delete(entry.taskRef)
+        }
+      }
+      if (next.length === 0) target.queues.delete(key)
+      else target.queues.set(key, next)
+    }
+  }
+
+  /** Drop one Member's whole queue for one Workspace — the Member withdrew its participation there. */
+  private dropMemberQueue(target: Projection, memberId: AgentTeamMemberId, workspaceId: WorkspaceId): void {
+    const key = memberQueueKey(memberId, workspaceId)
+    const queue = target.queues.get(key)
+    if (queue === undefined) return
+    for (const entry of queue) {
+      if (target.queueByTask.get(entry.taskRef) === memberId) target.queueByTask.delete(entry.taskRef)
+    }
+    target.queues.delete(key)
+  }
+
+  /** Drop every queue slot one Member holds: an archived or removed Member holds no pending work. */
+  private dropAllMemberQueues(target: Projection, memberId: AgentTeamMemberId): void {
+    for (const key of [...target.queues.keys()]) {
+      if (!key.startsWith(`${memberId}\u0000`)) continue
+      this.dropMemberQueue(target, memberId, key.slice(memberId.length + 1) as WorkspaceId)
+    }
+  }
+
+  /** Drop every Member's queue entries whose Task lives in one Channel (archival hides the work from every surface). */
+  private dropQueuesForArchivedChannel(target: Projection, channelRef: AgentTeamChannelRef): void {
+    for (const memberId of new Set([...target.queueByTask.values()])) {
+      this.dropQueueEntriesForChannel(target, memberId, channelRef)
     }
   }
 
@@ -5998,6 +6561,49 @@ export class AgentTeamLedger {
     return member
   }
 
+  /** Queue authority: the Human, or a Leader Member participating in the Workspace. The Assistant never administers. */
+  private assertQueueActor(actor: AgentTeamHumanActor | AgentTeamMemberActor, workspaceId: WorkspaceId): void {
+    const authorized = this.assertActorForWorkspace(actor, workspaceId)
+    if (authorized.kind === 'member') {
+      const member = this.assertMemberActor(authorized)
+      if (member.leader !== true) {
+        throw new Error(`Agent Member '${member.handle}' is not the Leader; only the Human or the Leader manages Member queues`)
+      }
+    }
+  }
+
+  /** The queue's owner: an enabled Agent Member (never the Human or the Team Assistant) participating in the Workspace. */
+  private requireQueueMember(memberId: AgentTeamMemberId, workspaceId: WorkspaceId): AgentTeamAgentMember {
+    if (memberId === AGENT_TEAM_HUMAN_MEMBER_ID || memberId === AGENT_TEAM_ASSISTANT_MEMBER_ID) {
+      throw new Error('task queues belong to Agent Members only')
+    }
+    const member = this.requireMember(memberId)
+    if (member.state !== 'enabled') throw new Error(`Agent Member '${member.handle}' is ${member.state}; only enabled Members carry a task queue`)
+    if (!this.participatesIn(memberId, workspaceId)) throw new Error(`Agent Member '${member.handle}' does not participate in workspace '${workspaceId}'`)
+    return member
+  }
+
+  private requireQueueEntry(queue: readonly AgentTeamQueueEntry[], entryRef: AgentTeamQueueEntryRef): AgentTeamQueueEntry {
+    const entry = queue.find(candidate => candidate.entryRef === entryRef)
+    if (entry === undefined) throw new Error(`unknown queue entry '${entryRef}' for this Member's queue`)
+    return entry
+  }
+
+  /**
+   * The queue entry's execution standing, derived from the Task's own Claims —
+   * the queue keeps no second state machine. `pending` is the only standing a
+   * queue mutation may touch; `working` and `awaiting` retire through the Task
+   * lifecycle instead.
+   */
+  private queueEntryStanding(entry: AgentTeamQueueEntry): 'pending' | 'working' | 'awaiting' {
+    const task = this.state.tasks.get(entry.taskRef)
+    if (task === undefined) return 'pending'
+    const status = this.deriveResolvedTaskStatus(task, this.state.claims.values())
+    if (status === 'in_progress') return 'working'
+    if (status === 'in_review') return 'awaiting'
+    return 'pending'
+  }
+
   private requireMemberChannel(member: AgentTeamAgentMember, channelRef: AgentTeamChannelRef): void {
     if (!this.isChannelMember(channelRef, member.memberId)) throw new Error(`Agent Member '${member.memberId}' is not authorized for Channel '${channelRef}'`)
   }
@@ -6393,6 +6999,7 @@ export class AgentTeamLedger {
         throw new Error('member model schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member model schedule window start must not equal its end')
+      this.assertScheduleRecurrence(window.recurrence, 'member model schedule')
       this.assertModelSelection(window.selection)
     }
   }
@@ -6411,6 +7018,58 @@ export class AgentTeamLedger {
         throw new Error('member stop schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member stop schedule window start must not equal its end')
+      this.assertScheduleRecurrence(window.recurrence, 'member stop schedule')
+    }
+  }
+
+  /**
+   * Recurrence commit rule: each kind carries only the parameters its
+   * calendar rule needs, and every parameter must describe a day that can
+   * actually occur — a real `YYYY-MM-DD` anchor, distinct ISO weekdays, a
+   * monthly day in 1..31 (short months simply skip it), and a yearly
+   * month/day that exists in some year (02-29 is allowed; 02-30 is not).
+   * Absent stays valid and means every day.
+   */
+  private assertScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined, surface: string): void {
+    if (recurrence === undefined) return
+    switch (recurrence.kind) {
+      case 'daily':
+      case 'workdays':
+        return
+      case 'everyDays':
+        if (!Number.isInteger(recurrence.intervalDays) || recurrence.intervalDays < 1 || recurrence.intervalDays > 366) {
+          throw new Error(`${surface} recurrence intervalDays must be an integer from 1 to 366`)
+        }
+        if (parseAnchorDate(recurrence.anchorDate) === undefined) {
+          throw new Error(`${surface} recurrence anchorDate must be a real YYYY-MM-DD date`)
+        }
+        return
+      case 'weekly': {
+        if (recurrence.weekdays.length === 0) throw new Error(`${surface} recurrence must name at least one weekday`)
+        const seen = new Set<number>()
+        for (const weekday of recurrence.weekdays) {
+          if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) {
+            throw new Error(`${surface} recurrence weekdays must be ISO weekdays from 1 to 7`)
+          }
+          if (seen.has(weekday)) throw new Error(`${surface} recurrence weekdays must be distinct`)
+          seen.add(weekday)
+        }
+        return
+      }
+      case 'monthly':
+        if (!Number.isInteger(recurrence.dayOfMonth) || recurrence.dayOfMonth < 1 || recurrence.dayOfMonth > 31) {
+          throw new Error(`${surface} recurrence dayOfMonth must be an integer from 1 to 31`)
+        }
+        return
+      case 'yearly':
+        // A leap year is the permissive probe: 02-29 must be expressible,
+        // every other month/day pair must be a date some year has.
+        if (!isCalendarDate(2000, recurrence.month, recurrence.day)) {
+          throw new Error(`${surface} recurrence must name a real month and day`)
+        }
+        return
+      default:
+        throw new Error(`${surface} recurrence kind '${(recurrence as { kind?: unknown }).kind as string}' is not supported`)
     }
   }
 
@@ -6748,6 +7407,33 @@ export class AgentTeamLedger {
       || operation.data.baseRevision !== request.baseRevision || operation.data.activity.kind !== request.action) this.throwRequestCollision(request.requestId)
   }
 
+  private assertSameQueueAssign(operation: AgentTeamOperation, request: AgentTeamAuthorizedQueueAssignRequest): asserts operation is AgentTeamQueueAssignedOperation {
+    if (operation.kind !== 'team/queue-assigned' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.memberId !== request.memberId
+      || operation.data.entries.length !== request.items.length
+      || operation.data.entries.some((entry, index) => entry.taskRef !== request.items[index]?.taskRef)
+      || operation.data.atIndex !== request.atIndex) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameQueueAmend(operation: AgentTeamOperation, request: AgentTeamAuthorizedQueueAmendRequest): asserts operation is AgentTeamQueueAmendedOperation {
+    if (operation.kind !== 'team/queue-amended' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.memberId !== request.memberId
+      || operation.data.action !== request.action
+      || (request.entryRef !== undefined && operation.data.entryRef !== request.entryRef)
+      || (request.action === 'modify' && (operation.data.note ?? undefined) !== (request.note?.trim() ?? undefined))
+      || (request.action === 'reorder' && (operation.data.order?.join('\u0000') ?? '') !== (request.order?.join('\u0000') ?? ''))) {
+      this.throwRequestCollision(request.requestId)
+    }
+  }
+
+  private assertSameQueueReassign(operation: AgentTeamOperation, request: AgentTeamAuthorizedQueueReassignRequest): asserts operation is AgentTeamQueueReassignedOperation {
+    if (operation.kind !== 'team/queue-reassigned' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.entry.entryRef !== request.entryRef
+      || operation.data.fromMemberId !== request.fromMemberId || operation.data.toMemberId !== request.toMemberId) {
+      this.throwRequestCollision(request.requestId)
+    }
+  }
+
   private assertSameRemoval(operation: AgentTeamOperation, request: AgentTeamAuthorizedRemoveMemberRequest): asserts operation is AgentTeamMemberRemovedOperation {
     if (operation.kind !== 'team/member-removed' || !this.sameActor(operation.actor, request.actor)
       || operation.data.member.memberId !== request.memberId) this.throwRequestCollision(request.requestId)
@@ -6879,6 +7565,38 @@ export class AgentTeamLedger {
     return Object.freeze({ receipt: this.receipt(operation), channelRef: operation.data.channelRef, memberId: operation.data.memberId })
   }
 
+  /** One Member's queue as the Client and tools render it: projection items carrying Task rows and standings. */
+  private queueItemsFor(memberId: AgentTeamMemberId, workspaceId: WorkspaceId): readonly AgentTeamQueueEntryItem[] {
+    const queue = this.state.queues.get(memberQueueKey(memberId, workspaceId)) ?? []
+    const numbers = this.taskNumbers(workspaceId)
+    return Object.freeze(queue.map(entry => this.queueItemFor(entry, numbers)))
+  }
+
+  private queueItemFor(entry: AgentTeamQueueEntry, numbers: ReadonlyMap<AgentTeamTaskRef, number>): AgentTeamQueueEntryItem {
+    const task = this.state.tasks.get(entry.taskRef)
+    if (task === undefined) throw new Error(`queue entry '${entry.entryRef}' references missing Task '${entry.taskRef}'`)
+    return Object.freeze({
+      entryRef: entry.entryRef,
+      task: this.taskRowFor(task, numbers),
+      ...(entry.note === undefined ? {} : { note: entry.note }),
+      addedBy: entry.addedBy,
+      addedAt: entry.addedAt,
+      standing: this.queueEntryStanding(entry),
+    })
+  }
+
+  private queueResult(operation: AgentTeamQueueAssignedOperation | AgentTeamQueueAmendedOperation): Extract<AgentTeamQueueResult, { kind: 'committed' }> {
+    return Object.freeze({ kind: 'committed', receipt: this.receipt(operation), memberId: operation.data.memberId,
+      queue: this.queueItemsFor(operation.data.memberId, operation.data.workspaceId) })
+  }
+
+  private queueReassignResult(operation: AgentTeamQueueReassignedOperation): Extract<AgentTeamQueueReassignResult, { kind: 'committed' }> {
+    return Object.freeze({ kind: 'committed', receipt: this.receipt(operation),
+      entry: this.queueItemFor(operation.data.entry, this.taskNumbers(operation.data.workspaceId)),
+      fromMemberId: operation.data.fromMemberId, toMemberId: operation.data.toMemberId,
+      toQueue: this.queueItemsFor(operation.data.toMemberId, operation.data.workspaceId) })
+  }
+
   private channelMemberRemovalResult(operation: AgentTeamChannelMemberRemovedOperation): AgentTeamRemoveChannelMemberResult {
     return Object.freeze({ receipt: this.receipt(operation), channelRef: operation.data.channelRef, memberId: operation.data.memberId,
       releasedClaims: operation.data.claims, removedAttention: operation.data.inbox.attention.removed })
@@ -6981,10 +7699,11 @@ export class AgentTeamLedger {
   private ref(kind: 'task'): AgentTeamTaskRef
   private ref(kind: 'thread'): AgentTeamThreadRef
   private ref(kind: 'claim'): AgentTeamClaimRef
+  private ref(kind: 'entry'): AgentTeamQueueEntryRef
   private ref(kind: 'activity'): AgentTeamActivityRef
   private ref(kind: 'interrupt'): AgentTeamInterruptRef
   private ref(kind: 'watch'): AgentTeamMemberWatchRef
-  private ref(kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'activity' | 'interrupt' | 'watch') {
+  private ref(kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'entry' | 'activity' | 'interrupt' | 'watch') {
     return this.createRef(kind)
   }
 

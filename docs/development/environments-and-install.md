@@ -11,7 +11,7 @@ This applies to any fresh environment: a new clone **or a `git worktree`**. A wo
 
 **Setup, in order:**
 
-1. Enable the corepack shims with `corepack enable pnpm`, then clone `../deepseek-harness`, check out the latest certified release tag (currently `dsh-v0.2.2-rc.2`; advance it per certification), and run `corepack pnpm install` (one workspace-wide install) followed by `corepack pnpm build:lib` and `corepack pnpm build:native-system`. The shim is required because the certified Harness invokes a bare `pnpm` from inside its own scripts (`build:lib`, `build:web`), while `corepack pnpm` resolves only within its own process; without the shim those steps fail as `pnpm: not found`.
+1. Enable the corepack shims with `corepack enable pnpm`, then clone `../deepseek-harness`, check out the latest certified release tag (currently `dsh-v0.2.1-alpha.2`; advance it per certification), and run `corepack pnpm install` (one workspace-wide install) followed by `corepack pnpm build:lib` and `corepack pnpm build:native-system`. The shim is required because the certified Harness invokes a bare `pnpm` from inside its own scripts (`build:lib`, `build:web`), while `corepack pnpm` resolves only within its own process; without the shim those steps fail as `pnpm: not found`.
 
    Both repositories pin `pnpm@11.7.0` through `packageManager`, so the shim resolves to that version rather than whatever the environment preinstalled. The native step is a separate build that nothing else performs for us: the host addon is gitignored, the Harness `test` script builds it itself via `build:native-system` before its own Vitest run, and this repository runs Vitest directly against that checkout — so a fresh clone without it fails host Team activation (`Agent is not an active Team Member`) rather than reporting a missing module.
 
@@ -22,7 +22,7 @@ This applies to any fresh environment: a new clone **or a `git worktree`**. A wo
 
    The engine comes from wherever `scripts/continuity-dir.mjs` resolves it: a sibling `../dsh-context-continuity` checkout (development against an engine working tree, which must be built there first with `npm run build`) is linked into `node_modules`, while a clean checkout or CI uses the package the root `dependencies` installed from the registry and links nothing; `DSH_CONTEXT_CONTINUITY_DIR` points the resolution at another checkout.
 
-   Host tests resolve preset rows and the bundle's own unpublished rows (for example `@grantyuan/dsh-crew/member-context`) through real `node_modules` lookups from this repository root, exactly as a profile install of the published bundle would.
+   Host tests resolve preset rows and the bundle's own unpublished rows (for example `@wowyuarm/dsh-agent-team/member-context`) through real `node_modules` lookups from this repository root, exactly as a profile install of the published bundle would.
 5. Regenerate the TypeScript path facades against the fresh checkout with `node scripts/sync-paths.mjs`. A fresh clone must not trust the committed facades: no npm script rewrites them, and skipping this step leaves them pointing at the paths baked in at generation time — the read-only `check:facades` gate that `npm test` runs fails on exactly that mismatch. `sync-paths` also emits the `@deepseek-ai/dsh-client-locale/src/*` wildcard the test harness's locale-table import needs.
 6. Smoke-check with `npm run typecheck && npm test`. Green means the environment is right; mass false failures (see below) mean it is not — fix the environment before debugging the diff.
 
@@ -61,14 +61,14 @@ A tag advance that also moves the DSH peers must commit `pnpm-lock.yaml` in the 
 The published layout is the root bundle:
 
 ```sh
-dsh plugin --profile web add @grantyuan/dsh-crew
+dsh plugin --profile web add @wowyuarm/dsh-agent-team
 dsh web
 ```
 
 A local directory can be installed with:
 
 ```sh
-dsh plugin --profile web add /absolute/path/to/dsh-crew
+dsh plugin --profile web add /absolute/path/to/dsh-agent-team
 dsh web
 ```
 
@@ -90,7 +90,7 @@ Always verify the built publication layout. A source symlink can bypass profile 
 
 Stable and development profiles are intentionally separate:
 
-- **Stable (`--profile web`)** uses the npm release (`^0.1.x`), with the lockfile selecting the installed version. After a release, install the published version by exact number — `dsh plugin --profile web add @grantyuan/dsh-crew@X.Y.Z` — because a plain `update` can report "Already up to date" while the lockfile still pins the old resolution. See [`release-runbook.md`](../release-runbook.md) §6.
+- **Stable (`--profile web`)** uses the npm release (`^0.1.x`), with the lockfile selecting the installed version. After a release, install the published version by exact number — `dsh plugin --profile web add @wowyuarm/dsh-agent-team@X.Y.Z` — because a plain `update` can report "Already up to date" while the lockfile still pins the old resolution. See [`release-runbook.md`](../release-runbook.md) §6.
 - **Development (`--profile web-dev`)** uses a local `link:` checkout. Rebuild before restarting: the Host loads `packages/*/lib/`, so restarting without `npm run build` keeps old tools and behavior.
 
 The runtime must match the installation form. Published `dsh` runs the stable profile from built artifacts; checkout `pnpm dsh` runs source through tsx and paths and should only start a linked profile. Mixing them can create two module instances whose scope Symbols differ and can produce `selected preset is not team-enabled`.
@@ -99,7 +99,7 @@ Release cadence is batched. Between releases, daily use of a local build is a li
 
 Stable and development profiles share `$DSH_HOME/storages/`. If a stable old version reads a ledger written by a newer version, schema validation can fail; update the stable profile after each release.
 
-The minimum compatible DSH version is `0.2.2-rc.2`. DSH's JSONL Session persistence migrates released historical formats itself (v0/v1/v2 → V3 → V4); old-format Session data needs no manual disposal. Do not add Team ledger or Member Session migration, old-format reads, or silent fallbacks.
+The minimum compatible DSH version is `0.2.1-alpha.2`. DSH's JSONL Session persistence migrates released historical formats itself (v0/v1/v2 → V3 → V4); old-format Session data needs no manual disposal. Do not add Team ledger or Member Session migration, old-format reads, or silent fallbacks.
 
 ### Rewriting and pushing history
 

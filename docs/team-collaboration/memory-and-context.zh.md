@@ -31,6 +31,12 @@ pending-interrupt 栈是被打断工作的 durable 记忆：同一 append-only l
 
 提示词缓存纪律是同一机制的成本侧面：checkpoint-return 的 seed 就是源日志的精确前缀——含 node-zero 系统提示词、已注入 instructions 与工具历史——因此内容未变时 Harness 的重装配不提交任何新提示词文本。转换还会携带退役代的 model selection，使 route 变量跨 handoff 保持稳定。
 
+每个新 generation——重置（reset）、fresh rollover、崩溃恢复的 renewal、checkpoint return——还逐字节复用退役代的系统提示词，而不是重新装配：renewal 捕获退役代的头部提示词（其请求在第一条用户消息之前携带的全部内容），新 generation 将自己的装配冻结为这段字节（一个字面 carried section）。
+
+两次装配之间 plugin 与 MCP section 的漂移因此永远不会在首个请求上作废 provider 前缀缓存。checkpoint return 从 seed 前缀自身推导携带内容——与重放历史一致的那个时代。
+
+carried section 受保护、不可 drop，并在 Prompt 对话框中按模型实际所得呈现。冻结在任一提示词形态的实时编辑（tool policy、角色段落、section drops）时释放——Human 的编辑必须抵达模型；下一次 renewal 再捕获重建后的提示词，其后每个 generation 重归逐字节稳定。存储日志读不出头部提示词时降级为正常重建，绝不阻塞 activation。
+
 `fresh` rollover 同样保持注入面去重；Member 只在事实确实变化时重写 memory 索引或复述前缀已携带的内容。
 
 ## Agent notification boundary
@@ -42,7 +48,7 @@ Host 从 durable unread state 派生 Agent notifications，并通过 Agent publi
 
 Automatic context 最多包含 8 个 Inbox Threads、20 条详细 direct 或 Activity facts、每条 direct Message body 8 KiB、总计 32 KiB。省略内容仍由 `team_inbox` 与 `team_thread` 持久保存并可发现。成功的 Thread read 会同时消费相关 direct/Activity markers 和 ordinary read watermark。
 
-Host 发布的周期性通知（continuation check，以及只有记录过已废止广播的旧 ledger 仍会携带的 context-reset Channel 公告）每次投递都重述完整现状，比同类最新一条更早的 unread 实例不携带新信息：automatic context 只完整渲染每组最新一条，被取代的旧实例折叠为一行摘要并腾出其配额，不再把重复的历史灌入被重置或被唤醒的 Agent；这些 Messages 仍完整留在 durable Inbox。
+Host 发布的周期性通知（continuation check，完成联络员的 report check（按被查 Member 分组），以及只有记录过已废止广播的旧 ledger 仍会携带的 context-reset Channel 公告）每次投递都重述完整现状，比所在组最新一条更早的 unread 实例不携带新信息：automatic context 只完整渲染每组最新一条，被取代的旧实例折叠为一行摘要并腾出其配额，不再把重复的历史灌入被重置或被唤醒的 Agent；这些 Messages 仍完整留在 durable Inbox。
 
 Pending hints 按 Member 合并。Consumed 或 ignored hint 不会再触发 turn，直到后续相关 durable change、resume 或 runtime-error recovery 重置 notification state。Restart/resume 使用同一 durable Inbox check，因此 transient Session queues 不是 authority。这是 at-least-once notification intent，不是 exactly-once model processing；Agent 可能忽略、失败或重复 Team read operation。
 

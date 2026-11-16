@@ -73,7 +73,7 @@ export interface AgentTeamQueueEntry {
 | `team/queue-amended` | `remove`（按 entryRef）/ `modify`（改 note）/ `reorder`（entryRef 全序数组，须为当前集合的排列） |
 | `team/queue-reassigned` | 一个队列项从源成员队列原子移到目标成员队列（追加目标队尾）；跨两队列单操作 |
 
-清理（复用现有 cleanup 快照模式）：Task resolution 落定、频道归档 → 清除引用该 Task 的队列项；成员归档/移除/离开 workspace → 清空其队列；相应 cleanup 操作载荷加可选 `queues` 快照（旧账本重放兼容）。
+清理（实现取 watch 退役的投影侧先例，cleanup 操作载荷不加快照）：Task resolution 落定、频道归档 → 清除引用该 Task 的队列项；成员归档/移除/离开 workspace → 清空其队列；旧账本重放行为不变。
 
 ## 4. 操作语义精确规则
 

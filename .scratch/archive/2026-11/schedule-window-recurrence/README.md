@@ -1,10 +1,10 @@
 # 成员日程窗口生效周期（schedule-window-recurrence）
 
-**状态**：spec 已确认（2026-11-14 用户逐项澄清并确认设计）；三张实施票据已产出，未改生产代码。
+**状态**：完成（2026-11-14 实施并归档）。
 **最近核对**：2026-11-14
-**当前前沿**：串行 01→02→03。票 01（Host 算术与校验）可立即开工；票 02（编辑器入口）待 01；票 03（文档收口）待 01+02。
-**完成条件**：模型日程与停止日程的窗口均带生效周期（每天/工作日/每几天/每周/每月/每年），周期不匹配的日子窗口不生效；存量缺省字段 = 每天，行为不变；Host 校验拒绝非法周期形状；编辑器周期选择器与参数控件可用（390×844 折行检视）；`npm run test`、`npm run typecheck` 通过，UI 票另过 `npm run test:browser`。
-**正式文档出口**：`docs/team-collaboration/model-and-time.md` 与 `.zh.md` 两个日程小节补周期语义；CHANGELOG；随后本目录归档。
+**当前前沿**：无。三张票据 01→02→03 全部完成。
+**完成条件**：已满足。模型日程与停止日程的窗口均带生效周期（每天/工作日/每几天/每周/每月/每年），周期不匹配的日子窗口不生效；存量缺省字段 = 每天，行为不变；Host 校验拒绝非法周期形状；编辑器周期选择器与参数控件可用（390×844 折行已检视）；`npm run test` 的单一失败项是既有的版本一致性漂移（与本次改动无关），vitest 全量、`npm run typecheck`、`npm run test:browser` 均通过。
+**正式文档出口**：已写入 `docs/team-collaboration/model-and-time.md` 与 `.zh.md` 两个日程小节、CHANGELOG `[Unreleased]`；本目录已归档。
 
 ## 决策快照
 
@@ -14,9 +14,18 @@
 
 | # | 票据 | 状态 |
 | --- | --- | --- |
-| 01 | [Host 侧周期生效：类型、日期算术、监控边界与提交校验](issues/01-host-recurrence-arithmetic-and-commit.md) | ready |
-| 02 | [编辑器周期配置：Human 控制面与浏览器验收](issues/02-editor-recurrence-controls.md) | ready（blocked by 01） |
-| 03 | [维护文档收口与工作项归档](issues/03-docs-and-archive.md) | ready（blocked by 01、02） |
+| 01 | [Host 侧周期生效：类型、日期算术、监控边界与提交校验](issues/01-host-recurrence-arithmetic-and-commit.md) | complete |
+| 02 | [编辑器周期配置：Human 控制面与浏览器验收](issues/02-editor-recurrence-controls.md) | complete |
+| 03 | [维护文档收口与工作项归档](issues/03-docs-and-archive.md) | complete |
+
+## 实施落点
+
+- 类型：`AgentTeamScheduleRecurrence` 判别联合，两个窗口各加可选 `recurrence`；缺省 = 每天。
+- 算术：`packages/agent-team/src/schedule-recurrence.ts` 单一权威（Team 时区 UTC+8 日期部件、周期日匹配、候选日展开、覆盖判定、通知描述、深冻结）。
+- 监控：模型日程与停止日程改为按展开区间筛选边界；`scheduledModel` 比较、重置路径、通知 latch 不变。
+- 提交：`ledger.ts` 校验六种周期形状并深冻结；重放 schema 增补周期字段（同时补齐此前缺失的 `stopSchedule`）。
+- 编辑器：两个日程的每窗口行增加周期选择器与按种类参数控件；daily 归一化为缺省字段，存量配置保存字节不变。
+- 测试：新增 `schedule-recurrence.spec.ts`；扩展两日程 spec、ledger 回放/校验测试、两个 editor field spec、浏览器 journey（含 390×844 断言）。
 
 ## 不做什么
 

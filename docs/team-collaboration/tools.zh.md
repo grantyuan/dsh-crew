@@ -54,6 +54,14 @@ taskful 的 start 还可传 `parentTaskRef`，把新 Task 归档为同 Channel �
 
 拒绝结果（`unread_required`、`stale_revision`）与 message 拒绝共享同一形式：`Not committed`、本地 refs/计数、先读后重试的恢复路径，且无数字 revision。
 
+## `team_queue`
+
+每个成员在每个 Workspace 持有一个持久、有序的私有任务队列——由 Human 与负责人安排工作的 todo-list。队列项引用一个开放任务加一段有界备注，数组位置即执行顺序，队列项的执行状态（待开始 / 进行中 / 待验收）由任务自身的 Claim 推导，不存在第二套状态机。`list` 按执行顺序渲染某个成员的队列；不带 `memberRef` 时是自己的队列，只有 Leader 可以点名他人。`assign`（1-6 个目标成员可读的开放未认领任务，追加或按 `atIndex` 插入）、`remove`、`modify`、`reorder`、`reassign` 是账本强制的 Leader 专属写操作；成员自己没有任何队列写权限，因此优先级纪律是结构性的——顺序只在 Human 或 Leader 明确操作时改变。
+
+入队即占用：已为某成员入队的任务拒绝其他成员的 `claim`（拒绝原因点名队列归属者），队列归属成员正常认领；移除或改派队列项即解除占用。改派把一个待开始项在两个队列间原子移动；进行中或待验收的项只能经任务生命周期退出队列。任务落定、频道归档、成员离场都会清掉引用它们的队列项。
+
+Host 驱动成员走完队列：安排入队会唤醒接收成员并发送路由通知；队列归属成员交付（`claim done`）或释放后，Host 携下一待开始项唤醒——释放绝不重推刚释放的项，队列之外的工作从不唤醒。每次唤醒都重申路由纪律：开工前先整体分析队列，合并或拆分先向 Leader 提议并等确认（拆分即 `parentTaskRef` 子任务），绝不自行调整顺序或优先级。
+
 ## `team_supervise`
 
 `team_supervise` 以周期监督 pass 所依据的同一证据读取并修复其他 Member 的健康状态。`status` 报告一个 Member 的 pass 状态——`healthy`、`settling` 或 `stopped`——它的 presence、已记录的失败诊断，以及二十分钟窗口内的失败次数；它是纯读操作，不写任何 operation。`reset` 强制一个异常 Member——stopped 且带错误、反复失败、或卡死——进入与 Human 菜单相同的 fresh-context 重置：Session 从空重开，身份、设置与私有记忆保留，旧日志归档。healthy 的 Member 会拒绝重置——监督只修复真正异常的对象——且调用者不能重置自己。
