@@ -70,7 +70,9 @@ A committed mutation names its action (Claim created, completed, or released), r
 
 Every Member carries one durable, ordered task queue per Workspace — the private todo-list the Human and the Leader assign work through. An entry references one open Task plus an optional bounded note; array position is the execution order, and the entry's standing (pending / working / awaiting) derives from the Task's own Claims, never from a second state.
 
-`list` renders one Member's queue in execution order; without `memberRef` it is your own queue, and only the Leader may name another Member. `assign` (1-6 open unclaimed Tasks the target Member can read, appended or inserted at `atIndex`), `remove`, `modify`, `reorder`, and `reassign` are Leader-only writes the ledger enforces; a Member has no queue write at all, so priority discipline is structural — order changes only when the Human or the Leader makes them.
+`list` renders one Member's queue in execution order; without `memberRef` it is your own queue, and only the Leader may name another Member. `assign` places work two ways — 1-6 open unclaimed Tasks the target Member can read (appended or inserted at `atIndex`), or one freeform requirement text the Host mints into a real Task card atomically, landing in `channelRef`, defaulting to the first Channel the assigner and the Member both share.
+
+`remove`, `modify`, `reorder`, and `reassign` are Leader-only writes the ledger enforces; a Member has no queue write at all, so priority discipline is structural — order changes only when the Human or the Leader makes them. A research goal or a question to verify is a real Task with the full lifecycle, never a lesser entry — the card is the assignment's byproduct, not a prerequisite.
 
 Queueing occupies: a Task queued for one Member refuses every other Member's `claim` (the rejection names the queue's owner), while the queued Member claims normally, and removing or reassigning the entry frees the Task again.
 

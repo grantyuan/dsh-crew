@@ -2963,11 +2963,26 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await queueDialog.waitFor()
   await expect.poll(() => queueDialog.getByRole('heading', { name: '待开始' }).count()).toBe(1)
   await expect.poll(() => queueDialog.getByText('按队列顺序执行').count()).toBe(1)
+  // The text form: the Human hands over a freeform requirement — the dialog
+  // mints the card through an asTask send and queues it without a manual card.
+  await queueDialog.getByRole('button', { name: '追加任务' }).click()
+  const appendDialog = page.getByRole('dialog', { name: '追加任务到 reviewer 的队列' })
+  await appendDialog.waitFor()
+  await appendDialog.getByRole('button', { name: '直接描述需求' }).click()
+  await appendDialog.getByPlaceholder('一段需求、一个研究目标、一个要查证的问题…').fill('调研知识库竞品的索引策略')
+  await appendDialog.getByRole('button', { name: '建卡并入队' }).click()
+  await expect.poll(() => appendDialog.getByText('已建卡并入队。').count()).toBe(1)
+  await page.keyboard.press('Escape')
+  await appendDialog.waitFor({ state: 'detached' })
+  await expect.poll(() => queueDialog.getByText('调研知识库竞品的索引策略').count(), { timeout: 20_000 }).toBe(1)
+  // The acceptance screenshots show both entries — the seeded assignment and
+  // the text-minted card — at desktop and 390×844.
   await settleLayout(page)
   await page.screenshot({ path: join(UI07_SHOTS, 'member-queue-dialog.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   await settleLayout(page)
   await page.screenshot({ path: join(UI07_SHOTS, 'member-queue-dialog-narrow.png'), fullPage: true })
+
   await page.setViewportSize({ width: 1440, height: 960 })
   // The Modal carries both an X close and the footer 关闭; Escape is the one
   // unambiguous close and doubles as the keyboard path the dialog must offer.

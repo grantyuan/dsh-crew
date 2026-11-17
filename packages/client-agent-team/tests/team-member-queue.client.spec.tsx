@@ -144,6 +144,28 @@ describe('Member task queue', () => {
     await b.runtime.dispose()
   })
 
+  it('mints a task card from freeform requirement text and queues it atomically', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
+    b.seedMemberTasks([{ queue: { memberId: 'member:builder', entries: [] } }])
+    b.seedChannel({ channelRef: 'channel:engineering', workspaceId: 'w1', name: 'engineering', state: 'active', createdAtSequence: 2 })
+    await b.joinChannel({ requestId: 'request:join-builder', channelRef: 'channel:engineering', memberId: 'member:builder' })
+    const dialog = await openQueueDialog(b)
+    fireEvent.click(within(dialog).getByRole('button', { name: '追加任务' }))
+    const append = await b.view.findByRole('dialog', { name: '追加任务到 builder 的队列' })
+    fireEvent.click(within(append).getByRole('button', { name: '直接描述需求' }))
+    expect(within(append).getByText(/原子地把它建为任务卡并入队/)).toBeTruthy()
+    fireEvent.change(within(append).getByPlaceholderText('一段需求、一个研究目标、一个要查证的问题…'), { target: { value: '调研竞品定价' } })
+    fireEvent.click(within(append).getByRole('button', { name: '建卡并入队' }))
+    await waitFor(() => expect(b.sendMessage).toHaveBeenCalledTimes(1))
+    const sent = (b.sendMessage.mock.calls[0] as unknown[])[0] as { requestId: string; workspaceId: string; channelRef: string; body: string; asTask: boolean }
+    expect(sent).toMatchObject({ workspaceId: 'w1', channelRef: 'channel:engineering', body: '调研竞品定价', asTask: true })
+    await waitFor(() => expect(b.queueAssign).toHaveBeenCalledTimes(1))
+    const assigned = (b.queueAssign.mock.calls[0] as unknown[])[0] as { workspaceId: string; memberId: string; items: ReadonlyArray<{ taskRef: string }> }
+    expect(assigned).toMatchObject({ workspaceId: 'w1', memberId: 'member:builder', items: [{ taskRef: 'task:1' }] })
+    expect(within(append).getByText('已建卡并入队。')).toBeTruthy()
+    await b.runtime.dispose()
+  })
+
   it('renders the empty queue and the load failure', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1' })
     b.seedMemberTasks([{ queue: { memberId: 'member:builder', entries: [] } }])

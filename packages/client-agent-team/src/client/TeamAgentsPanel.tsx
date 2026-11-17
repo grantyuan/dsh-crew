@@ -12,6 +12,7 @@ import type {
   AgentTeamRequestId,
   AgentTeamTaskRow,
   AgentTeamTasks,
+  AgentTeamView,
 } from '@grantyuan/dsh-crew/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { Button, IconChecklistOutlineRegular, IconChevronDownOutlineRegular, IconArchiveOutlineRegular, IconClockOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular, IconInspectOutlineRegular, IconNewChatOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular, IconPlusOutlineRegular, IconRefreshOutlineRegular, Input, Menu, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -57,7 +58,9 @@ interface TeamAgentsPanelProps {
   readonly archiveMember: TeamSidebarProps['archiveMember']
   readonly joinWorkspace: TeamSidebarProps['joinWorkspace']
   readonly leaveWorkspace: TeamSidebarProps['leaveWorkspace']
+  readonly loadChannels: TeamSidebarProps['loadChannels']
   readonly loadModels: TeamSidebarProps['loadModels']
+  readonly sendMessage: TeamSidebarProps['sendMessage']
   readonly selectThread: TeamSidebarProps['selectThread']
   /** The Member Session currently embedded in the conversation seat, if any. */
   readonly memberSessionId?: AgentTeamClientMemberStatus['member']['sessionId']
@@ -66,7 +69,7 @@ interface TeamAgentsPanelProps {
   readonly t: TeamSidebarProps['t']
 }
 
-export function TeamAgentsPanel({ workspaceId, loadMembers, loadMemberTasks, loadTasks, queueAssign, queueAmend, queueReassign, joinChannel, subscribeChanges, addMember, updateMember, loadPromptView, curateMemberPrompt, recoverMember, clearMemberContext, compactMemberContext, loadMemberInterrupts, releaseMemberInterrupt, selectSessionHistory, diagnoseMember, archiveMember, joinWorkspace, leaveWorkspace, loadModels, selectThread, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
+export function TeamAgentsPanel({ workspaceId, loadMembers, loadMemberTasks, loadTasks, queueAssign, queueAmend, queueReassign, joinChannel, sendMessage, subscribeChanges, addMember, updateMember, loadPromptView, curateMemberPrompt, recoverMember, clearMemberContext, compactMemberContext, loadMemberInterrupts, releaseMemberInterrupt, selectSessionHistory, diagnoseMember, archiveMember, joinWorkspace, leaveWorkspace, loadChannels, loadModels, selectThread, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
@@ -341,7 +344,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, loadMemberTasks, loa
         <div className={css.agentList}>
           {orderedMembers.map(status => (
             <SortableRow key={status.member.memberId} drag={drag} orderKey={status.member.memberId}>
-              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} loadPromptView={loadPromptView} curateMemberPrompt={curateMemberPrompt} recoverMember={recoverMember} clearMemberContext={clearMemberContext} compactMemberContext={compactMemberContext} loadMemberInterrupts={loadMemberInterrupts} releaseMemberInterrupt={releaseMemberInterrupt} selectSessionHistory={selectSessionHistory} diagnoseMember={diagnoseMember} archiveMember={archiveMember} loadModels={loadModels} openMemberSession={openMemberSession} members={members} loadMemberTasks={loadMemberTasks} loadTasks={loadTasks} queueAssign={queueAssign} queueAmend={queueAmend} queueReassign={queueReassign} joinChannel={joinChannel} selectThread={selectThread} onUpdated={refresh} t={t} />
+              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} loadPromptView={loadPromptView} curateMemberPrompt={curateMemberPrompt} recoverMember={recoverMember} clearMemberContext={clearMemberContext} compactMemberContext={compactMemberContext} loadMemberInterrupts={loadMemberInterrupts} releaseMemberInterrupt={releaseMemberInterrupt} selectSessionHistory={selectSessionHistory} diagnoseMember={diagnoseMember} archiveMember={archiveMember} loadChannels={loadChannels} loadModels={loadModels} openMemberSession={openMemberSession} members={members} loadMemberTasks={loadMemberTasks} loadTasks={loadTasks} queueAssign={queueAssign} queueAmend={queueAmend} queueReassign={queueReassign} joinChannel={joinChannel} sendMessage={sendMessage} selectThread={selectThread} onUpdated={refresh} t={t} />
             </SortableRow>
           ))}
         </div>
@@ -363,7 +366,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, loadMemberTasks, loa
  * Member's working queue — current Claims and unclaimed Channel work, each
  * row opening its Thread, each row asking the Team leader to reassign it.
  */
-function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, loadPromptView, curateMemberPrompt, recoverMember, clearMemberContext, compactMemberContext, loadMemberInterrupts, releaseMemberInterrupt, selectSessionHistory, diagnoseMember, archiveMember, loadModels, openMemberSession, members, loadMemberTasks, loadTasks, queueAssign, queueAmend, queueReassign, joinChannel, selectThread, onUpdated, t }: {
+function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, loadPromptView, curateMemberPrompt, recoverMember, clearMemberContext, compactMemberContext, loadMemberInterrupts, releaseMemberInterrupt, selectSessionHistory, diagnoseMember, archiveMember, loadChannels, loadModels, openMemberSession, members, loadMemberTasks, loadTasks, queueAssign, queueAmend, queueReassign, joinChannel, sendMessage, selectThread, onUpdated, t }: {
   readonly workspaceId: WorkspaceId
   readonly leaveWorkspace: TeamSidebarProps['leaveWorkspace']
   readonly status: AgentTeamClientMemberStatus
@@ -380,8 +383,11 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
   readonly selectSessionHistory: TeamSidebarProps['selectSessionHistory']
   readonly diagnoseMember: TeamSidebarProps['diagnoseMember']
   readonly archiveMember: TeamSidebarProps['archiveMember']
+  readonly loadChannels: TeamSidebarProps['loadChannels']
   readonly loadModels: TeamSidebarProps['loadModels']
   readonly openMemberSession: TeamSidebarProps['openMemberSession']
+  /** Human Message lane behind the freeform-requirement assignment. */
+  readonly sendMessage: TeamSidebarProps['sendMessage']
   /** The Workspace roster, behind the queue dialog's reassign and append pickers. */
   readonly members: readonly AgentTeamClientMemberStatus[]
   readonly loadMemberTasks: TeamSidebarProps['loadMemberTasks']
@@ -655,6 +661,8 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
           members={members}
           loadMemberTasks={loadMemberTasks}
           loadTasks={loadTasks}
+          loadChannels={loadChannels}
+          sendMessage={sendMessage}
           queueAssign={queueAssign}
           queueAmend={queueAmend}
           queueReassign={queueReassign}
@@ -754,13 +762,16 @@ function MemberInterruptsDialog({ workspaceId, status, loadMemberInterrupts, rel
  * non-optimistic ledger operation: one stable requestId per action, refusal
  * shown in place, projection re-read after the commit.
  */
-function MemberTasksDialog({ workspaceId, status, members, loadMemberTasks, loadTasks, queueAssign, queueAmend, queueReassign, joinChannel, selectThread, onClose, t }: {
+function MemberTasksDialog({ workspaceId, status, members, loadMemberTasks, loadTasks, loadChannels, sendMessage, queueAssign, queueAmend, queueReassign, joinChannel, selectThread, onClose, t }: {
   readonly workspaceId: WorkspaceId
   readonly status: AgentTeamClientMemberStatus
   /** The Workspace roster, behind the reassign and append pickers. */
   readonly members: readonly AgentTeamClientMemberStatus[]
   readonly loadMemberTasks: TeamSidebarProps['loadMemberTasks']
   readonly loadTasks: TeamSidebarProps['loadTasks']
+  readonly loadChannels: TeamSidebarProps['loadChannels']
+  /** Human Message lane behind the freeform-requirement assignment. */
+  readonly sendMessage: TeamSidebarProps['sendMessage']
   readonly queueAssign: TeamSidebarProps['queueAssign']
   readonly queueAmend: TeamSidebarProps['queueAmend']
   readonly queueReassign: TeamSidebarProps['queueReassign']
@@ -918,6 +929,8 @@ function MemberTasksDialog({ workspaceId, status, members, loadMemberTasks, load
           members={members}
           loadTasks={loadTasks}
           loadMemberTasks={loadMemberTasks}
+          loadChannels={loadChannels}
+          sendMessage={sendMessage}
           queueAssign={queueAssign}
           onCommitted={reload}
           onClose={() => { setAppending(false) }}
@@ -1069,25 +1082,37 @@ function QueueReassignDialog({ workspaceId, entry, holder, members, queueReassig
  * re-validates channel membership and occupancy, so a stale pick refuses in
  * place instead of silently mis-routing.
  */
-function QueueAppendDialog({ workspaceId, holder, members, loadTasks, loadMemberTasks, queueAssign, onCommitted, onClose, t }: {
+function QueueAppendDialog({ workspaceId, holder, members, loadTasks, loadMemberTasks, loadChannels, sendMessage, queueAssign, onCommitted, onClose, t }: {
   readonly workspaceId: WorkspaceId
   readonly holder: AgentTeamClientMemberStatus
   readonly members: readonly AgentTeamClientMemberStatus[]
   readonly loadTasks: TeamSidebarProps['loadTasks']
   readonly loadMemberTasks: TeamSidebarProps['loadMemberTasks']
+  readonly loadChannels: TeamSidebarProps['loadChannels']
+  /** Human Message lane: the freeform requirement mints its Task card through an asTask send. */
+  readonly sendMessage: TeamSidebarProps['sendMessage']
   readonly queueAssign: TeamSidebarProps['queueAssign']
   readonly onCommitted: () => Promise<void> | void
   readonly onClose: () => void
   readonly t: TeamSidebarProps['t']
 }) {
+  // Two ways to put work on the queue: pick an existing board card, or hand
+  // over a freeform requirement the Host mints into a card atomically. The
+  // queue entry always references a real Task either way — one lifecycle.
+  const [mode, setMode] = useState<'board' | 'text'>('board')
   const [candidates, setCandidates] = useState<readonly AgentTeamTaskRow[]>()
   const [error, setError] = useState<string>()
   const [pickedId, setPickedId] = useState<string>()
   const [pickerOpen, setPickerOpen] = useState(false)
   const [note, setNote] = useState('')
+  const [requirement, setRequirement] = useState('')
+  const [channels, setChannels] = useState<AgentTeamView['channels']>()
+  const [channelId, setChannelId] = useState<string>()
+  const [channelPickerOpen, setChannelPickerOpen] = useState(false)
   const [committing, setCommitting] = useState(false)
-  const [committed, setCommitted] = useState(false)
+  const [committedNote, setCommittedNote] = useState<string>()
   const picked = candidates?.find(task => task.taskRef === pickedId)
+  const channel = channels?.find(entry => entry.channelRef === channelId)
   const reload = useCallback(async () => {
     try {
       const [tasks, queues] = await Promise.all([loadTasks({ workspaceId }), loadMemberTasks({ workspaceId })])
@@ -1101,7 +1126,17 @@ function QueueAppendDialog({ workspaceId, holder, members, loadTasks, loadMember
     }
   }, [loadTasks, loadMemberTasks, workspaceId, t])
   useEffect(() => { void reload() }, [reload])
-  const append = async (): Promise<void> => {
+  // The text form's default landing Channel: the first active one the Member
+  // has joined — the constraint the ledger itself enforces for a queue entry.
+  useEffect(() => { void (async () => {
+    const view = await loadChannels({ workspaceId })
+    if (!view.ok) return
+    setChannels(view.value.channels)
+    const joined = new Set(view.value.members.filter(membership => membership.memberId === holder.member.memberId).map(membership => membership.channelRef))
+    const first = view.value.channels.find(entry => entry.state === 'active' && joined.has(entry.channelRef))
+    setChannelId(first?.channelRef)
+  })() }, [loadChannels, workspaceId, holder.member.memberId])
+  const appendBoard = async (): Promise<void> => {
     if (picked === undefined || committing) return
     setCommitting(true)
     setError(undefined)
@@ -1110,7 +1145,7 @@ function QueueAppendDialog({ workspaceId, holder, members, loadTasks, loadMember
       const result = await queueAssign({ requestId: mintRequestId(), workspaceId, memberId: holder.member.memberId,
         items: [{ taskRef: picked.taskRef, ...(trimmedNote === '' ? {} : { note: trimmedNote }) }] })
       if (!result.ok) throw new Error(result.error.message)
-      setCommitted(true)
+      setCommittedNote(t('agentTasksAppendCommitted'))
       await onCommitted()
     } catch (cause) {
       setError(t('agentTasksActionFailed', { message: cause instanceof Error ? cause.message : String(cause) }))
@@ -1118,11 +1153,38 @@ function QueueAppendDialog({ workspaceId, holder, members, loadTasks, loadMember
       setCommitting(false)
     }
   }
-  const addedByHandle = (memberId: AgentTeamMemberId): string =>
-    members.find(member => member.member.memberId === memberId)?.member.handle.replace(/^@/, '') ?? memberId
+  const appendText = async (): Promise<void> => {
+    const body = requirement.trim()
+    if (body === '' || channel === undefined || committing) return
+    setCommitting(true)
+    setError(undefined)
+    try {
+      // The card is the byproduct: one asTask send mints the Task in the
+      // landing Channel, the very next call queues it. Both are existing
+      // ledger operations — no second work kind is born here.
+      const created = await sendMessage({ requestId: mintRequestId(), workspaceId, channelRef: channel.channelRef, body, asTask: true })
+      if (!created.ok) throw new Error(created.error.message)
+      if (created.value.kind !== 'committed' || created.value.task === undefined) {
+        throw new Error(t('agentTasksActionFailed', { message: t('agentTasksAppendNoCard') }))
+      }
+      const queued = await queueAssign({ requestId: mintRequestId(), workspaceId, memberId: holder.member.memberId,
+        items: [{ taskRef: created.value.task.taskRef }] })
+      if (!queued.ok) throw new Error(queued.error.message)
+      setCommittedNote(t('agentTasksAppendTextCommitted'))
+      await onCommitted()
+    } catch (cause) {
+      setError(t('agentTasksActionFailed', { message: cause instanceof Error ? cause.message : String(cause) }))
+    } finally {
+      setCommitting(false)
+    }
+  }
   const items: MenuEntry[] = (candidates ?? []).map(task => ({
     id: task.taskRef,
     label: <>{t('taskLabel', { number: task.taskNumber })}<small className={css.menuHint}>{` ${task.subject}`}</small></>,
+  }))
+  const channelItems: MenuEntry[] = (channels ?? []).filter(entry => entry.state === 'active').map(entry => ({
+    id: entry.channelRef,
+    label: entry.name,
   }))
   return (
     <Modal
@@ -1131,50 +1193,92 @@ function QueueAppendDialog({ workspaceId, holder, members, loadTasks, loadMember
       title={t('agentTasksAppendTitle', { name: holder.member.handle })}
       closeLabel={t('close')}
       contentClassName={createCss.dialogContent!}
-      footer={committed
+      footer={committedNote !== undefined
         ? <Button variant="primary" onClick={onClose}>{t('close')}</Button>
         : <>
           <Button variant="outline" disabled={committing} onClick={onClose}>{t('cancel')}</Button>
-          <Button variant="primary" disabled={committing || picked === undefined} onClick={() => { void append() }}>{committing ? t('agentTasksAppendCommitting') : t('agentTasksAppendConfirm')}</Button>
+          <Button variant="primary"
+            disabled={committing || (mode === 'board' ? picked === undefined : requirement.trim() === '' || channel === undefined)}
+            onClick={() => { void (mode === 'board' ? appendBoard() : appendText()) }}>
+            {committing ? t('agentTasksAppendCommitting') : mode === 'board' ? t('agentTasksAppendConfirm') : t('agentTasksAppendCreate')}
+          </Button>
         </>}
     >
-      {committed ? <p className={createCss.notice}>{t('agentTasksAppendCommitted')}</p> : <>
-        <p className={createCss.notice}>{t('agentTasksAppendIntro', { name: holder.member.handle })}</p>
-        {candidates === undefined && error === undefined && <p className={createCss.state}>{t('agentTasksLoading')}</p>}
-        {candidates !== undefined && candidates.length === 0 && <p className={createCss.state}>{t('agentTasksAppendEmpty')}</p>}
-        {candidates !== undefined && candidates.length > 0 && (
+      {committedNote !== undefined ? <p className={createCss.notice}>{committedNote}</p> : <>
+        <Button className={createCss.modeSwitch!} variant="outline" disabled={committing}
+          onClick={() => { setMode(value => value === 'board' ? 'text' : 'board'); setError(undefined) }}>
+          {mode === 'board' ? t('agentTasksAppendModeText') : t('agentTasksAppendModeBoard')}
+        </Button>
+        {mode === 'board' ? <>
+          <p className={createCss.notice}>{t('agentTasksAppendIntro', { name: holder.member.handle })}</p>
+          {candidates === undefined && error === undefined && <p className={createCss.state}>{t('agentTasksLoading')}</p>}
+          {candidates !== undefined && candidates.length === 0 && <p className={createCss.state}>{t('agentTasksAppendEmpty')}</p>}
+          {candidates !== undefined && candidates.length > 0 && (
+            <div className={createCss.field}>
+              <span>{t('agentTasksAppendTask')}</span>
+              <Menu
+                open={pickerOpen}
+                portal
+                className={createCss.menuCap!}
+                items={items}
+                selectedIds={pickedId === undefined ? [] : [pickedId]}
+                onSelect={id => { setPickedId(id); setPickerOpen(false) }}
+                onClose={() => { setPickerOpen(false) }}
+                anchor={
+                  <button
+                    type="button"
+                    className={createCss.selectTrigger!}
+                    aria-label={t('agentTasksAppendTask')}
+                    aria-haspopup="menu"
+                    aria-expanded={pickerOpen}
+                    onClick={() => { setPickerOpen(value => !value) }}
+                  >
+                    <span className={createCss.selectValue}>{picked === undefined ? t('agentTasksAppendPlaceholder') : t('taskLabel', { number: picked.taskNumber })}</span>
+                    <span className={`${createCss.chevron!} ${pickerOpen ? createCss.chevronOpen! : ''}`} aria-hidden><IconChevronDownOutlineRegular /></span>
+                  </button>
+                }
+              />
+            </div>
+          )}
+          {picked !== undefined && (
+            <label className={createCss.field}>
+              <span>{t('agentTasksAppendNote')}</span>
+              <Input value={note} placeholder={t('agentTasksAppendNotePlaceholder')} onChange={event => { setNote(event.target.value) }} disabled={committing} />
+            </label>
+          )}
+        </> : <>
+          <p className={createCss.notice}>{t('agentTasksAppendTextIntro')}</p>
+          <label className={createCss.field}>
+            <span>{t('agentTasksAppendText')}</span>
+            <Input value={requirement} placeholder={t('agentTasksAppendTextPlaceholder')} onChange={event => { setRequirement(event.target.value) }} disabled={committing} />
+          </label>
           <div className={createCss.field}>
-            <span>{t('agentTasksAppendTask')}</span>
+            <span>{t('agentTasksAppendChannel')}</span>
             <Menu
-              open={pickerOpen}
+              open={channelPickerOpen}
               portal
               className={createCss.menuCap!}
-              items={items}
-              selectedIds={pickedId === undefined ? [] : [pickedId]}
-              onSelect={id => { setPickedId(id); setPickerOpen(false) }}
-              onClose={() => { setPickerOpen(false) }}
+              items={channelItems}
+              selectedIds={channelId === undefined ? [] : [channelId]}
+              onSelect={id => { setChannelId(id); setChannelPickerOpen(false) }}
+              onClose={() => { setChannelPickerOpen(false) }}
               anchor={
                 <button
                   type="button"
                   className={createCss.selectTrigger!}
-                  aria-label={t('agentTasksAppendTask')}
+                  aria-label={t('agentTasksAppendChannel')}
                   aria-haspopup="menu"
-                  aria-expanded={pickerOpen}
-                  onClick={() => { setPickerOpen(value => !value) }}
+                  aria-expanded={channelPickerOpen}
+                  onClick={() => { setChannelPickerOpen(value => !value) }}
                 >
-                  <span className={createCss.selectValue}>{picked === undefined ? t('agentTasksAppendPlaceholder') : t('taskLabel', { number: picked.taskNumber })}</span>
-                  <span className={`${createCss.chevron!} ${pickerOpen ? createCss.chevronOpen! : ''}`} aria-hidden><IconChevronDownOutlineRegular /></span>
+                  <span className={createCss.selectValue}>{channel === undefined ? t('agentTasksAppendChannelPlaceholder') : channel.name}</span>
+                  <span className={`${createCss.chevron!} ${channelPickerOpen ? createCss.chevronOpen! : ''}`} aria-hidden><IconChevronDownOutlineRegular /></span>
                 </button>
               }
             />
+            <small className={css.editHint}>{t('agentTasksAppendChannelHint')}</small>
           </div>
-        )}
-        {picked !== undefined && (
-          <label className={createCss.field}>
-            <span>{t('agentTasksAppendNote')}</span>
-            <Input value={note} placeholder={t('agentTasksAppendNotePlaceholder')} onChange={event => { setNote(event.target.value) }} disabled={committing} />
-          </label>
-        )}
+        </>}
         {error !== undefined && <p className={createCss.error} role="alert">{error}</p>}
       </>}
     </Modal>

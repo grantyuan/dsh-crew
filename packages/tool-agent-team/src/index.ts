@@ -2,8 +2,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import AgentTeam, { AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamDmDeliveryError, markAgentTeamPreset } from '@grantyuan/dsh-crew/host'
 import { formatTeamTimestamp } from '@grantyuan/dsh-crew/time-format'
 import { registerContextTools } from './context-tools.ts'
-import { service, workspaceOf, workspaceParam } from './host-access.ts'
+import { service, workspaceOf, workspaceParam, type TeamToolAgent } from './host-access.ts'
+import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type {
+  AgentTeamChannelRef,
   AgentTeamClaimRef,
   AgentTeamMemberId,
   AgentTeamMemberWatchRef,
@@ -75,6 +77,24 @@ interface ClaimView {
 
 function claimView(claim: { readonly claimRef: AgentTeamClaimRef; readonly direction: string; readonly state: string; readonly owner: string }): ClaimView {
   return { claimRef: claim.claimRef, direction: claim.direction, state: claim.state, owner: claim.owner }
+}
+
+/**
+ * The text form's landing Channel: an explicit ref wins; otherwise the first
+ * active Channel the Leader and the target Member have both joined — the
+ * Leader can only start a Thread where it holds membership, and the Member
+ * must be in the Task's Channel for the queue to accept the entry at all.
+ */
+async function assignmentChannelFor(host: AgentTeam, agent: TeamToolAgent, workspaceId: WorkspaceId, memberId: AgentTeamMemberId, explicit?: string): Promise<AgentTeamChannelRef> {
+  if (explicit !== undefined) return explicit as AgentTeamChannelRef
+  const view = host.viewForAgent(agent, { workspaceId, topLevelOnly: true, includeActivities: false, direction: 'before' })
+  const joinedBy = (id: AgentTeamMemberId) => new Set(view.members.filter(membership => membership.memberId === id).map(membership => membership.channelRef))
+  const mine = joinedBy(host.memberForAgent(agent)!.memberId)
+  const shared = view.channels.find(channel => channel.state === 'active' && mine.has(channel.channelRef) && joinedBy(memberId).has(channel.channelRef))
+  if (shared === undefined) {
+    throw new Error('no shared active Channel with the target Member; pass channelRef, or have the Member join one of yours first')
+  }
+  return shared.channelRef
 }
 
 /** Model-facing queue entry: the projection item trimmed to what the checklist renders. */
@@ -1138,12 +1158,14 @@ const queueRow = (position: number, entry: { entryRef: string; taskRef: string; 
 
 const teamQueue = defineTool({
   name: 'team_queue',
-  description: 'Read or manage a Member\'s private task queue — the ordered todo-list the Human and the Leader assign work through; you walk it top-down and the Host wakes you for the next entry when a hand-off or a release lands. list shows one Member\'s queue in execution order (pending / working / awaiting standings); without memberRef it is your own queue, and only the Leader may name another Member. assign, remove, modify, reorder, and reassign are Leader-only writes the ledger enforces: assign queues open unclaimed Tasks (append, or insert at atIndex to rank them); remove drops one pending entry; modify retunes one entry\'s note (omit note to clear it); reorder rewrites the whole pending order; reassign moves one pending entry to another Member\'s queue. You have no queue write of your own: never ask for one, and never re-derive priorities — if the queue looks wrong, tell the Leader. Before starting a new task, review your whole queue: propose merges or splits to the Leader and wait for confirmation before restructuring (splits become parentTaskRef sub-tasks you start with team_message).',
+  description: 'Read or manage a Member\'s private task queue — the ordered todo-list the Human and the Leader assign work through; you walk it top-down and the Host wakes you for the next entry when a hand-off or a release lands. list shows one Member\'s queue in execution order (pending / working / awaiting standings); without memberRef it is your own queue, and only the Leader may name another Member. assign, remove, modify, reorder, and reassign are Leader-only writes the ledger enforces: assign places work two ways — 1-6 open unclaimed Task refs (append, or insert at atIndex to rank them), or one freeform requirement text the Host mints into a real Task card atomically (an asTask start under your authority, landing in channelRef, defaulting to the first Channel you and the Member both joined); remove drops one pending entry; modify retunes one entry\'s note (omit note to clear it); reorder rewrites the whole pending order; reassign moves one pending entry to another Member\'s queue. You have no queue write of your own: never ask for one, and never re-derive priorities — if the queue looks wrong, tell the Leader. Before starting a new task, review your whole queue: propose merges or splits to the Leader and wait for confirmation before restructuring (splits become parentTaskRef sub-tasks you start with team_message).',
   parameters: {
     action: { type: 'string', required: true, enum: ['list', 'assign', 'remove', 'modify', 'reorder', 'reassign'] },
     memberRef: { type: 'string', description: "Full branded Member ref exactly as returned by Team tools, including the 'member:' prefix. list defaults to your own queue; a Leader names another Member to read or edit theirs. assign, remove, modify, reorder, and reassign require the queue-owning Member." },
     toMemberRef: { type: 'string', description: "reassign: the receiving Member — an enabled Agent Member of the Workspace that has joined the Task's Channel. Required for reassign." },
-    taskRefs: { type: 'array', items: { type: 'string' }, description: "assign: open unclaimed Task refs (1-6), each exactly as Team tools returned them with the 'task:' prefix. Already-queued or started Tasks refuse." },
+    taskRefs: { type: 'array', items: { type: 'string' }, description: "assign (refs form): open unclaimed Task refs (1-6), each exactly as Team tools returned them with the 'task:' prefix. Already-queued or started Tasks refuse." },
+    text: { type: 'string', description: 'assign (text form): the requirement, research goal, or question to verify as one freeform string — pass this instead of taskRefs when no card exists. The Host creates the Task card atomically and queues it; a research goal is a real Task with the full lifecycle, never a lesser entry.' },
+    channelRef: { type: 'string', description: "Full branded Channel ref exactly as returned by Team tools, including the 'channel:' prefix. assign text form: where the minted Task card lives. Defaults to the first Channel you and the target Member both joined." },
     note: { type: 'string', description: 'assign: one bounded note placed on every entry in this assignment (e.g. "unblock the release first"). modify: the replacement note; omit it to clear the entry\'s note.' },
     atIndex: { type: 'number', description: 'assign: zero-based insert position inside the target queue; omitted appends to the end. Queue position is execution order.' },
     entryRef: { type: 'string', description: "Full branded queue-entry ref exactly as team_queue list returned it, including the 'entry:' prefix. Required for remove and modify." },
@@ -1198,9 +1220,31 @@ const teamQueue = defineTool({
       if (args.memberRef === undefined) throw new Error(`team_queue ${args.action} requires the queue-owning Member (memberRef)`)
       const memberId = args.memberRef as AgentTeamMemberId
       if (args.action === 'assign') {
-        if (args.taskRefs === undefined || args.taskRefs.length === 0) throw new Error('team_queue assign requires at least one Task ref (taskRefs)')
+        if (args.text === undefined && (args.taskRefs === undefined || args.taskRefs.length === 0)) {
+          throw new Error('team_queue assign requires taskRefs or a freeform text')
+        }
+        if (args.text !== undefined && args.taskRefs !== undefined && args.taskRefs.length > 0) {
+          throw new Error('team_queue assign takes taskRefs or text, not both')
+        }
+        if (args.text !== undefined) {
+          // Text form: mint the card first (an ordinary asTask start under the
+          // Leader's own authority — the same power team_message already
+          // grants), then queue the minted ref. Two durable operations; if
+          // the queueing refuses, the card stays on the board to retry from.
+          const body = args.text.trim()
+          if (body === '') throw new Error('team_queue assign text must not be blank')
+          const channelRef = await assignmentChannelFor(host, agent, workspaceId, memberId, args.channelRef)
+          const created = await host.sendMessageForAgent(agent, { requestId: requestId(agent.id, exec.callId),
+            workspaceId, channelRef, body, asTask: true })
+          if (created.kind !== 'committed' || created.task === undefined) {
+            throw new Error('the asTask start committed without a Task overlay; nothing was queued')
+          }
+          const result = await host.queueAssignForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId, memberId,
+            items: [{ taskRef: created.task.taskRef, ...(args.note === undefined ? {} : { note: args.note }) }] })
+          return { action: 'assign', kind: 'committed', memberId, entries: result.queue.map(queueEntryView) }
+        }
         const result = await host.queueAssignForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId, memberId,
-          items: args.taskRefs.map(taskRef => ({ taskRef: taskRef as AgentTeamTaskRef, ...(args.note === undefined ? {} : { note: args.note }) })),
+          items: args.taskRefs!.map(taskRef => ({ taskRef: taskRef as AgentTeamTaskRef, ...(args.note === undefined ? {} : { note: args.note }) })),
           ...(args.atIndex === undefined ? {} : { atIndex: args.atIndex }) })
         return { action: 'assign', kind: 'committed', memberId, entries: result.queue.map(queueEntryView) }
       }

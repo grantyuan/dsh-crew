@@ -19,7 +19,7 @@
 
 三项进行中：[消息中心（所有讨论 + 我的消息）](active/message-center/README.md) — P1 Host 只读投影实施中，P2 Client 页面待开始；[Team 页面并入系统右侧边栏](active/team-sidebar-tabs/README.md) — spec 已确认，tickets 待产出；[上下文自动压缩 + 3 层记忆](active/context-auto-compaction/README.md) — 设计稿完成，已确认 2 项，S1 + D1–D17 待确认，含 4B/职能模型异步预算与 §26 角色注册表，未改生产代码。
 
-已归档七项：2026-11 两项——[成员私有任务队列](archive/2026-11/member-task-queue/README.md)（2026-11-17 归档）、[成员日程窗口生效周期](archive/2026-11/schedule-window-recurrence/README.md)（2026-11-14 归档）；2026-10 两项——[Agent 退役换代（历史承接 / Channel 公示 / 配置继承）](archive/2026-10/agent-retirement-handover/README.md)（2026-10-18 归档）、[Member prompt profile 与上下文控制](archive/2026-10/member-prompt-profile/README.md)（2026-10-10 归档）；2026-09 三项——[0.1.7 UI 设计语言再基线](archive/2026-09/ui-parity-0.1.7/README.md)（task:d3ec167b，2026-09-24 归档）、[Member Session 架构](archive/2026-09/member-session-architecture/README.md)、[Context continuity](archive/2026-09/context-continuity/README.md)。
+已归档八项：2026-11 三项——[队列文字直派](archive/2026-11/queue-text-assignment/README.md)（2026-11-17 归档）、[成员私有任务队列](archive/2026-11/member-task-queue/README.md)（2026-11-17 归档）、[成员日程窗口生效周期](archive/2026-11/schedule-window-recurrence/README.md)（2026-11-14 归档）；2026-10 两项——[Agent 退役换代（历史承接 / Channel 公示 / 配置继承）](archive/2026-10/agent-retirement-handover/README.md)（2026-10-18 归档）、[Member prompt profile 与上下文控制](archive/2026-10/member-prompt-profile/README.md)（2026-10-10 归档）；2026-09 三项——[0.1.7 UI 设计语言再基线](archive/2026-09/ui-parity-0.1.7/README.md)（task:d3ec167b，2026-09-24 归档）、[Member Session 架构](archive/2026-09/member-session-architecture/README.md)、[Context continuity](archive/2026-09/context-continuity/README.md)。
 
 ## 临时材料和 UI 证据
 
