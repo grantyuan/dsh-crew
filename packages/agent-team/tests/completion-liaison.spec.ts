@@ -271,7 +271,8 @@ describe('liaison notice texts', () => {
     expect(push.startsWith('@builder Task push (no Team leader designated):')).toBe(true)
     expect(push).toContain('- task:alpha-3 (#3) — todo — Write the guide')
     expect(push).toContain(LIAISON_REFUSAL_PHRASE)
-    expect(push).toContain('任务结束')
+    expect(push).toContain('(still closing the turn with team_set_status as usual)')
+    expect(push).not.toContain('任务结束')
     expect(push).toContain('@human')
     // A quoted Task subject naming a Member must not re-resolve as an
     // authored mention and escalate a bystander into this message's recipient.

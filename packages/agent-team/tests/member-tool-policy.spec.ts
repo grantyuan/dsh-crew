@@ -32,12 +32,12 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import AgentTeam, { AGENT_TEAM_TOOL_NAMES } from '../src/index.ts'
-import { COMPLETION_MARKER } from '../src/response-guard.ts'
 import type { AgentTeamMemberCapabilities, AgentTeamMemberId, AgentTeamRequestId } from '../src/types.ts'
 // @ts-expect-error untyped shared resolution module
 import { harnessDir } from '../../../scripts/harness-dir.mjs'
 import { MemoryStorageBackend } from './helpers/memory-backend.ts'
 import { executeToolCall } from './helpers/tool-call.ts'
+import { CloseUpgradeState, isPlainStopClose } from './helpers/scripted-close.ts'
 
 const sharedCleanups: Array<() => Promise<void>> = []
 /** Per-test disposers (LLM adapter registrations, ordinary sessions): drained after each test. */
@@ -66,6 +66,7 @@ class EmptyAdapter extends LlmAdapter {
 class ScriptedAdapter extends EmptyAdapter {
   readonly requests: GenerateOptions[] = []
   private readonly responses: StreamChunk[][] = []
+  private readonly closeUpgrade = new CloseUpgradeState()
 
   enqueue(response: StreamChunk[]): void {
     this.responses.push(response)
@@ -73,8 +74,21 @@ class ScriptedAdapter extends EmptyAdapter {
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
+    // The closing text round held by the previous call's declaration is
+    // served verbatim: it ends the turn as a healthy completed stop.
+    const pending = this.closeUpgrade.takePendingClose()
+    if (pending !== undefined) {
+      for (const chunk of pending) yield chunk
+      return
+    }
     const response = this.responses.shift()
     if (response === undefined) throw new Error('ScriptedAdapter response queue is empty')
+    // Legacy single-text closes upgrade to the declaration round plus the
+    // held closing text, keeping every scripted close a healthy stop.
+    if (isPlainStopClose(response)) {
+      for (const chunk of this.closeUpgrade.holdClosingText(response)) yield chunk
+      return
+    }
     for (const chunk of response) yield chunk
   }
 }
@@ -109,6 +123,16 @@ function toolCallResponse(rawCallId: string, name: string, args: object): Stream
     { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: argumentsJson } },
     { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+}
+
+function textResponse(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } },
+    { type: 'finish', reason: { kind: 'stop' } },
   ]
 }
 
@@ -345,15 +369,7 @@ describe('Agent Team member tool policy', () => {
     // The next model turn sees the widened surface in its request tools and
     // can call the newly visible tool.
     adapter.enqueue(toolCallResponse('call-1', 'spare_tool', {}))
-    // The closing reply carries the completion marker: a text-only round
-    // without it reads as a guard fault and would open a continue turn.
-    adapter.enqueue([
-      { type: 'block-start', index: 0, blockType: 'text' },
-      { type: 'text-delta', index: 0, text: `done${COMPLETION_MARKER}` },
-      { type: 'block-end', index: 0, block: { type: 'text', text: `done${COMPLETION_MARKER}` } },
-      { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } },
-      { type: 'finish', reason: { kind: 'stop' } },
-    ])
+    adapter.enqueue(textResponse('done'))
     const idle = waitForIdle(ctx, agent)
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'use the spare tool' }], source: { kind: 'user' } }))
     await idle
@@ -395,13 +411,7 @@ describe('Agent Team member tool policy', () => {
     expect((await suspending).status.availability).toBe('suspended')
 
     // Release the turn: the scheduled apply swaps in the same Session.
-    adapter.enqueue([
-      { type: 'block-start', index: 0, blockType: 'text' },
-      { type: 'text-delta', index: 0, text: `done${COMPLETION_MARKER}` },
-      { type: 'block-end', index: 0, block: { type: 'text', text: `done${COMPLETION_MARKER}` } },
-      { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } },
-      { type: 'finish', reason: { kind: 'stop' } },
-    ])
+    adapter.enqueue(textResponse('done'))
     adapter.release()
     await turnDone
     await vi.waitFor(() => {

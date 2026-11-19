@@ -29,11 +29,11 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import AgentTeam from '../src/index.ts'
-import { COMPLETION_MARKER } from '../src/response-guard.ts'
 import { CURATE_MAX_TOKENS, CURATE_REQUIREMENTS_CAP, CURATE_SECTION_TEXT_CAP, buildCurateMessages, parseCurateProposal } from '../src/member-prompt-curation.ts'
 import { MEMBER_PROMPT_SECTION_NAME, isProtectedPromptSection, sectionToolMapping } from '../src/member-runtime.ts'
 import type { AgentTeamChannelRef, AgentTeamInboxItem, AgentTeamMemberId, AgentTeamRequestId } from '../src/types.ts'
 import { MemoryStorageBackend } from './helpers/memory-backend.ts'
+import { CloseUpgradeState, isPlainStopClose } from './helpers/scripted-close.ts'
 
 const sharedCleanups: Array<() => Promise<void>> = []
 /** Per-test disposers (LLM adapter registrations, ordinary sessions): drained after each test. */
@@ -59,15 +59,42 @@ class EmptyAdapter extends LlmAdapter {
 class ScriptedAdapter extends EmptyAdapter {
   readonly requests: GenerateOptions[] = []
   private readonly responses: StreamChunk[][] = []
+  private readonly rawQueue: StreamChunk[][] = []
+  private readonly closeUpgrade = new CloseUpgradeState()
 
   enqueue(response: StreamChunk[]): void {
     this.responses.push(response)
   }
 
+  /** Bypasses the close upgrade: some flows (prompt curation) make exactly one model request. */
+  enqueueRaw(response: StreamChunk[]): void {
+    this.rawQueue.push(response)
+  }
+
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
+    // The closing text round held by the previous call's declaration is
+    // served verbatim: it ends the turn as a healthy completed stop.
+    const pending = this.closeUpgrade.takePendingClose()
+    if (pending !== undefined) {
+      for (const chunk of pending) yield chunk
+      return
+    }
+    // Raw responses (single-request flows like prompt curation) never upgrade;
+    // queued responses upgrade a legacy text close into the declaration round.
+    const raw = this.rawQueue.shift()
+    if (raw !== undefined) {
+      for (const chunk of raw) yield chunk
+      return
+    }
     const response = this.responses.shift()
     if (response === undefined) throw new Error('ScriptedAdapter response queue is empty')
+    // Legacy single-text closes upgrade to the declaration round plus the
+    // held closing text, keeping every scripted close a healthy stop.
+    if (isPlainStopClose(response)) {
+      for (const chunk of this.closeUpgrade.holdClosingText(response)) yield chunk
+      return
+    }
     for (const chunk of response) yield chunk
   }
 }
@@ -108,8 +135,8 @@ function toolCallResponse(rawCallId: string, name: string, args: object): Stream
 function closingReply(text: string): StreamChunk[] {
   return [
     { type: 'block-start', index: 0, blockType: 'text' },
-    { type: 'text-delta', index: 0, text: `${text}${COMPLETION_MARKER}` },
-    { type: 'block-end', index: 0, block: { type: 'text', text: `${text}${COMPLETION_MARKER}` } },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
     { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } },
     { type: 'finish', reason: { kind: 'stop' } },
   ]
@@ -324,7 +351,8 @@ describe('Agent Team member custom role paragraph', () => {
     expect(memberSection(await memberAssembly(ctx, member))?.text).toBe('First paragraph.')
 
     // Release the turn: the scheduled apply swaps at the boundary in the same
-    // Session, and the closing reply needs its queued response.
+    // Session, and the closing reply needs its queued response. The adapter
+    // upgrades the text close into the terminal team_set_status declaration.
     adapter.enqueue(closingReply('done'))
     adapter.release()
     const settled = await edit
@@ -777,7 +805,7 @@ describe('Agent Team member prompt LLM curation', () => {
     useAdapter(adapter)
     const { ctx, workspaceId } = shared
     const member = await addMember(ctx, workspaceId, 'c1-live', 'Stored paragraph.')
-    adapter.enqueue(closingReply(JSON.stringify({
+    adapter.enqueueRaw(closingReply(JSON.stringify({
       droppedSectionNames: ['usage:prose', 'team:member-prompt', 'hallucinated:section'],
       skillsAllow: ['member-memory-manager', 'not-a-skill', 'member-memory-manager'],
       customPrompt: '  Curated paragraph.  ',
@@ -825,7 +853,7 @@ describe('Agent Team member prompt LLM curation', () => {
     useAdapter(adapter)
     const { ctx, workspaceId } = shared
     const member = await addMember(ctx, workspaceId, 'c2-garbage')
-    adapter.enqueue(closingReply('The curated prompt would be shorter, but there is no JSON today.'))
+    adapter.enqueueRaw(closingReply('The curated prompt would be shorter, but there is no JSON today.'))
     await expect(ctx.agentTeam.curateMemberPrompt({ memberId: member.memberId, requirements: 'trim it' }))
       .rejects.toThrow('no JSON object')
     // The failed pass left no trace on the stored profile.
@@ -838,7 +866,7 @@ describe('Agent Team member prompt LLM curation', () => {
     useAdapter(adapter)
     const { ctx, workspaceId } = shared
     const member = await addMember(ctx, workspaceId, 'c3-cancel')
-    adapter.enqueue(closingReply(JSON.stringify({ customPrompt: 'Too late.' })))
+    adapter.enqueueRaw(closingReply(JSON.stringify({ customPrompt: 'Too late.' })))
     const controller = new AbortController()
     controller.abort()
     await expect(ctx.agentTeam.curateMemberPrompt({ memberId: member.memberId, requirements: 'trim it' }, controller.signal))

@@ -290,6 +290,20 @@ export interface AgentTeamMemberPromptProfile {
   readonly autoExecutePrune?: boolean
 }
 
+/**
+ * The declared work state of one Member. `working` is Host-managed: it lands
+ * only when a Human or designated Leader message reaches the Member, never
+ * through a Member tool call. The other four are the Member's own declared
+ * state through `team_set_status`.
+ */
+export type AgentTeamMemberWorkStatus = 'working' | 'busy' | 'idle' | 'waiting' | 'free'
+
+/** The statuses a Member may set itself; `working` is never model-authored. */
+export const AGENT_TEAM_SELF_STATUSES = ['busy', 'idle', 'waiting', 'free'] as const
+
+/** The default declared state whenever a Member record omits the field. */
+export const AGENT_TEAM_DEFAULT_WORK_STATUS: AgentTeamMemberWorkStatus = 'idle'
+
 /** Durable identity and lifecycle intent of one team-managed Agent. */
 export interface AgentTeamAgentMember {
   readonly memberId: AgentTeamMemberId
@@ -385,6 +399,14 @@ export interface AgentTeamAgentMember {
    * the switch existed omit the field.
    */
   readonly autoCapabilityAssessment?: boolean | undefined
+  /**
+   * The Member's declared work state; see AgentTeamMemberWorkStatus. Absent
+   * reads as `idle` — both legacy Member records and fresh additions omit the
+   * field. Written only by the `team/member-status-changed` operation: by the
+   * Member's own `team_set_status` call for the four self statuses, and by the
+   * Host's delivery automation for `working`.
+   */
+  readonly workStatus?: AgentTeamMemberWorkStatus | undefined
   /**
    * Durable lifecycle state. `enabled`/`suspended` are the reversible working
    * pair; `archived` hides the Member from every surface while keeping its

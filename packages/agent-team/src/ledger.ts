@@ -70,6 +70,8 @@ import type {
   AgentTeamMemberStopSchedule,
   AgentTeamScheduleRecurrence,
   AgentTeamMemberCapabilityChangedOperation,
+  AgentTeamMemberStatusChangedOperation,
+  AgentTeamMemberWorkStatus,
   AgentTeamQuestionAnalyzedOperation,
   AgentTeamModelScheduleWindow,
   AgentTeamMemberPromptProfile,
@@ -132,6 +134,8 @@ import type {
   AgentTeamSendMessageRequest,
   AgentTeamSendMessageResult,
   AgentTeamSetMemberStateRequest,
+  AgentTeamSetMemberStatusRequest,
+  AgentTeamSetMemberStatusResult,
   AgentTeamStaleRevision,
   AgentTeamStatus,
   AgentTeamStoredMessage,
@@ -190,6 +194,7 @@ import type {
   AgentTeamView,
   AgentTeamViewRequest,
 } from './types.ts'
+import { AGENT_TEAM_DEFAULT_WORK_STATUS, AGENT_TEAM_SELF_STATUSES } from './types/entities.ts'
 import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX, MEMBER_MODEL_SCHEDULE_WINDOW_MAX, MEMBER_STOP_SCHEDULE_WINDOW_MAX, MODEL_SCHEDULE_TIME_PATTERN } from './spec.ts'
 import { formatTeamTimestamp } from './time-format.ts'
 import { freezeScheduleRecurrence, isCalendarDate, parseAnchorDate } from './schedule-recurrence.ts'
@@ -248,6 +253,27 @@ export function agentTeamAssistantActor(): AgentTeamAssistantActor {
   return ASSISTANT_ACTOR
 }
 
+/**
+ * The declared work status of one Member record; absent reads as `idle`, both
+ * for legacy ledger records and for fresh Members that never declared yet.
+ */
+export function agentTeamWorkStatusOf(member: AgentTeamAgentMember): AgentTeamMemberWorkStatus {
+  return member.workStatus ?? AGENT_TEAM_DEFAULT_WORK_STATUS
+}
+
+/**
+ * A send was refused pre-commit because a target Member is free or busy and
+ * the sender is neither the Human nor that Member's designated Team leader.
+ * Nothing was written to the ledger; the sender can retry against a reachable
+ * Member or wait for the blocked one to declare idle or waiting.
+ */
+export class AgentTeamDeliveryBlockedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'AgentTeamDeliveryBlockedError'
+  }
+}
+
 /** Caller-owned payload of the idempotent Team initialization request. */
 export interface AgentTeamInitializeRequest {
   readonly requestId: AgentTeamRequestId
@@ -266,6 +292,15 @@ export interface AgentTeamAuthorizedAddMemberRequest extends AgentTeamAddMemberR
 
 export interface AgentTeamAuthorizedSetMemberStateRequest extends AgentTeamSetMemberStateRequest {
   readonly actor: AgentTeamHumanActor
+}
+
+/**
+ * Ledger-authorized declared work-status change: the actor is the Member
+ * itself — its own `team_set_status` call, or the Host's delivery automation
+ * committing `working` on the recipient's behalf.
+ */
+export interface AgentTeamAuthorizedSetMemberStatusRequest extends AgentTeamSetMemberStatusRequest {
+  readonly actor: AgentTeamMemberActor
 }
 
 /** Host-authorized intent to move one enabled Member onto a fresh Session id. */
@@ -1370,6 +1405,69 @@ export class AgentTeamLedger {
   }
 
   /**
+   * Declare one enabled Member's own work status. The actor is the Member
+   * itself — through its `team_set_status` tool call, or the Host's delivery
+   * automation committing `working` on the recipient's behalf. `working` is
+   * never a requestable value: it lands only through that automation. An exact
+   * retry resolves to the recorded outcome; a same-status rewrite stays a
+   * legitimate durable fact (the declaration moment is audit-worthy).
+   */
+  setMemberStatus(request: AgentTeamAuthorizedSetMemberStatusRequest): Promise<AgentTeamLedgerResult<AgentTeamSetMemberStatusResult>> {
+    return this.commitMemberStatus(request, request.status, AGENT_TEAM_SELF_STATUSES)
+  }
+
+  /**
+   * The delivery automation's `working` commit: the Host lands the recipient's
+   * `working` status under the recipient's own member authority when a Human
+   * or designated leader message reaches it. Never reachable through the
+   * Member-facing `setMemberStatus`.
+   */
+  setMemberStatusByDelivery(request: {
+    readonly requestId: AgentTeamRequestId
+    readonly workspaceId: WorkspaceId
+    readonly memberId: AgentTeamMemberId
+    readonly actor: AgentTeamMemberActor
+  }): Promise<AgentTeamLedgerResult<AgentTeamSetMemberStatusResult>> {
+    return this.commitMemberStatus(request, 'working', ['working'])
+  }
+
+  private commitMemberStatus(
+    request: {
+      readonly requestId: AgentTeamRequestId
+      readonly workspaceId: WorkspaceId
+      readonly memberId: AgentTeamMemberId
+      readonly actor: AgentTeamMemberActor
+    },
+    status: AgentTeamMemberWorkStatus,
+    allowed: readonly string[],
+  ): Promise<AgentTeamLedgerResult<AgentTeamSetMemberStatusResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameMemberStatus(existing, request)
+        const resolved = this.memberStatusResult(existing)
+        return this.resolved(Object.freeze({ ...resolved, kind: 'resolved' as const }))
+      }
+      if (!allowed.includes(status)) {
+        throw new Error(`'${status}' is not a settable status; working is managed by the Host`)
+      }
+      const member = this.assertMemberActor(request.actor)
+      if (member.memberId !== request.memberId) throw new Error('a Member may only declare its own status')
+      if (!this.participatesIn(request.memberId, request.workspaceId)) throw new Error(`Agent Member '${request.memberId}' is not in Workspace '${request.workspaceId}'`)
+      const operation: AgentTeamMemberStatusChangedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/member-status-changed',
+        data: Object.freeze({
+          memberId: request.memberId, workspaceId: request.workspaceId,
+          status, previous: agentTeamWorkStatusOf(member),
+        }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.memberStatusResult(operation))
+    })
+  }
+
+  /**
    * Move one enabled Member onto a fresh Session: the durable operation
    * records the sessionId transition while identity, memory, and binding
    * survive. The Host disposes the old handle and archives the previous
@@ -1993,6 +2091,7 @@ export class AgentTeamLedger {
         return this.resolved(this.messageResult(existing))
       }
       this.assertMentionTargets(channel, recipients)
+      this.assertDeliveryReachable(actor, request.workspaceId, recipients)
       // Top-level Task creation is open to every actor: mentioned Members join
       // the new Thread as followers. Only existing-Thread invitations stay
       // Human-gated (reply path).
@@ -2043,6 +2142,7 @@ export class AgentTeamLedger {
         return this.resolved(this.replyResult(existing, this.undeliverableRecipients(actor, thread.threadRef, recipients, redirectTargets)))
       }
       this.assertMentionTargets(channel, recipients)
+      this.assertDeliveryReachable(actor, request.workspaceId, recipients)
       const deferred = this.deferredThreadWrite(actor.memberId, task, thread, request.baseRevision)
       if (deferred !== undefined) return this.resolved(deferred)
       if (task?.resolution === 'closed') throw new Error(`Task '${task.taskRef}' is closed; reopen it before replying`)
@@ -2129,6 +2229,7 @@ export class AgentTeamLedger {
         return this.resolved(this.replyResult(existing))
       }
       this.assertMentionTargets(channel, recipients)
+      this.assertDeliveryReachable(request.actor, request.workspaceId, recipients)
       if (task?.resolution === 'closed') throw new Error(`Task '${task.taskRef}' is closed; reopen it before replying`)
       const sequence = this.nextSequence()
       const base = this.operationBase(request, sequence)
@@ -2809,6 +2910,7 @@ export class AgentTeamLedger {
       if (recipient.state !== 'enabled') throw new Error(`Agent Member '${recipient.memberId}' is ${recipient.state}; DM delivery requires an enabled Member`)
       if (recipient.memberId === AGENT_TEAM_HUMAN_MEMBER_ID || !recipient.sessionId) throw new Error('DM recipient must be an Agent Member')
       if (recipient.memberId === sender.memberId) throw new Error('Members cannot DM themselves')
+      this.assertDeliveryReachable(sender, request.workspaceId, [recipient.memberId])
       const operation: AgentTeamDmSentOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/dm-sent',
         data: Object.freeze({ workspaceId: request.workspaceId, senderMemberId: sender.memberId,
@@ -4044,6 +4146,10 @@ export class AgentTeamLedger {
         return this.memberWorkspaceScopes(operation.data.interrupt.memberId)
       case 'team/member-interrupt-resolved':
         return this.memberWorkspaceScopes(operation.data.memberId)
+      case 'team/member-status-changed':
+        // The declared status is visible on every panel that lists the Member,
+        // but it moves no shared Thread projection.
+        return this.memberWorkspaceScopes(operation.data.memberId)
       case 'team/member-archived':
         return this.withReleasedActivityScopes(
           this.memberWorkspaceScopes(operation.data.member.memberId),
@@ -4197,6 +4303,7 @@ export class AgentTeamLedger {
       case 'team/member-updated':
       case 'team/member-model-scheduled':
       case 'team/member-capability-changed':
+      case 'team/member-status-changed':
       case 'team/question-analyzed':
       case 'team/channel-member-added':
       case 'team/thread-read':
@@ -4443,6 +4550,19 @@ export class AgentTeamLedger {
       const { capabilityScore: _nextScore, ...nextRest } = operation.data.member
       if (!isDeepStrictEqual(priorRest, nextRest)) throw new Error('invalid Member capability update')
       if (operation.actor.kind === 'member' && operation.actor.memberId === prior.memberId) throw new Error('invalid Member capability update')
+      return
+    }
+    if (operation.kind === 'team/member-status-changed') {
+      // The status actor is the Member itself: its own `team_set_status` call,
+      // or the Host's delivery automation committing `working` under the
+      // recipient's member authority. `working` is never requestable, the
+      // actor must be the Member the status moves, and the recorded previous
+      // must match the replay projection's declared state at that instant.
+      const member = assertMember()
+      if (member.memberId !== operation.data.memberId) throw new Error('invalid Member status change')
+      if (!this.participatesInFrom(projection, operation.data.memberId, operation.data.workspaceId)) throw new Error('invalid Member status change')
+      if (operation.data.status !== 'working' && !(AGENT_TEAM_SELF_STATUSES as readonly string[]).includes(operation.data.status)) throw new Error('invalid Member status change')
+      if (agentTeamWorkStatusOf(member) !== operation.data.previous) throw new Error('invalid Member status change')
       return
     }
     if (operation.kind === 'team/question-analyzed') {
@@ -5268,6 +5388,11 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/member-capability-changed') {
       target.members.set(operation.data.member.memberId, operation.data.member)
+      return
+    }
+    if (operation.kind === 'team/member-status-changed') {
+      const member = target.members.get(operation.data.memberId)
+      if (member !== undefined) target.members.set(operation.data.memberId, Object.freeze({ ...member, workStatus: operation.data.status }))
       return
     }
     if (operation.kind === 'team/member-updated') {
@@ -6410,6 +6535,42 @@ export class AgentTeamLedger {
     return member
   }
 
+  /**
+   * The free/busy delivery gate. While a Member is `free` or `busy`, only the
+   * Human and its Workspace's designated Team leader may reach it — Team
+   * Assistant notices and other Members' sends are refused pre-commit, so a
+   * blocked send leaves no ledger fact at all. Enforced inside the ledger
+   * because mention targets are derived under the ledger lock; the Host never
+   * sees the raw body.
+   */
+  private assertDeliveryReachable(actor: AgentTeamHumanActor | AgentTeamAssistantActor | AgentTeamMemberActor, workspaceId: WorkspaceId, recipientIds: readonly AgentTeamMemberId[]): void {
+    if (actor.kind === 'human') return
+    const senderMemberId = actor.kind === 'member' ? actor.memberId : undefined
+    const blocked = recipientIds.filter(memberId => {
+      if (memberId === AGENT_TEAM_HUMAN_MEMBER_ID || memberId === AGENT_TEAM_ASSISTANT_MEMBER_ID) return false
+      if (senderMemberId !== undefined && memberId === senderMemberId) return false
+      const member = this.state.members.get(memberId)
+      if (member === undefined || member.state !== 'enabled') return false
+      const status = agentTeamWorkStatusOf(member)
+      return status === 'busy' || status === 'free'
+    })
+    if (blocked.length === 0) return
+    if (senderMemberId !== undefined && senderMemberId === this.designatedLeaderIdIn(workspaceId)) return
+    const named = blocked.map(memberId => {
+      const member = this.state.members.get(memberId)
+      return member === undefined ? memberId : `@${member.handle} (${agentTeamWorkStatusOf(member)})`
+    }).join(', ')
+    throw new AgentTeamDeliveryBlockedError(`${named}: only the Human or the designated Team leader can reach a Member while it is free or busy. Address a reachable Member, or wait until it declares idle or waiting.`)
+  }
+
+  /** The enabled designated leader of one Workspace, per the ledger projection. */
+  private designatedLeaderIdIn(workspaceId: WorkspaceId): AgentTeamMemberId | undefined {
+    for (const member of this.state.members.values()) {
+      if (member.state === 'enabled' && member.leader === true && this.participatesIn(member.memberId, workspaceId)) return member.memberId
+    }
+    return undefined
+  }
+
   /** Shortest accepted UUID abbreviation after the branded prefix. */
   private static readonly MIN_REF_UUID_PREFIX = 6
 
@@ -7155,6 +7316,18 @@ export class AgentTeamLedger {
     if (operation.kind !== kind || !this.sameActor(operation.actor, request.actor) || operation.data.member.memberId !== request.memberId) this.throwRequestCollision(request.requestId)
   }
 
+  private assertSameMemberStatus(operation: AgentTeamOperation, request: {
+    readonly requestId: AgentTeamRequestId
+    readonly workspaceId: WorkspaceId
+    readonly memberId: AgentTeamMemberId
+    readonly actor: AgentTeamMemberActor
+    readonly status?: AgentTeamMemberWorkStatus
+  }): asserts operation is AgentTeamMemberStatusChangedOperation {
+    if (operation.kind !== 'team/member-status-changed' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.memberId !== request.memberId || operation.data.workspaceId !== request.workspaceId
+      || (request.status !== undefined && operation.data.status !== request.status)) this.throwRequestCollision(request.requestId)
+  }
+
   private assertSameMemberSessionRenewed(operation: AgentTeamOperation, request: AgentTeamAuthorizedRenewMemberSessionRequest): asserts operation is AgentTeamMemberSessionRenewedOperation {
     if (operation.kind !== 'team/member-session-renewed' || !this.sameActor(operation.actor, request.actor)
       || operation.data.member.memberId !== request.memberId || operation.data.member.sessionId !== request.sessionId) this.throwRequestCollision(request.requestId)
@@ -7544,6 +7717,11 @@ export class AgentTeamLedger {
 
   private memberResult(operation: AgentTeamMemberAddedOperation | AgentTeamMemberSuspendedOperation | AgentTeamMemberResumedOperation | AgentTeamMemberSessionRestartedOperation | AgentTeamMemberSessionRenewedOperation | AgentTeamMemberSessionRolledOverOperation | AgentTeamMemberUpdatedOperation | AgentTeamMemberModelScheduledOperation | AgentTeamMemberCapabilityChangedOperation): AgentTeamDurableMemberResult {
     return Object.freeze({ receipt: this.receipt(operation), member: operation.data.member })
+  }
+
+  private memberStatusResult(operation: AgentTeamMemberStatusChangedOperation): AgentTeamSetMemberStatusResult {
+    const member = this.requireMember(operation.data.memberId)
+    return Object.freeze({ kind: 'committed', receipt: this.receipt(operation), member, status: operation.data.status })
   }
 
   /** The recorded value of one interrupt operation; the same shape the stack query and the replay return. */

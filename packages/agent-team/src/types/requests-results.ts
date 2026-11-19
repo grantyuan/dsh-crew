@@ -24,6 +24,8 @@ import type {
   AgentTeamMemberStopSchedule,
   AgentTeamMemberWatch,
   AgentTeamMemberWatchRef,
+  AgentTeamMemberWorkStatus,
+  AgentTeamClientMember,
   AgentTeamMessage,
   AgentTeamMessageRef,
   AgentTeamModelSelection,
@@ -388,6 +390,26 @@ export interface AgentTeamCurateMemberPromptResult {
 export interface AgentTeamSetMemberStateRequest {
   readonly requestId: AgentTeamRequestId
   readonly memberId: AgentTeamMemberId
+}
+
+/**
+ * Member intent to declare its own work status. `working` is not settable —
+ * the Host lands it automatically when a Human or designated Leader message
+ * reaches the Member. Valid values: busy, idle, waiting, free.
+ */
+export interface AgentTeamSetMemberStatusRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly memberId: AgentTeamMemberId
+  readonly status: Exclude<AgentTeamMemberWorkStatus, 'working'>
+}
+
+/** Result of a declared work-status change. */
+export interface AgentTeamSetMemberStatusResult {
+  readonly kind: 'committed' | 'resolved'
+  readonly receipt: AgentTeamOperationReceipt
+  readonly member: AgentTeamAgentMember
+  readonly status: AgentTeamMemberWorkStatus
 }
 
 /** Human intent to archive one Agent Member: hidden everywhere, data kept. */

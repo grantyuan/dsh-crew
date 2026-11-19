@@ -199,6 +199,8 @@ const memberSchema = z.object({
   capabilityScore: z.number().int().min(1).max(10).optional(),
   // Ledgers written before the assessment switch existed omit the field.
   autoCapabilityAssessment: z.boolean().optional(),
+  // Ledgers written before the declared work status existed omit the field.
+  workStatus: z.union([z.literal('working'), z.literal('busy'), z.literal('idle'), z.literal('waiting'), z.literal('free')]).optional(),
   privateMemoryPath: z.string().min(1),
   state: z.union([z.literal('enabled'), z.literal('suspended'), z.literal('inactive'), z.literal('archived')]),
 }).strict()
@@ -550,6 +552,17 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-capability-changed'),
     data: z.object({ member: memberSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/member-status-changed'),
+    data: z.object({
+      memberId: memberIdSchema,
+      workspaceId: workspaceIdSchema,
+      status: z.union([z.literal('working'), z.literal('busy'), z.literal('idle'), z.literal('waiting'), z.literal('free')]),
+      previous: z.union([z.literal('working'), z.literal('busy'), z.literal('idle'), z.literal('waiting'), z.literal('free')]),
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,

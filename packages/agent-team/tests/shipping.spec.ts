@@ -200,7 +200,7 @@ describe('Agent Team shipping contract', () => {
     expect([...dshPeerRanges(bundleManifest)]).toEqual(['>=0.2.2-rc.2 <0.2.3'])
     expect(preset).toContain('compaction: true')
     expect(preset).toContain('toolResultPruner: true')
-    expect(preset).toContain('team_inbox, team_thread, team_message, team_claim, team_queue, team_view, team_rate, team_supervise, team_watch, and team_job')
+    expect(preset).toContain('team_inbox, team_thread, team_message, team_set_status, team_claim, team_queue, team_view, team_rate, team_supervise, team_watch, and team_job')
     expect(preset).toContain('If you are the Team Leader: team_watch watches another Member')
     // The one token story has exactly two legal surfaces: a fully drained
     // read hands off the next-write token, and a committed public mutation's

@@ -2,12 +2,13 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { AgentTeamMemberId } from './types.ts'
 
 /**
- * The marker a final text-only response must end with. A response that ends
- * the turn without a tool call and without this marker is a faulty model
- * round: the Member stopped without either continuing the work or announcing
- * its completion.
+ * The Member-facing tool that declares work status; a call carrying a terminal
+ * status (`idle`, `waiting`, `free`) is the turn's completion signal.
  */
-export const COMPLETION_MARKER = '任务结束'
+export const TEAM_SET_STATUS_TOOL_NAME = 'team_set_status'
+
+/** The statuses that close a turn; `busy` opens a stretch, `working` is Host-managed. */
+const TERMINAL_STATUSES = new Set(['idle', 'waiting', 'free'])
 
 /**
  * Stable summary of the response-guard continuation notice. It is a durable
@@ -33,24 +34,24 @@ export interface AssistantResponseShape {
   readonly hasToolCall: boolean
   /** The response carried non-empty visible text. */
   readonly hasText: boolean
-  /** The visible text ends with the completion marker. */
-  readonly textEndsWithMarker: boolean
+  /**
+   * The response invoked `team_set_status` with a terminal status (`idle`,
+   * `waiting`, `free`) — the round that announces the turn's completion. The
+   * closing text round after it is clean; a plain-text stop without any
+   * terminal declaration in the turn is the fault this guard recovers from.
+   */
+  readonly announcesTerminalStatus: boolean
 }
 
-/**
- * Trailing decoration models commonly wrap around or append after the
- * completion marker (markdown emphasis, sentence punctuation, quotation).
- * The marker must still be the last content token; only decoration past it is
- * tolerated, so "…任务结束**" closes the turn while "任务结束 and then I
- * will…" stays the faulty trailing-off round the guard recovers from.
- */
-const TRAILING_DECORATION = /[\s.,;:!?'"""'`*_~\-–—…(){}\[\]。，、：；！？「」『』（）《》【】]+$/
-
-/** Whether one trimmed visible text ends with the completion marker. */
-export function endsWithCompletionMarker(trimmedText: string): boolean {
-  if (trimmedText === '') return false
-  if (trimmedText.endsWith(COMPLETION_MARKER)) return true
-  return trimmedText.replace(TRAILING_DECORATION, '').endsWith(COMPLETION_MARKER)
+/** The terminal status one tool-call block declares, or undefined. */
+function terminalStatusOf(block: ContentBlock): 'idle' | 'waiting' | 'free' | undefined {
+  if (block.type !== 'tool-call' || block.name !== TEAM_SET_STATUS_TOOL_NAME) return undefined
+  try {
+    const status = (JSON.parse(block.arguments) as { status?: unknown }).status
+    return typeof status === 'string' && TERMINAL_STATUSES.has(status) ? (status as 'idle' | 'waiting' | 'free') : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -70,47 +71,50 @@ export function assistantPlainText(content: readonly ContentBlock[]): string {
 /**
  * Reduce one assistant response's content blocks to the shape the guard reads.
  * Text is the concatenation of every `text` block; whitespace-only text counts
- * as no text.
+ * as no text. A `team_set_status` tool-call block carrying a terminal status
+ * marks the round that announces completion.
  */
 export function classifyAssistantResponse(content: readonly ContentBlock[]): AssistantResponseShape {
   let hasToolCall = false
+  let announcesTerminalStatus = false
   let text = ''
   for (const block of content) {
-    if (block.type === 'tool-call') hasToolCall = true
-    else if (block.type === 'text') text += block.text
+    if (block.type === 'tool-call') {
+      hasToolCall = true
+      if (terminalStatusOf(block) !== undefined) announcesTerminalStatus = true
+    } else if (block.type === 'text') text += block.text
   }
-  const trimmed = text.trim()
   return {
     hasToolCall,
-    hasText: trimmed !== '',
-    textEndsWithMarker: endsWithCompletionMarker(trimmed),
+    hasText: text.trim() !== '',
+    announcesTerminalStatus,
   }
 }
 
 /**
- * The fault rule in one place: a response that ends the turn must either
- * invoke a tool (work continues) or end its visible text with the completion
- * marker (work is announced done). A response with only thinking content — or
- * any text that just trails off — fails both and is the fault this guard
- * recovers from.
+ * The fault rule in one place: a round that ends the turn must either invoke a
+ * tool (work continues) or follow a terminal `team_set_status` call made
+ * earlier in the same turn (work is announced done). A response with only
+ * thinking content — or any text that just trails off — fails both and is the
+ * fault this guard recovers from. `turnAnnouncedTerminal` is the coordinator's
+ * per-turn memory of the terminal declaration.
  */
-export function isResponseFault(shape: AssistantResponseShape): boolean {
-  return !shape.hasToolCall && (!shape.hasText || !shape.textEndsWithMarker)
+export function isResponseFault(shape: AssistantResponseShape, turnAnnouncedTerminal: boolean): boolean {
+  return !shape.hasToolCall && !turnAnnouncedTerminal
 }
 
 /** How one stopped turn reads: it announced completion, stopped faulty, or is someone else's case. */
-export type TurnStopOutcome = 'marker' | 'faulty' | 'other'
+export type TurnStopOutcome = 'completed' | 'faulty' | 'other'
 
 /**
- * What one completed stop's final round announces. A round ending with the
- * marker says the work is done; a text round without it (or an observed round
- * at all) says the Member stopped mid-work; a round whose last action was a
+ * What a stopped round's shape alone can say. A round whose last action was a
  * tool call means the loop — a context change or a hook — owned the stop,
- * which is not this guard's fault to heal.
+ * which is not this guard's fault to heal. Everything else is a candidate
+ * faulty stop; the completion announcement is a turn-level fact the
+ * coordinator and the boot scan read across the whole turn.
  */
-function classifyStoppedRound(shape: AssistantResponseShape | undefined): TurnStopOutcome {
+function classifyStoppedRound(shape: AssistantResponseShape | undefined): 'faulty' | 'other' {
   if (shape === undefined) return 'faulty'
-  if (shape.textEndsWithMarker) return 'marker'
   if (shape.hasToolCall) return 'other'
   return 'faulty'
 }
@@ -124,7 +128,7 @@ interface StoppedTurnTailEvent {
 }
 
 /** What the last turn of one restored Session log left behind. */
-export type StoppedTurnTail = 'marker' | 'faulty' | 'none'
+export type StoppedTurnTail = 'completed' | 'faulty' | 'none'
 
 /** One restored-tail classification: what the last turn left, and when it stopped. */
 export interface StoppedTurnTailInfo {
@@ -161,10 +165,24 @@ export function classifyStoppedTurnTail(events: readonly StoppedTurnTailEvent[])
     return { outcome: 'faulty', at: lastTurnEnd.time }
   }
   if (reason?.kind !== 'completed') return { outcome: 'none', at: lastTurnEnd.time }
-  if (reopened) return { outcome: 'faulty', at: lastTurnEnd.time }
-  const shape = lastAssistantShapeBefore(events, lastTurnEnd)
-  const outcome = classifyStoppedRound(shape)
+  if (turnAnnouncedTerminal(events, lastTurnEnd, lastTurnStart)) return { outcome: 'completed', at: lastTurnEnd.time }
+  const outcome = classifyStoppedRound(lastAssistantShapeBefore(events, lastTurnEnd))
   return { outcome: outcome === 'other' ? 'none' : outcome, at: lastTurnEnd.time }
+}
+
+/** Whether any assistant round inside the last turn declared a terminal status. */
+function turnAnnouncedTerminal(events: readonly StoppedTurnTailEvent[], turnEnd: StoppedTurnTailEvent, turnStart: StoppedTurnTailEvent | undefined): boolean {
+  const startSeq = turnStart?.seq ?? Number.NEGATIVE_INFINITY
+  const endSeq = turnEnd.seq ?? Number.POSITIVE_INFINITY
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    const seq = event.seq ?? 0
+    if (seq <= startSeq || seq >= endSeq) continue
+    const message = (event.data as { message?: { content?: readonly ContentBlock[]; interrupted?: boolean } }).message
+    if (message === undefined || message.interrupted === true) continue
+    if (classifyAssistantResponse(message.content ?? []).announcesTerminalStatus) return true
+  }
+  return false
 }
 
 /** The last non-interrupted assistant round of the stopped turn, newest first. */
@@ -199,22 +217,25 @@ export interface ResponseGuardOptions {
  * Per-member LLM response-shape guard with two lanes:
  *
  * - **In-loop** (`onAssistantMessage`): every completed model round that ends
- *   the turn without a tool call and without the completion marker earns one
- *   bounded "continue" nudge; the bound keeps a model that never converges
- *   from looping turn after turn within one stop.
+ *   the turn without a tool call and without a terminal `team_set_status`
+ *   declaration earlier in the turn earns one bounded "continue" nudge; the
+ *   bound keeps a model that never converges from looping turn after turn
+ *   within one stop.
  * - **At the stop** (`onTurnStop` / `onStoppedAtBoot`): when the turn
  *   actually ends — or a Session is restored over a turn that ended while the
- *   Host was down — the guard classifies the stop. A turn whose last round
- *   announced the marker reports `'marker'` (normal completion, and the hook
- *   the fresh-start Task policy arms on). A turn that stopped with the work
- *   unfinished reports `'faulty'` and gets a fresh continue reminder no
- *   matter how the in-loop budget was spent — the reminder that survives a
- *   stand-down — rate-limited by the stop cooldown so a stuck model is
- *   reminded at a sane cadence instead of hot-looping.
+ *   Host was down — the guard classifies the stop. A turn whose rounds
+ *   announced completion through a terminal `team_set_status` call reports
+ *   `'completed'` (normal completion, and the hook the fresh-start Task
+ *   policy arms on). A turn that stopped with the work unfinished reports
+ *   `'faulty'` and gets a fresh continue reminder no matter how the in-loop
+ *   budget was spent — the reminder that survives a stand-down — rate-limited
+ *   by the stop cooldown so a stuck model is reminded at a sane cadence
+ *   instead of hot-looping.
  */
 export class ResponseGuardCoordinator {
   private readonly consecutiveFaults = new Map<AgentTeamMemberId, number>()
   private readonly lastRound = new Map<AgentTeamMemberId, AssistantResponseShape>()
+  private readonly announcedTerminal = new Map<AgentTeamMemberId, true>()
   private readonly lastStopReminder = new Map<AgentTeamMemberId, number>()
   private readonly nudge: ResponseGuardOptions['nudge']
   private readonly onStandDown: ResponseGuardOptions['onStandDown']
@@ -239,13 +260,14 @@ export class ResponseGuardCoordinator {
    */
   onAssistantMessage(memberId: AgentTeamMemberId, shape: AssistantResponseShape, interrupted: boolean): void {
     if (interrupted) return
+    if (shape.announcesTerminalStatus) this.announcedTerminal.set(memberId, true)
     this.lastRound.set(memberId, shape)
-    if (!isResponseFault(shape)) {
+    if (!isResponseFault(shape, this.announcedTerminal.get(memberId) === true)) {
       this.consecutiveFaults.delete(memberId)
       return
     }
     const diagnostic = shape.hasText
-      ? `the response ended without a tool call and without the ${COMPLETION_MARKER} marker`
+      ? 'the response ended the turn on plain text; deliver the owed work in its Thread and call team_set_status (idle, waiting, or free) to close the turn'
       : 'the response carried no visible text'
     const count = (this.consecutiveFaults.get(memberId) ?? 0) + 1
     this.consecutiveFaults.set(memberId, count)
@@ -265,22 +287,23 @@ export class ResponseGuardCoordinator {
    * Observe one stopped turn and heal an abnormal stop. `reasonKind` is the
    * harness turn/end reason. Only a `completed` stop is classified here: an
    * interrupted turn is a Human abort, an error turn belongs to the recovery
-   * policy, and any other transition is not this guard's stop. The turn's
-   * last observed round decides: the marker closes the turn normally, and a
-   * stop with no continuing tool call or marker opens the next turn with a
-   * continue reminder (the in-loop episode re-arms with it).
+   * policy, and any other transition is not this guard's stop. A terminal
+   * `team_set_status` declaration anywhere in the turn closes it normally,
+   * and a stop with no continuing tool call and no declaration opens the next
+   * turn with a continue reminder (the in-loop episode re-arms with it).
    */
   onTurnStop(memberId: AgentTeamMemberId, reasonKind: string): TurnStopOutcome {
     const last = this.lastRound.get(memberId)
+    const announced = this.announcedTerminal.get(memberId) === true
     this.lastRound.delete(memberId)
+    this.announcedTerminal.delete(memberId)
     if (reasonKind !== 'completed') return 'other'
-    const outcome = classifyStoppedRound(last)
-    if (outcome === 'marker') {
+    if (announced) {
       this.consecutiveFaults.delete(memberId)
-      return 'marker'
+      return 'completed'
     }
-    if (outcome === 'other') return 'other'
-    this.remindStoppedTurn(memberId, `the turn stopped without a tool call and without the ${COMPLETION_MARKER} marker`)
+    if (classifyStoppedRound(last) === 'other') return 'other'
+    this.remindStoppedTurn(memberId, 'the turn stopped on plain text without closing team_set_status (idle, waiting, or free)')
     return 'faulty'
   }
 
@@ -288,15 +311,15 @@ export class ResponseGuardCoordinator {
    * The restart twin of {@link onTurnStop}: a restored Session whose last
    * turn left the work unfinished gets the same rate-limited continue
    * reminder so a Member killed mid-work is brought back instead of sitting
-   * stopped. A marker tail reports `'marker'` without nudging — the caller
-   * arms the fresh-start policy on it.
+   * stopped. A completed tail reports `'completed'` without nudging — the
+   * caller arms the fresh-start policy on it.
    */
   onStoppedAtBoot(memberId: AgentTeamMemberId, tail: Exclude<StoppedTurnTail, 'none'>): TurnStopOutcome {
-    if (tail === 'marker') {
+    if (tail === 'completed') {
       this.consecutiveFaults.delete(memberId)
-      return 'marker'
+      return 'completed'
     }
-    this.remindStoppedTurn(memberId, `the Member was stopped with unfinished work; no reply ended with ${COMPLETION_MARKER}`)
+    this.remindStoppedTurn(memberId, 'the Member was stopped with unfinished work; no turn closed with team_set_status (idle, waiting, or free)')
     return 'faulty'
   }
 
@@ -321,12 +344,14 @@ export class ResponseGuardCoordinator {
   forgetMember(memberId: AgentTeamMemberId): void {
     this.consecutiveFaults.delete(memberId)
     this.lastRound.delete(memberId)
+    this.announcedTerminal.delete(memberId)
     this.lastStopReminder.delete(memberId)
   }
 
   dispose(): void {
     this.consecutiveFaults.clear()
     this.lastRound.clear()
+    this.announcedTerminal.clear()
     this.lastStopReminder.clear()
   }
 }

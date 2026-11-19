@@ -10,6 +10,7 @@ import type {
   AgentTeamMemberInterrupt,
   AgentTeamMemberWatch,
   AgentTeamMemberWatchRef,
+  AgentTeamMemberWorkStatus,
   AgentTeamOperationBase,
   AgentTeamClaim,
   AgentTeamClaimActivity,
@@ -210,6 +211,27 @@ export interface AgentTeamMemberModelScheduledOperation extends AgentTeamOperati
 export interface AgentTeamMemberCapabilityChangedOperation extends AgentTeamOperationBase {
   readonly kind: 'team/member-capability-changed'
   readonly data: { readonly member: AgentTeamAgentMember }
+}
+
+/**
+ * Durable declared work-status change of one Member (`working`/`busy`/`idle`/
+ * `waiting`/`free`). The actor is the Member itself — through its own
+ * `team_set_status` call for the four self statuses, or through the Host's
+ * delivery automation committing `working` on the recipient's behalf when a
+ * Human or designated Leader message reaches it (the rollover precedent: the
+ * Host is the executor, the Member is the actor). The data moves exactly this
+ * one field; unlike the lifecycle operations it carries no Member snapshot,
+ * because a status change rides every task close and a full snapshot per
+ * change would bloat the ledger.
+ */
+export interface AgentTeamMemberStatusChangedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/member-status-changed'
+  readonly data: {
+    readonly memberId: AgentTeamMemberId
+    readonly workspaceId: WorkspaceId
+    readonly status: AgentTeamMemberWorkStatus
+    readonly previous: AgentTeamMemberWorkStatus
+  }
 }
 
 /**
@@ -687,6 +709,7 @@ export type AgentTeamOperation =
   | AgentTeamMemberUpdatedOperation
   | AgentTeamMemberModelScheduledOperation
   | AgentTeamMemberCapabilityChangedOperation
+  | AgentTeamMemberStatusChangedOperation
   | AgentTeamQuestionAnalyzedOperation
   | AgentTeamChannelMemberAddedOperation
   | AgentTeamChannelMemberRemovedOperation

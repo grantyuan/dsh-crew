@@ -40,6 +40,7 @@
 - 只读花名册不渲染动作，第三轨随之塌缩，把宽度还给 description，而不是留一个空洞。membership 动作是整行唯一的控件：一个 `Button size="sm" variant="outline"`，至少 64×28，标签在 添加/移除/更新中… 之间变化而外形不变；行自身的失败信息作为 `role="alert"` 渲染在行内文案轨下方。窄于 600px 时动作落到身份下方并与文案左对齐——被压窄的弹层放不下第三列。
 - membership 语义跟随 Host：加入要求 `availability === 'active'`（Host 会拒绝其他 availability），退出只要求 membership 事实本身，所以已经加入但暂时不可用的成员仍然保留可用的 移除。
 - 只有侧栏 Agents 在写法上不同：它像目录那样直呼 `builder`，其余花名册按 composer 的称呼写 `@builder`。
+- handle 行以 flex 同时容纳 handle 与工作状态徽标：徽标是 `strong` 的兄弟节点而非其文本内容的一部分，因此 handle 自身的文本就是纯粹的 handle——目录查询与可访问名称读到的是 `builder`，而不是 `builder 空闲`。徽标复用 leader 徽标的 hairline 几何（`10px`/14px、细边框、5px 前距），`busy` 用强调色、`free` 刻意弱化、其余保持安静；它读取 Member 声明的工作状态，投影尚无该字段时回退为 `idle`。
 
 ## Human 资料页（我的资料）
 - 设置面板里 Team 只有这一面：`settings.section` 的 `team-human` 条目（「我的资料」），只在普通模式提供——Team 模式接管侧栏后设置面板不可达。导航轨与内容列由 shell 画，所以本段自己画 18px/600 标题，其余行沿用 shipped 设置语言：16px/0 内边距配 border-l2 发丝线、14px/22px 标题叠 12px/18px tertiary 说明、控件间距 12px；按钮与输入框直接用 shipped `Button` 与 `Input`，不另起一份声明。因为导航轨把这个条目与 Harness 自己的页面排在一起，标题下方加一行 13px tertiary 引言，写明这一页属于谁、改动作用在哪里——而且这行页头在**每个状态**都渲染（读取失败时也在），页面不会把「这是谁的资料」晾着不答。脚注写出版本号并链接仓库；升级提示行只在 Host 报告有时才出现。

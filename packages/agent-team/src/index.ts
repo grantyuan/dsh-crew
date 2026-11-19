@@ -39,7 +39,7 @@ import { CONTEXT_CONTINUITY_PROJECTION_KEY, readContextTimeline, type ContextPro
 import { createTeamContextManagement, TEAM_CONTEXT_CODEC } from './context-continuity-host.ts'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
 import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, createTeamContextProjectionConfig, createTeamContextProjectionDefinition, foldTeamContextProjection, retainedTopicsThrough, TeamContextProjectionHost } from './context-projection.ts'
-import { AGENT_TEAM_HUMAN_HANDLE, AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamLedger, agentTeamAssistantActor, agentTeamHumanActor, type AgentTeamAuthorizedAssistantReplyRequest, type AgentTeamDurableMemberResult } from './ledger.ts'
+import { AGENT_TEAM_HUMAN_HANDLE, AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamLedger, AgentTeamDeliveryBlockedError, agentTeamAssistantActor, agentTeamHumanActor, agentTeamWorkStatusOf, type AgentTeamAuthorizedAssistantReplyRequest, type AgentTeamDurableMemberResult } from './ledger.ts'
 import { LedgerFence, ledgerFenceFor } from './ledger-fence.ts'
 import { AGENT_TEAM_TOOL_NAMES, BUNDLED_SKILLS_DIRECTORY, deepCopyCapabilities, deepCopyPrompt, isProtectedPromptSection, memberMemoryDirectoryName, memberMemoryDirectoryPath, MemberRuntime, promptSectionByteLength, sectionToolMapping } from './member-runtime.ts'
 import { carriedSystemPromptFromEvents, carriedSystemPromptFromSeed, carriedSystemPromptOfSession } from './member-prompt-carry.ts'
@@ -50,7 +50,7 @@ import { listPrivateSkillNames } from './member-skills.ts'
 import { BlockAssembler, LlmError } from '@deepseek-ai/dsh-llm'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
 import { classifyRecoverableError, RecoveryCoordinator, RECOVERY_MAX_CONSECUTIVE_ERRORS } from './recovery.ts'
-import { assistantPlainText, classifyAssistantResponse, classifyStoppedTurnTail, COMPLETION_MARKER, RESPONSE_GUARD_MAX_CONSECUTIVE, RESPONSE_GUARD_NOTICE_SUMMARY, ResponseGuardCoordinator } from './response-guard.ts'
+import { assistantPlainText, classifyAssistantResponse, classifyStoppedTurnTail, RESPONSE_GUARD_MAX_CONSECUTIVE, RESPONSE_GUARD_NOTICE_SUMMARY, ResponseGuardCoordinator, TEAM_SET_STATUS_TOOL_NAME } from './response-guard.ts'
 import { buildRelevanceJudge, CONTEXT_RELEVANCE_THRESHOLD, DISPATCH_HISTORY_MESSAGE_LIMIT, parseRelevanceScore, RELEVANCE_JUDGE_MAX_TOKENS, RELEVANCE_JUDGE_TIMEOUT_MS } from './context-relevance.ts'
 import { MemberSupervisor, supervisionResetNotice, SUPERVISION_FAILURE_WINDOW_MS, SUPERVISION_HUNG_MS, SUPERVISION_MAX_CONSECUTIVE_FAILURES, SUPERVISION_MAX_RESTART_ATTEMPTS, SUPERVISION_WINDOW_FAILURES, type MemberSupervisionState, type SupervisionTrigger } from './supervisor.ts'
 import { CONTINUATION_NUDGE_MARKER, TaskContinuationWatcher, continuationNudgeText, type ContinuationLeader, type ContinuationTask } from './continuation-watcher.ts'
@@ -210,6 +210,8 @@ import type {
   AgentTeamSetGatewayConfigRequest,
   AgentTeamSetGatewayConfigResult,
   AgentTeamSetMemberStateRequest,
+  AgentTeamSetMemberStatusRequest,
+  AgentTeamSetMemberStatusResult,
   AgentTeamStatus,
   AgentTeamTask,
   AgentTeamTaskRequest,
@@ -775,9 +777,10 @@ export default class AgentTeam extends TypertRemoteService {
         // Directive rather than a bare "continue": the live lane showed a
         // model that answers a one-word nudge with another tool-less text
         // round, spending the budget on narration. The reminder names both
-        // exits the protocol allows — keep working, or close with the marker.
+        // exits the protocol allows — keep working, or close the turn by
+        // declaring a status.
         const message = createUserMessage({
-          content: [{ type: 'text', text: `Your last response ended the turn without a tool call and without the ${COMPLETION_MARKER} closing marker, so the Team guard reads your work as unfinished. If work remains, make your next tool call now and keep going. If everything you owe is already delivered where your teammates can see it, post the completion record in the relevant Thread, then end your reply with ${COMPLETION_MARKER}.` }],
+          content: [{ type: 'text', text: `Your last response ended the turn on plain text without any tool call, so the Team guard reads your work as unfinished. If work remains, make your next tool call now and keep going. If everything you owe is already delivered where your teammates can see it, post the completion record in the relevant Thread, then call ${TEAM_SET_STATUS_TOOL_NAME} with idle, waiting, or free to close the turn — that call is the completion signal.` }],
           source: { kind: AGENT_TEAM_PLUGIN_ID, form: 'notice', summary: RESPONSE_GUARD_NOTICE_SUMMARY },
         })
         try {
@@ -877,8 +880,9 @@ export default class AgentTeam extends TypertRemoteService {
     log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
   })
   /**
-   * The per-Member completion liaison: a Member that finishes on the 任务结束
-   * marker and stays idle gets checked — report to the designated leader, or
+   * The per-Member completion liaison: a Member that finishes on an
+   * idle/waiting declaration and stays idle gets checked — report to the
+   * designated leader, or
    * an open-Task push to the Member itself when the Workspace has no leader,
    * whose explicit refusal (a reply opening with 拒绝继续) is relayed to
    * `@human`. See `completion-liaison.ts` for the pass policy and the three
@@ -1407,14 +1411,20 @@ export default class AgentTeam extends TypertRemoteService {
         // idle on a truncated answer; the Host does not auto-continue it — the
         // designated leader is told and decides what happens to the Member.
         if (reasonKind === 'max-tokens') this.truncationEscalation.onTruncatedStop(memberId)
-        if (stopOutcome === 'marker') {
-          // Closing a turn on the marker ends any open truncation episode: the
-          // Member is back to working through its work normally.
+        if (stopOutcome === 'completed') {
+          // Closing a turn on a terminal team_set_status declaration ends any
+          // open truncation episode: the Member is back to working through its
+          // work normally.
           this.truncationEscalation.onCleanStop(memberId)
           this.armFreshStartReset(memberId)
           // The completion liaison opens one report-check episode and closes
-          // any Task-push decision the Member was mulling over.
-          this.completionLiaison.onCompletedStop(memberId, this.requireLedger().position())
+          // any Task-push decision the Member was mulling over — but only for
+          // an idle/waiting declaration: a busy stop keeps working and a free
+          // stop is off duty, so neither summons a report check or a push.
+          const declared = this.requireLedger().getMember(memberId)
+          if (declared !== undefined && (agentTeamWorkStatusOf(declared) === 'idle' || agentTeamWorkStatusOf(declared) === 'waiting')) {
+            this.completionLiaison.onCompletedStop(memberId, this.requireLedger().position())
+          }
         }
       }
       // Context management reacts only after a successful durable tool/result;
@@ -5020,6 +5030,19 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   /**
+   * Agent-authored declared work status through `team_set_status`. The ledger
+   * holds the Member-self authority: the caller may only declare its own
+   * status, and `working` is rejected there because it lands only through the
+   * Host's delivery automation.
+   */
+  async setMemberStatusForAgent(agent: Agent, request: AgentTeamSetMemberStatusRequest): Promise<AgentTeamSetMemberStatusResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const result = await this.requireLedger().setMemberStatus({ ...request, actor })
+    if (result.committed) this.emitCommitted(result.value.receipt)
+    return result.value
+  }
+
+  /**
    * Agent-readable queue read for `team_queue list`: a Member sees its own
    * queue only; a Leader may name any Member of the Workspace. The queue's
    * write path stays Human-or-Leader — this read never widens it.
@@ -5257,6 +5280,7 @@ export default class AgentTeam extends TypertRemoteService {
     const result = await this.requireLedger().sendDm({ ...request, actor })
     if (!result.committed) return result.value
     this.emitCommitted(result.value.receipt)
+    this.autoWorkingOnDelivery(actor, request.workspaceId, [{ memberId: result.value.recipient.memberId }])
     const recipient = result.value.recipient
     const handle = this.handles.get(recipient.memberId)
     if (handle === undefined) {
@@ -6464,6 +6488,7 @@ export default class AgentTeam extends TypertRemoteService {
     // the sender declared this work needs the Member's live context, or the
     // model's relevance judgement says the assignment continues that work.
     const outcome = result.value
+    if (result.committed && outcome.kind === 'committed') this.autoWorkingOnDelivery(actor, request.workspaceId, outcome.directMarkers)
     if (actor.kind === 'human' && request.asTask !== false && outcome.kind === 'committed') {
       for (const marker of outcome.directMarkers) {
         const stored = this.ledger?.getMember(marker.memberId)
@@ -6657,6 +6682,7 @@ export default class AgentTeam extends TypertRemoteService {
     })
     if (request.keepContext === true && result.committed && result.value.kind === 'committed') this.keepFreshStartDispatch(result.value.directMarkers)
     this.emitCommittedOutcome(result)
+    if (result.committed && result.value.kind === 'committed') this.autoWorkingOnDelivery(actor, request.workspaceId, result.value.directMarkers)
     return result.value
   }
 
@@ -6682,6 +6708,37 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private keepFreshStartDispatch(markers: readonly AgentTeamDirectMarker[]): void {
     for (const marker of markers) this.keptDispatchSequence.set(marker.memberId, marker.sequence)
+  }
+
+  /**
+   * Delivery lands `working`: when the Human or the recipient Workspace's
+   * designated Team leader reaches a Member, the Host commits the declared
+   * status under the recipient's own member authority — the Host is the
+   * executor, the Member is the actor (the session-rollover precedent). Only
+   * direct deliveries trigger it; follower chatter never flips a status. A
+   * failure logs and leaves the previous status durable.
+   */
+  private autoWorkingOnDelivery(actor: AgentTeamHumanActor | AgentTeamAssistantActor | AgentTeamMemberActor, workspaceId: WorkspaceId, directMarkers: readonly { readonly memberId: AgentTeamMemberId }[]): void {
+    if (actor.kind === 'assistant') return
+    const ledger = this.ledger
+    if (ledger === undefined) return
+    const authoritative = actor.kind === 'human' || (actor.kind === 'member' && this.designatedLeaderOf(workspaceId)?.memberId === actor.memberId)
+    if (!authoritative) return
+    for (const marker of directMarkers) {
+      if (marker.memberId === AGENT_TEAM_HUMAN_MEMBER_ID) continue
+      const member = ledger.getMember(marker.memberId)
+      if (member === undefined || member.state !== 'enabled') continue
+      if (agentTeamWorkStatusOf(member) === 'working') continue
+      void ledger.setMemberStatusByDelivery({
+        requestId: randomUUID() as AgentTeamRequestId,
+        workspaceId, memberId: marker.memberId,
+        actor: Object.freeze({ kind: 'member', memberId: marker.memberId, handle: member.handle }),
+      }).then(result => {
+        if (result.committed) this.emitCommitted(result.value.receipt)
+      }).catch(error => {
+        this.ctx.logger.warn(`agent-team: delivery working-status for '${marker.memberId}' failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
   }
 
   /** Fence one Human Remote call: accepting Host, known Workspace, Human actor. */
@@ -6972,9 +7029,9 @@ export default class AgentTeam extends TypertRemoteService {
       // beside it.
       if (persisted) {
         const tail = classifyStoppedTurnTail(created.agent.session.ownEvents())
-        if (tail.outcome === 'marker') {
+        if (tail.outcome === 'completed') {
           this.armFreshStartReset(member.memberId)
-          // The completion liaison reads the same marker tail retroactively:
+          // The completion liaison reads the same completed tail retroactively:
           // a Member whose completed stop was cut into by the restart still
           // earns its report check once the new process is watching, so idle
           // unreported Members do not slip through on every deploy. Only a
@@ -6982,9 +7039,12 @@ export default class AgentTeam extends TypertRemoteService {
           // a pending DIRECT fact — a mention or DM that will wake the Member
           // anyway — is the leader's own follow-up in flight, so no episode
           // opens beside it. Pure follower chatter never suppresses: under
-          // point-to-point waking it summons no turn of its own.
+          // point-to-point waking it summons no turn of its own. The declared
+          // status gates the episode: busy keeps working, free is off duty.
+          const declared = this.requireLedger().getMember(member.memberId)
           const pendingDirect = this.requireLedger().notificationFacts(member.memberId).some(({ item }) => item.directCount > 0)
-          if (tail.at !== undefined
+          if ((declared === undefined || agentTeamWorkStatusOf(declared) === 'idle' || agentTeamWorkStatusOf(declared) === 'waiting')
+            && tail.at !== undefined
             && Date.now() - tail.at <= BOOT_FAULT_REMINDER_WINDOW_MS
             && !pendingDirect) {
             this.completionLiaison.onCompletedStop(

@@ -365,9 +365,19 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
                                   <span
                                     class="copy agentCopy"
                                   >
-                                    <strong>
-                                      builder
-                                    </strong>
+                                    <span
+                                      class="handle"
+                                    >
+                                      <strong>
+                                        builder
+                                      </strong>
+                                      <small
+                                        class="workStatus"
+                                        data-status="idle"
+                                      >
+                                        空闲
+                                      </small>
+                                    </span>
                                     <small>
                                       builder description
                                     </small>
@@ -436,9 +446,19 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
                                   <span
                                     class="copy agentCopy"
                                   >
-                                    <strong>
-                                      worker
-                                    </strong>
+                                    <span
+                                      class="handle"
+                                    >
+                                      <strong>
+                                        worker
+                                      </strong>
+                                      <small
+                                        class="workStatus"
+                                        data-status="idle"
+                                      >
+                                        空闲
+                                      </small>
+                                    </span>
                                     <small>
                                       worker description
                                     </small>
@@ -504,9 +524,19 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
                                   <span
                                     class="copy agentCopy"
                                   >
-                                    <strong>
-                                      failed
-                                    </strong>
+                                    <span
+                                      class="handle"
+                                    >
+                                      <strong>
+                                        failed
+                                      </strong>
+                                      <small
+                                        class="workStatus"
+                                        data-status="idle"
+                                      >
+                                        空闲
+                                      </small>
+                                    </span>
                                     <small>
                                       failed description
                                     </small>
@@ -573,9 +603,19 @@ exports[`Team conversation surfaces > restores persisted Team mode, reconciles a
                                   <span
                                     class="copy agentCopy"
                                   >
-                                    <strong>
-                                      offline
-                                    </strong>
+                                    <span
+                                      class="handle"
+                                    >
+                                      <strong>
+                                        offline
+                                      </strong>
+                                      <small
+                                        class="workStatus"
+                                        data-status="idle"
+                                      >
+                                        空闲
+                                      </small>
+                                    </span>
                                     <small>
                                       offline description
                                     </small>

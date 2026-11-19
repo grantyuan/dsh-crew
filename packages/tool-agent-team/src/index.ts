@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import AgentTeam, { AGENT_TEAM_ASSISTANT_HANDLE, AGENT_TEAM_ASSISTANT_MEMBER_ID, AGENT_TEAM_RECALLED_BODY_TOMBSTONE, AgentTeamDmDeliveryError, markAgentTeamPreset } from '@grantyuan/dsh-crew/host'
 import { formatTeamTimestamp } from '@grantyuan/dsh-crew/time-format'
 import { registerContextTools } from './context-tools.ts'
-import { service, workspaceOf, workspaceParam, type TeamToolAgent } from './host-access.ts'
+import { member, service, workspaceOf, workspaceParam, type TeamToolAgent } from './host-access.ts'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type {
   AgentTeamChannelRef,
@@ -585,6 +585,34 @@ function messageOutcome(result: Awaited<ReturnType<AgentTeam['sendMessageForAgen
     expectedRevision: result.expectedRevision, revision: result.revision }
   throw new Error('Agents cannot receive invitation confirmations')
 }
+
+const teamSetStatus = markAgentTeamPreset(defineTool({
+  name: 'team_set_status',
+  description: 'Declare your own work status — how reachable you are, visible to the whole Team. `idle` when nothing is assigned to you; `waiting` when you have stopped to await another Member\'s or the Human\'s feedback and cannot progress; `free` when you are off duty between stretches or outside working time — while free, only the Human and your designated leader can reach you; `busy` when the Human or your leader asked you to hold a focused stretch and declined external messages — same reachability as free. `working` is not settable here: the Host lands it automatically whenever a Human or leader message reaches you. Close every turn whose owed work is delivered with one of idle, waiting, or free — that call is your turn\'s completion signal, and a stop without any tool call is treated as a faulty round.',
+  parameters: {
+    status: { type: 'string', required: true, enum: ['busy', 'idle', 'waiting', 'free'], description: 'The declared work status. idle = unassigned; waiting = blocked on someone else\'s feedback; free = off duty, only the Human or your leader can summon you; busy = focused stretch requested by the Human or leader, external messages declined.' },
+    workspace: workspaceParam,
+  },
+  output: {
+    schema: { type: 'object', additionalProperties: false, properties: {
+      kind: { type: 'string', required: true }, status: { type: 'string', required: true }, memberId: { type: 'string' }, handle: { type: 'string' }, occurredAt: { type: 'string' },
+    } },
+    render: (_args, value) => [{ type: 'text', text: `Status committed — @${value.handle} is now ${value.status}.` }],
+  },
+  async execute(args, exec) {
+    const agent = exec.agent
+    if (agent === undefined) throw new Error('team_set_status requires an Agent session')
+    const host = service(agent)
+    const current = member(agent)
+    const result = await host.setMemberStatusForAgent(agent, {
+      requestId: requestId(agent.id, exec.callId),
+      workspaceId: workspaceOf(args, agent),
+      memberId: current.memberId,
+      status: args.status,
+    })
+    return { kind: result.kind, status: result.status, memberId: result.member.memberId, handle: result.member.handle, occurredAt: result.receipt.occurredAt }
+  },
+}))
 
 const teamClaim = defineTool({
   name: 'team_claim',
@@ -1280,6 +1308,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(teamInbox)
   ctx.tools.register(teamThread)
   ctx.tools.register(teamMessage)
+  ctx.tools.register(teamSetStatus)
   ctx.tools.register(teamClaim)
   ctx.tools.register(teamQueue)
   ctx.tools.register(teamView)

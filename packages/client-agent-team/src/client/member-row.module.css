@@ -44,6 +44,16 @@
   white-space: nowrap;
 }
 
+/* The handle line flexes the handle and the work-status chip together, while
+   the handle's own text stays exactly the handle — the chip is a sibling, not
+   part of the strong's text content, so directory lookups and accessible names
+   read the plain spelling. */
+.handle {
+  align-items: center;
+  display: flex;
+  min-width: 0;
+}
+
 /* The leader badge rides the handle line: one quiet chip, the same hairline
    grammar the Inbox row's Task marker speaks, so the designated Member reads
    as marked — not as decorated. */
@@ -58,6 +68,32 @@
   padding: 0 4px;
   vertical-align: 1px;
   white-space: nowrap;
+}
+
+/* The declared work status rides the same handle line and reuses the leader
+   chip's geometry. `busy` speaks with an accent so a declined-messages Member
+   reads at a glance; `free` is deliberately muted — an off-duty Member draws
+   less attention than a working one; everything else stays quiet. */
+.workStatus {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm, 6px);
+  color: var(--dsw-alias-label-secondary);
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  margin-left: 5px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.workStatus[data-status='busy'] {
+  border-color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-border-l2));
+  color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary));
+}
+
+.workStatus[data-status='free'] {
+  color: var(--dsw-alias-label-tertiary);
 }
 
 /* The description annotates the handle, never competes with it: one step down

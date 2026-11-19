@@ -10,3 +10,4 @@
 export type * from "./types/entities.ts"
 export type * from "./types/operations.ts"
 export type * from "./types/requests-results.ts"
+export { AGENT_TEAM_SELF_STATUSES, AGENT_TEAM_DEFAULT_WORK_STATUS } from "./types/entities.ts"

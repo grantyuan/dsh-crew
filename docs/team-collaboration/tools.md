@@ -1,8 +1,8 @@
-# Twelve-tool protocol
+# Team tool protocol
 
 English | [中文](tools.zh.md)
 
-Successful and rejected tool results return through the normal model loop. `context_rollover` and `context_checkpoint` conclude the Agent turn — a rollover must not be followed by old-generation work, and a checkpoint resolves at its containing turn's end; every other Team tool does not.
+Successful and rejected tool results return through the normal model loop. `context_rollover` and `context_checkpoint` conclude the Agent turn — a rollover must not be followed by old-generation work, and a checkpoint resolves at its containing turn's end; every other Team tool does not. A turn that ends without either a continuing tool call or a terminal `team_set_status` declaration (`idle`, `waiting`, or `free`) reads as unfinished work: the declaration is the completion signal, and the preset's loop discipline tells the model to close every finished turn with it.
 
 ## `team_view`
 
@@ -59,6 +59,16 @@ Typed rejection results (`unread_required`, `stale_revision`) begin `Not committ
 `team_message.dm` sends a private direct message to one enabled Agent Member in the same Workspace. A DM is pure delivery: the ledger appends an audit-only `team/dm-sent` operation (request-idempotent) while the recipient's live session receives the body as a relay-form injected user message — idle recipients get a new turn, busy ones are steered into the current turn. DMs create no Channel, Thread, revision, Attention, or Inbox markers and wake no change waiters. The Human cannot be DMed.
 
 If the recipient has no live session or the wake fails, the operation stays durable and the sender gets a structured delivery error instead of a silent loss; there is no automatic redelivery. Use DMs for quick clarifications and status syncs only — task work, decisions, and anything needing team visibility or traceability belong in Threads, and an exchange passing about 3 round trips should move to a Thread because each DM costs the recipient a full agent turn.
+
+## `team_set_status`
+
+`team_set_status` declares the calling Member's own work status — the Team's reachability table, one durable ledger operation per declaration. `idle` means nothing is assigned; `waiting` means stopped to await another Member's or the Human's feedback; `free` means off duty between stretches or outside working time; `busy` is a focused stretch the Human or the leader asked for, set when that stretch begins.
+
+While `free` or `busy`, only the Human and the designated Team leader can reach the Member — sends and DMs from anyone else, including the Team Assistant, are refused at the ledger with a structured rejection naming the sender and the declared status.
+
+`working` is not settable: the Host commits it automatically whenever a Human or leader message reaches the Member, and the ledger rejects any attempt to declare it — as it rejects a Member declaring another Member's status, since a Member may only declare its own. A retried declaration with the same payload returns the original receipt; reusing a request id with a different payload is a collision, and a declaration whose replay contradicts the projected prior status fails the replay.
+
+The declaration is also the completion signal: a turn that ends without a continuing tool call and without a terminal declaration (`idle`, `waiting`, or `free`) reads as unfinished work and is steered back. `busy` belongs at the start of a requested focused stretch, never at its end; a closeout always declares one of the three terminal statuses according to the work's context.
 
 ## `team_claim`
 

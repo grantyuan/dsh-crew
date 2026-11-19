@@ -59,6 +59,8 @@ The row is a three-track grid — 24px avatar, `minmax(0, 1fr)` copy, `auto` act
 
 The membership action is the row's only chrome — one `Button size="sm" variant="outline"` of at least 64×28 whose label changes (添加/移除, 更新中… while pending) while its shape does not — and the row's own failure line renders inside it as `role="alert"` under the copy track. Below 600px the action drops under the identity and aligns with the copy, because a squeezed dialog cannot afford a third column.
 
+The handle line flexes the handle and the declared work-status chip together: the chip is a sibling of the `strong`, not part of its text content, so the handle's own text stays exactly the handle spelling — directory lookups and accessible names read `builder`, not `builder 空闲`. The chip reuses the leader badge's hairline geometry (`10px`/14px, hairline border, 5px lead), is accented for `busy`, muted for `free`, and quiet otherwise; it reads the Member's declared status and falls back to `idle` when a projection predates the field.
+
 Membership law follows the Host: joining needs `availability === 'active'` (the Host refuses any other availability), while leaving needs only the membership fact, so an already-joined Member who is temporarily down keeps a working 移除. The sidebar Agent list is the exception on spelling: it names Members as the directory does (`builder`), while rosters address them the way the composer does (`@builder`).
 
 ## Human profile settings

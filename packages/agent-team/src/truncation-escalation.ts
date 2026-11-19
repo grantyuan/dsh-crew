@@ -17,7 +17,7 @@
  * designated, then latches per (Member, Workspace) for
  * {@link TRUNCATION_ESCALATION_COOLDOWN_MS} — a Member that keeps truncating
  * inside one window is the same unresolved situation, not new information. A
- * clean marker stop closes the episode, so the next truncation escalates
+ * clean completed stop closes the episode, so the next truncation escalates
  * fresh. A Member with no eligible leader anywhere logs once per episode
  * instead of spamming every stop.
  *
@@ -121,7 +121,7 @@ export class TruncationEscalator {
     this.onCleanStop(memberId)
   }
 
-  /** A clean marker stop closes the Member's episode: the next truncation is a fresh event. */
+  /** A clean completed stop closes the Member's episode: the next truncation is a fresh event. */
   onCleanStop(memberId: AgentTeamMemberId): void {
     this.missingLeaderLogged.delete(memberId)
     const prefix = `${memberId}\u0000`

@@ -1,4 +1,5 @@
 import { changeBaseline, nextChange } from './helpers/change-stream.ts'
+import { CloseUpgradeState, isPlainStopClose } from './helpers/scripted-close.ts'
 import { executeToolCall } from './helpers/tool-call.ts'
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -37,7 +38,6 @@ import { checkpointRefFor, foldTeamContextProjection } from '../src/context-proj
 import { AGENT_TEAM_PLUGIN_ID, continuationCheckpointRefOf, handoffOf, isCheckpointContinuationMessage, isHandoffMessage } from '../src/context-source.ts'
 import { RECOVERY_DELAY_MS } from '../src/recovery.ts'
 import { RELEVANCE_JUDGE_SYSTEM_PREFIX } from '../src/context-relevance.ts'
-import { COMPLETION_MARKER } from '../src/response-guard.ts'
 import { CONTINUATION_NUDGE_MARKER, CONTINUATION_QUIET_MS, CONTINUATION_REARM_MS, continuationNudgeText } from '../src/continuation-watcher.ts'
 import { LIAISON_COOLDOWN_MS, LIAISON_REPORT_GRACE_MS } from '../src/completion-liaison.ts'
 import type { AgentTeamChannelRef, AgentTeamClaimRef, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId } from '../src/types.ts'
@@ -68,9 +68,18 @@ class EmptyAdapter extends LlmAdapter {
   // stay below every budget.
   override resolveModel(provider: string, model: string) { return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 320_000 } }) }
   // Scripted turns must honor the Member loop-discipline contract: a text-only
-  // round without the closing marker reads as a guard fault and would open a
-  // continue turn no test budgets for.
-  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> { yield* textResponse('Done.') }
+  // round without a terminal team_set_status declaration reads as a guard
+  // fault and would open a continue turn no test budgets for. The declaration
+  // round and its closing text are two separate model calls.
+  protected readonly closeUpgrade = new CloseUpgradeState()
+  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const pending = this.closeUpgrade.takePendingClose()
+    if (pending !== undefined) {
+      for (const chunk of pending) yield chunk
+      return
+    }
+    for (const chunk of this.closeUpgrade.holdClosingText(textResponse('Done.'))) yield chunk
+  }
 }
 
 class ScriptedAdapter extends EmptyAdapter {
@@ -78,6 +87,7 @@ class ScriptedAdapter extends EmptyAdapter {
   /** Session ids that produced each recorded request, aligned with `requests`. */
   readonly requestSessions: Array<string | undefined> = []
   private readonly responses: StreamChunk[][] = []
+  private readonly rawQueue: StreamChunk[][] = []
   /** Context window per model name; the pressure route probe drives this. */
   resolveModelWindow: (model: string) => number = () => 320_000
   /** Default per-request output cap per model; the pressure budget reserve reads this. */
@@ -92,11 +102,50 @@ class ScriptedAdapter extends EmptyAdapter {
     this.responses.push(response)
   }
 
+  /** Bypasses the close upgrade: intentionally faulty rounds must stay faulty. */
+  enqueueRaw(response: StreamChunk[]): void {
+    this.rawQueue.push(response)
+  }
+
+  /**
+   * Model requests excluding the closing text rounds that the close upgrade
+   * holds: a scripted close costs one extra model request (the terminal
+   * declaration) whose round carries no scripted intent, so turn-count
+   * assertions keep measuring the scripted rounds.
+   */
+  get workRequests(): GenerateOptions[] {
+    return this.requests.filter((_, index) => !this.closingRequestIndexes.has(index))
+  }
+
+  private readonly closingRequestIndexes = new Set<number>()
+
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const pending = this.closeUpgrade.takePendingClose()
+    const index = this.requests.length
     this.requests.push(options)
     this.requestSessions.push((options as { sessionId?: string }).sessionId)
+    // The closing text round held by the previous call's declaration is
+    // served verbatim: it ends the turn as a healthy completed stop.
+    if (pending !== undefined) {
+      this.closingRequestIndexes.add(index)
+      for (const chunk of pending) yield chunk
+      return
+    }
+    // Raw responses (intentionally faulty rounds) never upgrade; queued
+    // responses upgrade a legacy text close into the declaration round.
+    const raw = this.rawQueue.shift()
+    if (raw !== undefined) {
+      for (const chunk of raw) yield chunk
+      return
+    }
     const response = this.responses.shift()
     if (response === undefined) throw new Error('ScriptedAdapter response queue is empty')
+    // Legacy single-text closes upgrade to the declaration round plus the
+    // held closing text, keeping every scripted close a healthy stop.
+    if (isPlainStopClose(response)) {
+      for (const chunk of this.closeUpgrade.holdClosingText(response)) yield chunk
+      return
+    }
     for (const chunk of response) yield chunk
   }
 }
@@ -141,11 +190,25 @@ class GatedAdapter extends ScriptedAdapter {
   readonly release = Promise.withResolvers<void>()
   private calls = 0
 
-  /** 1-based model-call number whose stream blocks until `release`; default 1. */
-  constructor(private readonly gateAt = 1) { super() }
+  /**
+   * 1-based model-call number whose stream blocks until `release`; default 1.
+   * `abruptRelease` serves nothing after the gate: the force-stop tests kill
+   * the turn while it is parked, and serving the closing declaration there
+   * would let the stop-reminder wake consume the held text into the session
+   * the stop was meant to keep clean.
+   */
+  constructor(private readonly gateAt = 1, private readonly options: { abruptRelease?: boolean } = {}) { super() }
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
+    // The closing text round held by the previous call's declaration is
+    // served verbatim, ahead of the gate check.
+    const pending = this.closeUpgrade.takePendingClose()
+    if (pending !== undefined) {
+      this.requests.push(options)
+      for (const chunk of pending) yield chunk
+      return
+    }
     if (this.calls !== this.gateAt) {
       yield* super.stream(options)
       return
@@ -153,7 +216,8 @@ class GatedAdapter extends ScriptedAdapter {
     this.requests.push(options)
     this.started.resolve()
     await this.release.promise
-    for (const chunk of textResponse('Initial work finished.')) yield chunk
+    if (this.options.abruptRelease) throw new Error('aborted mid-flight by the force stop (test seam)')
+    for (const chunk of this.closeUpgrade.holdClosingText(textResponse('Initial work finished.'))) yield chunk
   }
 }
 
@@ -169,6 +233,12 @@ class TwoGateAdapter extends ScriptedAdapter {
   private calls = 0
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const pending = this.closeUpgrade.takePendingClose()
+    if (pending !== undefined) {
+      this.requests.push(options)
+      for (const chunk of pending) yield chunk
+      return
+    }
     const gate = this.gates[this.calls]
     this.calls += 1
     if (gate === undefined) {
@@ -178,7 +248,7 @@ class TwoGateAdapter extends ScriptedAdapter {
     this.requests.push(options)
     gate.started.resolve()
     await gate.release.promise
-    for (const chunk of textResponse('Acknowledged.')) yield chunk
+    for (const chunk of this.closeUpgrade.holdClosingText(textResponse('Acknowledged.'))) yield chunk
   }
 }
 
@@ -195,14 +265,14 @@ function toolCallResponse(rawCallId: string, name: string, args: object): Stream
 }
 
 function textResponse(text: string): StreamChunk[] {
-  // Scripted replies close with the completion marker so the response guard
-  // reads them as healthy rounds; the token accounting stays on the scripted
-  // body so pressure-budget tuning is untouched.
-  const body = `${text}${COMPLETION_MARKER}`
+  // The final text round of a scripted close; the adapter prepends the
+  // terminal team_set_status declaration (see withClosingStatus) so the
+  // response guard reads the turn as healthy. The token accounting stays on
+  // the scripted body so pressure-budget tuning is untouched.
   return [
     { type: 'block-start', index: 0, blockType: 'text' },
-    { type: 'text-delta', index: 0, text: body },
-    { type: 'block-end', index: 0, block: { type: 'text', text: body } },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
     { type: 'usage', usage: { inputTokens: 10, outputTokens: text.length } },
     { type: 'finish', reason: { kind: 'stop' } },
   ]
@@ -363,8 +433,8 @@ describe('Agent Team Member lifecycle', () => {
     // The committed join wakes the idle Member once; the notice names the Workspace and the unchanged Session.
     adapter.enqueue(textResponse('Acknowledged the participation change.'))
     await agent.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const noticeRequest = JSON.stringify(adapter.requests[0]!.messages)
+    expect(adapter.workRequests).toHaveLength(1)
+    const noticeRequest = JSON.stringify(adapter.workRequests[0]!.messages)
     expect(noticeRequest).toContain('Team participation changed')
     expect(noticeRequest).toContain(otherId)
     expect(noticeRequest).toContain('Your Session and cwd have not moved')
@@ -503,7 +573,7 @@ describe('Agent Team Member lifecycle', () => {
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('clear-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Build the initial feature', recipients: [added.status.member.memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await idle
-    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.workRequests).toHaveLength(1)
     expect(liveBefore.session.ownEvents().some(event => event.type === 'user/message' || event.type === 'turn/start')).toBe(true)
     // Consume the durable unread so the Member settles to available; the clear
     // guard requires an idle Member.
@@ -1146,7 +1216,7 @@ describe('Agent Team Member lifecycle', () => {
     adapter.enqueue(toolCallResponse('clock-tool-2', 'team_inbox', {}))
     adapter.enqueue(textResponse('Clock observed.'))
     await waitForIdle(ctx, agent)
-    expect(adapter.requests).toHaveLength(3)
+    expect(adapter.workRequests).toHaveLength(3)
     const first = JSON.stringify(adapter.requests[0]!.messages)
     // The snapshot is model-visible inside the turn's first request.
     expect(first).toContain('Team clock sampled while preparing turn ')
@@ -1199,14 +1269,16 @@ describe('Agent Team Member lifecycle', () => {
     const idle = waitForIdle(ctx, agent)
     await idle
 
-    expect(adapter.requests).toHaveLength(3)
+    expect(adapter.workRequests).toHaveLength(3)
     const afterRejection = JSON.stringify(adapter.requests[2]!.messages)
     expect(afterRejection).toContain(started.task!.taskRef)
     expect(afterRejection).toContain('unread_required')
     const results = agent.session.ownEvents().filter(event => event.type === 'tool/result')
-    expect(results).toHaveLength(2)
+    // team_view, the rejected team_message step, and the closing
+    // team_set_status declaration each record one tool result.
+    expect(results).toHaveLength(3)
     // 0.1.7 carries the outcome on the message, not inside a tool-result block.
-    expect(results.map(result => (result.data.message as { isError?: boolean }).isError)).toEqual([false, false])
+    expect(results.map(result => (result.data.message as { isError?: boolean }).isError)).toEqual([false, false, false])
   })
 
   it('coalesces updates and delivers a running Member hint only at the next step boundary', async () => {
@@ -1265,8 +1337,8 @@ describe('Agent Team Member lifecycle', () => {
     expect(ctx.agentTeam.inboxForAgent(agent, { workspaceId })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1,
       items: [expect.objectContaining({ task: expect.objectContaining({ taskRef: committed.task!.taskRef }), directCount: 1 })] })
     await agent.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const request = JSON.stringify(adapter.requests[0]!.messages)
+    expect(adapter.workRequests).toHaveLength(1)
+    const request = JSON.stringify(adapter.workRequests[0]!.messages)
     expect(request).toContain('Direct Team mention')
     expect(request).toContain('Please investigate the top-level wake path')
     // The rendered sender line, not the 'member:human' ids elsewhere in the request.
@@ -1280,7 +1352,7 @@ describe('Agent Team Member lifecycle', () => {
   it('force-stops the running executor the moment the Human edits the instruction it already read', async () => {
     // Call 1 performs the durable read (the watermark passes the instruction);
     // call 2 is the gated work turn that the edit must interrupt mid-flight.
-    const adapter = new GatedAdapter(2)
+    const adapter = new GatedAdapter(2, { abruptRelease: true })
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('edit-stop-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('edit-stop-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
@@ -1314,7 +1386,7 @@ describe('Agent Team Member lifecycle', () => {
   })
 
   it('force-stops the running executor on recall, tells it plainly, and lets its queued work continue', async () => {
-    const adapter = new GatedAdapter(2)
+    const adapter = new GatedAdapter(2, { abruptRelease: true })
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('recall-stop-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('recall-stop-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
@@ -1372,8 +1444,8 @@ describe('Agent Team Member lifecycle', () => {
 
     adapter.enqueue(textResponse('I will verify the export path.'))
     await peerAgent.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const request = JSON.stringify(adapter.requests[0]!.messages)
+    expect(adapter.workRequests).toHaveLength(1)
+    const request = JSON.stringify(adapter.workRequests[0]!.messages)
     expect(request).toContain('Direct Team mention')
     expect(request).toContain('@peer please verify the export path')
     expect(request).toContain('starter')
@@ -1492,8 +1564,8 @@ describe('Agent Team Member lifecycle', () => {
     ] })
     await agent.whenIdle()
 
-    expect(adapter.requests).toHaveLength(1)
-    const request = JSON.stringify(adapter.requests[0]!.messages)
+    expect(adapter.workRequests).toHaveLength(1)
+    const request = JSON.stringify(adapter.workRequests[0]!.messages)
     expect(request).toContain('Team Task update')
     expect(request).toContain(`human close Task ${started.task!.taskRef}`)
     expect(request).toContain(claim.claim.claimRef)
@@ -1520,8 +1592,8 @@ describe('Agent Team Member lifecycle', () => {
     const second = await ctx.agentTeam.reply({ requestId: requestId('wake-reply-2'), workspaceId, taskRef: started.task!.taskRef, body: 'A second update should coalesce. @builder', baseRevision: first.thread.revision })
     if (second.kind !== 'committed') throw new Error(`expected committed reply, received ${second.kind}`)
     await agent.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const request = JSON.stringify(adapter.requests[0]!.messages)
+    expect(adapter.workRequests).toHaveLength(1)
+    const request = JSON.stringify(adapter.workRequests[0]!.messages)
     // the direct mention and the coalesced unread count arrive together…
     expect(request).toContain('Team Inbox has unread work')
     expect(request).toContain('1 unread update')
@@ -1548,8 +1620,8 @@ describe('Agent Team Member lifecycle', () => {
     await ctx.agentTeam.resumeMember({ requestId: requestId('resume-enable'), memberId: builder.status.member.memberId })
     const resumed = ctx.agents.get(builder.status.member.sessionId)!
     await resumed.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const request = JSON.stringify(adapter.requests[0]!.messages)
+    expect(adapter.workRequests).toHaveLength(1)
+    const request = JSON.stringify(adapter.workRequests[0]!.messages)
     expect(request).toContain('Team Inbox has unread work')
     expect(request).not.toContain('Unread while suspended')
   })
@@ -1634,8 +1706,8 @@ describe('Agent Team Member lifecycle', () => {
       // push past the grace window. The follow-arrival reply names no one, so
       // point-to-point waking leaves it as unread chatter — no round of its
       // own — and the cancelled automatic wakeup adds none either.
-      expect(adapter.requests).toHaveLength(2)
-      const request = JSON.stringify(adapter.requests[0]!.messages)
+      expect(adapter.workRequests).toHaveLength(2)
+      const request = JSON.stringify(adapter.workRequests[0]!.messages)
       expect(request).toContain('The operator asked you to resume after the previous turn ended early.')
       expect(request).not.toContain('temporary service error')
       expect(request).toContain('Please continue the work you were doing before the error.')
@@ -1643,7 +1715,7 @@ describe('Agent Team Member lifecycle', () => {
       expect(request).toContain(started.task!.taskRef)
       expect(request).not.toContain('Unread through manual recovery')
       expect(request).not.toMatch(/automatic recovery|attempt|stop|handoff/i)
-      const push = JSON.stringify(adapter.requests[1]!.messages)
+      const push = JSON.stringify(adapter.workRequests[1]!.messages)
       expect(push).toContain('Task push (no Team leader designated)')
       expect(push).toContain(started.task!.taskRef)
     } finally {
@@ -1704,7 +1776,7 @@ describe('Agent Team Member lifecycle', () => {
   })
 
   it('validates the final Team tool marker during unpublished setup', async () => {
-    expect(AGENT_TEAM_TOOL_NAMES).toEqual(['team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_queue', 'team_view', 'team_rate', 'team_supervise', 'team_watch', 'team_job', 'context_rollover', 'context_checkpoint', 'context_timeline', 'context_interrupt'])
+    expect(AGENT_TEAM_TOOL_NAMES).toEqual(['team_inbox', 'team_thread', 'team_message', 'team_set_status', 'team_claim', 'team_queue', 'team_view', 'team_rate', 'team_supervise', 'team_watch', 'team_job', 'context_rollover', 'context_checkpoint', 'context_timeline', 'context_interrupt'])
     const definition = markAgentTeamPreset({ name: 'team_message' })
     expect(Reflect.get(definition, Symbol.for('@grantyuan/dsh-crew.preset'))).toBe(true)
   })
@@ -2457,7 +2529,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     // checkpoint may not add any request beyond the ordinary continuation.
     adapter.enqueue(toolCallResponse('call-cp-1', 'context_checkpoint', { name: 'before-rewrite' }))
     adapter.enqueue(textResponse('continuing after the checkpoint.'))
-    const requestCountBefore = adapter.requests.length
+    const requestCountBefore = adapter.workRequests.length
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'record a checkpoint' }], source: { kind: 'user' } }))
     // Wait until the continuation turn's reply lands, then for true idle.
     await waitFor(() => live.session.ownEvents().some(event => event.type === 'assistant/message') ? true : undefined)
@@ -2466,8 +2538,9 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     const events = live.session.ownEvents()
     const turns = events.filter(event => event.type === 'turn/start').map(event => (event as { data: { turn: number } }).data.turn)
     expect(turns).toEqual([1, 2])
-    // Exactly two model requests: the checkpoint turn and the continuation.
-    expect(adapter.requests.length - requestCountBefore).toBe(2)
+    // Exactly two model requests: the checkpoint turn and the continuation
+    // (the closing declaration rounds sit outside the work-request count).
+    expect(adapter.workRequests.length - requestCountBefore).toBe(2)
     // The continuation is the quiet Host notice, delivered as the first
     // message of turn 2.
     const turn2Index = events.findIndex(event => event.type === 'turn/start' && (event as { data: { turn: number } }).data.turn === 2)
@@ -4663,6 +4736,10 @@ describe('Agent Team change version domains', () => {
     const live = ctx.agents.get(added.status.member.sessionId)!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('domain-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Unread work', recipients: [added.status.member.memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
+    // The direct delivery auto-commits the Member's working status; that
+    // ledger op reaches the unscoped domain, so drain the Member's activity
+    // before the baseline or the parked-Client checks race it.
+    await live.whenIdle()
 
     const baseline = (await changeBaseline(ctx.agentTeam)).version
     const clients = Array.from({ length: 10 }, (_unused, index) => index % 2 === 0
@@ -5285,11 +5362,11 @@ describe('Agent Team member context control (ticket 01)', () => {
     const added = await ctx.agentTeam.addMember({ requestId: requestId('stoplane-add'), workspaceId, handle: 'drifter', description: 'Trails off mid-task', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const agent = ctx.agents.get(added.status.member.sessionId)!
     // Four consecutive faulty rounds exhaust the three-nudge in-loop budget;
-    // the fifth scripted response — the marker close — can only be reached
-    // when the stop lane reminds the Member after the stand-down. This is
-    // the live Qwen lane: trail-off text stops that once left the Member
-    // stopped with the Task unfinished.
-    for (let round = 0; round < 4; round += 1) adapter.enqueue(faultyTextResponse(`Let me keep checking the build: round ${round}`))
+    // the fifth scripted response — the terminal declaration plus its closing
+    // text — can only be reached when the stop lane reminds the Member after
+    // the stand-down. These are raw enqueues: a trail-off text stop must stay
+    // a fault, never upgrade into a declaration round.
+    for (let round = 0; round < 4; round += 1) adapter.enqueueRaw(faultyTextResponse(`Let me keep checking the build: round ${round}`))
     adapter.enqueue(textResponse('Everything is delivered.'))
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'work the task' }], source: { kind: 'user' } }))
     await waitFor(() => (adapter.requests.length >= 5 ? adapter.requests.length : undefined))
@@ -5311,7 +5388,8 @@ describe('Agent Team member context control (ticket 01)', () => {
     for (let turn = 0; turn < 6; turn += 1) adapter.enqueue(textResponse('Acknowledged.'))
     const sessionOf = (): SessionId => ctx.agentTeam.members().find(status => status.member.memberId === workerId)!.member.sessionId
 
-    // The worker closes its current turn with the completion marker: the
+    // The worker closes its current turn with a terminal team_set_status
+    // declaration: the
     // fresh-start policy arms. Completion alone must NOT renew — the working
     // log still holds the result the teammates may ask about.
     const workerAgent = ctx.agents.get(workerSession0)!

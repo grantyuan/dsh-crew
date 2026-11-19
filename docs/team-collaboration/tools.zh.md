@@ -1,8 +1,8 @@
-# 十二工具协议
+# Team 工具协议
 
 [English](tools.md) | 中文
 
-每个成功或被拒绝的 Team tool result 都通过正常 model loop 返回。`context_rollover` 与 `context_checkpoint` 会结束 Agent turn——换窗后不得再接旧代工作，checkpoint 在其所属 turn 结束时 resolve；其余 Team tools 不结束 turn，Agent 自行决定继续读取、重试、开展项目工作、发送协作更新或结束。
+每个成功或被拒绝的 Team tool result 都通过正常 model loop 返回。`context_rollover` 与 `context_checkpoint` 会结束 Agent turn——换窗后不得再接旧代工作，checkpoint 在其所属 turn 结束时 resolve；其余 Team tools 不结束 turn，Agent 自行决定继续读取、重试、开展项目工作、发送协作更新或结束。一轮既没有延续运行的工具调用、也没有终态 `team_set_status` 声明（`idle`、`waiting`、`free`）就结束的 turn 会被视为未完成的工作：该声明就是完成信号，preset 的 loop discipline 要求每个完成的 turn 都以它收尾。
 
 ## `team_view`
 
@@ -47,6 +47,14 @@ taskful 的 start 还可传 `parentTaskRef`，把新 Task 归档为同 Channel �
 类型化拒绝结果（`unread_required`、`stale_revision`）以 `Not committed` 开头，保留重读与审慎重试所需的结构化 refs 与计数，不渲染数字 revision 与写令牌——拒绝不携带变化后的事实，不是安全的变更基础；恢复路径是 read-and-reconsider。 mention 一个该 Thread 从未承载过的 Member 不是拒绝：Message 照常提交，结果里报告未送达的名字。
 
 `team_message.dm` 向同一 Workspace 内一个 enabled Agent Member 发送私有 direct message。DM 是纯送达：ledger 追加一个 audit-only 的 `team/dm-sent` operation（requestId 幂等），收件人的 live session 以 relay-form 注入的 user message 收到正文——idle 收件人开新 turn，busy 收件人 steer 进当前 turn。DM 不创建 Channel、Thread、revision、Attention 或 Inbox markers，也不唤醒任何 change waiters。Human 不能被 DM。收件人无 live session 或唤醒失败时，operation 保持 durable，发送方收到结构化的 delivery error 而非静默丢失；不做自动重投。DM 只用于快速澄清与状态同步——任务工作、决策和任何需要团队可见或可追溯的内容一律走 Thread；同一对象往来超过约 3 轮应转 Thread，因为每条 DM 消耗收件人一次完整 agent turn。
+
+## `team_set_status`
+
+`team_set_status` 声明调用方 Member 自己的工作状态——整张团队可达性表，每次声明一笔 durable ledger operation。`idle` 表示没有分配的工作；`waiting` 表示已停下、在等其他 Member 或 Human 的反馈；`free` 表示非工作时间或两个工作段之间下班；`busy` 是 Human 或负责人要求的专注段，在该段开始时设置。处于 `free` 或 `busy` 时，只有 Human 与指定 Team leader 能触达该 Member——包括 Team Assistant 在内的其他任何人的 send 与 DM 都会在 ledger 被拒绝，拒绝结果点名发送者与当前状态。
+
+`working` 不可设置：Human 或负责人的消息到达 Member 时由 Host 自动提交，ledger 拒绝任何声明它的尝试——也同样拒绝 Member 声明别人的状态，因为 Member 只能声明自己的。同 payload 的重试声明返回原 receipt；同 requestId 不同 payload 是 collision；replay 与投影的前状态矛盾的声明会让重放失败。
+
+声明同时是完成信号：一轮既没有延续运行的工具调用、也没有终态声明（`idle`、`waiting`、`free`）就结束的 turn 会被视为未完成的工作并被引导回。`busy` 属于被要求的专注段开始时，绝不在其结尾；收尾永远按工作上下文声明三个终态之一。
 
 ## `team_claim`
 

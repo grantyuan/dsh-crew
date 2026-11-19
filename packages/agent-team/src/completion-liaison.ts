@@ -3,8 +3,10 @@
  *
  * The continuation watcher asks one designated leader when the whole Team has
  * gone quiet. This policy covers the narrower per-Member moment the operator
- * asked for: a Member finishes its work (a `completed` stop whose last round
- * carried the 任务结束 marker) and goes idle. At that point:
+ * asked for: a Member finishes its work (a `completed` stop closed by a
+ * terminal `team_set_status` declaration — `idle` or `waiting`; a `busy` stop
+ * means work continues and a `free` stop means the Member is off duty, so
+ * neither arms this policy) and goes idle. At that point:
  *
  * - if the Workspace has an enabled designated leader other than the Member
  *   itself, and the Member addressed no report to that leader after finishing
@@ -16,7 +18,7 @@
  *   open Tasks directly to the Member itself and lets it decide autonomously
  *   whether to continue. The push states one contract: a Member that declines
  *   begins its final reply with the exact words 拒绝继续. When that refusal
- *   lands at the Member's next marker stop, the Host stops pushing Tasks to
+ *   lands at the Member's next completed stop, the Host stops pushing Tasks to
  *   the Member for the process lifetime and relays the Member's own feedback
  *   to `@human` in the Channel — the Human, not the policy, arbitrates next.
  *
@@ -39,7 +41,6 @@
 import type { AgentTeamContextCheckpointRef, AgentTeamInterruptRef, AgentTeamMemberId } from './types.ts'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import type { ContinuationTask } from './continuation-watcher.ts'
-import { COMPLETION_MARKER } from './response-guard.ts'
 
 /**
  * The exact opening words a Member must use to decline a Task push. Stable:
@@ -65,7 +66,7 @@ export const LIAISON_COOLDOWN_MS = 10 * 60 * 1000
 /** An unevaluated completion episode is dropped once the Member has been busy (or gone) this long. */
 export const LIAISON_EPISODE_TTL_MS = 15 * 60 * 1000
 
-/** A Task push whose decision never reached a marker stop is forgotten after this long. */
+/** A Task push whose decision never reached a completed stop is forgotten after this long. */
 export const LIAISON_DECISION_TTL_MS = 30 * 60 * 1000
 
 /** The refused Member's reply quoted into the `@human` feedback, bounded. */
@@ -153,7 +154,7 @@ interface LiaisonEpisode {
 interface LiaisonDecision {
   readonly workspaceId: WorkspaceId
   readonly pushedAt: number
-  /** The refusal reply captured so far; a marker stop with it set declines the push. */
+  /** The refusal reply captured so far; a completed stop with it set declines the push. */
   refusalText: string | undefined
 }
 
@@ -194,12 +195,14 @@ export class CompletionLiaison {
   }
 
   /**
-   * Observe one marker-completed stop: it closes any open Task-push decision
+   * Observe one completed stop: it closes any open Task-push decision
    * (a captured refusal is relayed and suppresses all later pushes for this
    * process) and opens one fresh report-check episode. `completedAt` carries
    * the stop's own timestamp for a boot-retroactive episode — a Member whose
-   * marker stop was cut across a Host restart still earns its report check
-   * once the new process is watching; live callers leave it at now.
+   * completed stop was cut across a Host restart still earns its report check
+   * once the new process is watching; live callers leave it at now. The caller
+   * gates on the declared status: only `idle` and `waiting` stops reach this
+   * policy — `busy` keeps working and `free` is off duty.
    */
   onCompletedStop(memberId: AgentTeamMemberId, sinceSequence: number, completedAt = this.now()): void {
     const decision = this.decisions.get(memberId)
@@ -380,7 +383,7 @@ export function liaisonTaskPushText(input: { readonly memberHandle: string, read
   const lines = [
     `@${input.memberHandle} ${LIAISON_TASK_PUSH_MARKER} this Workspace has no designated Team leader, and these Task(s) are still open:`,
     ...input.tasks.map(task => `- ${task.taskRef}${task.taskNumber > 0 ? ` (#${task.taskNumber})` : ''} — ${task.status} — ${sanitizeQuotedText(task.subject)}`),
-    `Decide on your own whether to continue this work. If you take it up, claim and progress the Tasks and keep their status current. If you decline, begin your final reply with the exact words ${LIAISON_REFUSAL_PHRASE} (still closing it with the ${COMPLETION_MARKER} marker as usual): the Team will stop pushing Tasks to you and will relay your feedback to @human in this Channel instead.`,
+    `Decide on your own whether to continue this work. If you take it up, claim and progress the Tasks and keep their status current. If you decline, begin your final reply with the exact words ${LIAISON_REFUSAL_PHRASE} (still closing the turn with team_set_status as usual): the Team will stop pushing Tasks to you and will relay your feedback to @human in this Channel instead.`,
   ]
   return lines.join('\n')
 }

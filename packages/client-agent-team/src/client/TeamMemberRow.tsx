@@ -33,10 +33,26 @@ export function TeamMemberIdentity({ status, name, className, t }: {
   return <>
     <TeamMemberAvatar status={status} t={t} />
     <span className={className === undefined ? css.copy : `${css.copy} ${className}`}>
-      <strong>{name ?? `@${status.member.handle.replace(/^@/, '')}`}{status.member.leader === true && <small className={css.leader}>{t('leaderBadge')}</small>}</strong>
+      <span className={css.handle}>
+        <strong>{name ?? `@${status.member.handle.replace(/^@/, '')}`}{status.member.leader === true && <small className={css.leader}>{t('leaderBadge')}</small>}</strong>
+        <WorkStatusChip member={status.member} t={t} />
+      </span>
       <small>{status.member.description}</small>
     </span>
   </>
+}
+
+/**
+ * The Member's declared work status, as the handle line's trailing chip. The
+ * label keys mirror AgentTeamMemberWorkStatus; the chip inherits the leader
+ * chip's geometry and is muted for free, accented for busy.
+ */
+function WorkStatusChip({ member, t }: {
+  readonly member: AgentTeamClientMemberStatus['member']
+  readonly t: TeamSidebarProps['t']
+}) {
+  const status = member.workStatus ?? 'idle'
+  return <small className={css.workStatus} data-status={status}>{t(`workStatus${status.charAt(0).toUpperCase()}${status.slice(1)}` as 'workStatusIdle')}</small>
 }
 
 /**

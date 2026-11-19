@@ -85,7 +85,7 @@ export function buildRelevanceJudge(input: RelevanceJudgeInput): { readonly syst
 /**
  * The model's relevance score, or undefined when the reply carries no usable
  * number. Parsing is deliberately tolerant — the reply rides a normal assistant
- * turn whose trailing completion marker, prose, or markdown fence must not turn
+ * turn whose trailing completion declaration, prose, or markdown fence must not turn
  * a readable score into a failure — and out-of-range numbers are clamped.
  */
 export function parseRelevanceScore(text: string): number | undefined {
