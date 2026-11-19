@@ -62,7 +62,6 @@ import { MemberWatchMonitor, memberWatchNoticeText, type MemberWatchNotice, type
 import { queueAssignmentNotice, queueAdvanceNotice, queueReassignedNotice } from './queue-advance.ts'
 import { clearRouteStreak, modelFailoverNoticeText, noteRouteFailure, routeKeyOf, settlePromotion, supervisionExhaustedNoticeText, type RouteFailureState } from './model-failover.ts'
 import { ModelScheduleMonitor, modelScheduleSwitchNoticeText, sameScheduleRoute, type ModelScheduleBoundary } from './model-schedule.ts'
-import { freezeScheduleRecurrence } from './schedule-recurrence.ts'
 import { StopScheduleMonitor } from './stop-schedule.ts'
 import { CapabilityAssessor, capabilityAssessmentText, type CapabilityAssessmentTarget } from './capability-assessment.ts'
 import { BackgroundJobRegistry, backgroundJobNoticeText, type BackgroundJob, type BackgroundJobStartInput } from './background-jobs.ts'
@@ -2266,7 +2265,7 @@ export default class AgentTeam extends TypertRemoteService {
         presetId: request.presetId,
         ...(request.model === undefined ? {} : { model: Object.freeze({ ...request.model }) }),
         ...(request.modelFallbacks === undefined || request.modelFallbacks.length === 0 ? {} : { modelFallbacks: Object.freeze(request.modelFallbacks.map(fallback => Object.freeze({ ...fallback }))) }),
-        ...(request.modelSchedule === undefined ? {} : { modelSchedule: Object.freeze({ ...request.modelSchedule, windows: Object.freeze(request.modelSchedule.windows.map(w => Object.freeze({ ...w, selection: Object.freeze({ ...w.selection }), ...(w.recurrence === undefined ? {} : { recurrence: freezeScheduleRecurrence(w.recurrence) }) }))) }) }),
+        ...(request.modelSchedule === undefined ? {} : { modelSchedule: Object.freeze({ ...request.modelSchedule, windows: Object.freeze(request.modelSchedule.windows.map(w => Object.freeze({ ...w, selection: Object.freeze({ ...w.selection }) }))) }) }),
         ...(request.capabilities === undefined ? {} : { capabilities: Object.freeze(deepCopyCapabilities(request.capabilities)) }),
         ...(request.prompt === undefined ? {} : { prompt: Object.freeze(deepCopyPrompt(request.prompt)) }),
         ...(request.contextStartPolicy === undefined ? {} : { contextStartPolicy: request.contextStartPolicy }),
@@ -4060,7 +4059,7 @@ export default class AgentTeam extends TypertRemoteService {
         memberHandle: member.handle,
         whenText: formatTeamTimestamp(new Date(boundary.atMs).toISOString()),
         incoming: boundary.incoming,
-        ...(boundary.recurrence === undefined ? {} : { recurrence: boundary.recurrence }),
+        recurrenceText: boundary.recurrenceText,
       }),
       recipients: [member.memberId],
       asTask: false,

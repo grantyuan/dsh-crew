@@ -281,9 +281,9 @@ describe('stop schedule notice texts', () => {
     expect(text).toContain('handover document')
     expect(text).toContain('Manager')
     expect(text).toContain('from 22:00 to 06:00')
-    expect(text).toContain('Active days: every day')
+    expect(text).toContain('(22:00–06:00 Team time) starts at')
     const workday = stopScheduleWrapUpNoticeText({ memberHandle: 'worker', whenText: '2026-11-03T22:00:00+08:00', window: window('22:00', '06:00', { kind: 'workdays' }) })
-    expect(workday).toContain('Active days: on workdays')
+    expect(workday).toContain('(22:00–06:00 Team time, on workdays)')
   })
 
   it('names the boundary and the resume instruction', () => {

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { AgentTeamMemberCapabilities, AgentTeamMemberModelSchedule, AgentTeamMemberStopSchedule, AgentTeamMemberStopWindow, AgentTeamModelScheduleWindow, AgentTeamModelSelection, AgentTeamScheduleRecurrence } from './types.ts'
+import { isValidCalendarDateText, isValidYearlyDay } from './schedule-recurrence.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -85,19 +86,28 @@ const modelSelectionSchema = z.object({
   ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
 }))
 
-// Shape-only recurrence: parameter ranges and calendar reality are commit
-// rules (the ledger rejects a bad recurrence before it is written), not
-// replay rules — an old ledger must stay readable even if a later release
-// tightens the range. Arithmetic treats an unreadable recurrence as never
-// active instead of refusing the whole ledger.
-const scheduleRecurrenceSchema = z.discriminatedUnion('kind', [
+// One window's recurrence: shape rules only, mirroring the commit gate —
+// parameters must be integers in their declared ranges and dates must be
+// real calendar shapes (the yearly February cap allows 29; a concrete
+// anchor date must exist in its own year). What a shape MEANS on a day it
+// does not produce — a short month's 31st, a non-leap 02-29 — is silence,
+// not an error, and never checked here.
+const scheduleRecurrenceSchema: z.ZodType<AgentTeamScheduleRecurrence> = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('daily') }).strict(),
   z.object({ kind: z.literal('workdays') }).strict(),
-  z.object({ kind: z.literal('everyDays'), intervalDays: z.number().int(), anchorDate: z.string().min(1) }).strict(),
-  z.object({ kind: z.literal('weekly'), weekdays: z.array(z.number().int().min(1).max(7)) }).strict(),
-  z.object({ kind: z.literal('monthly'), dayOfMonth: z.number().int() }).strict(),
-  z.object({ kind: z.literal('yearly'), month: z.number().int(), day: z.number().int() }).strict(),
-]).transform(value => value as unknown as AgentTeamScheduleRecurrence)
+  z.object({
+    kind: z.literal('everyDays'),
+    intervalDays: z.number().int().min(1).max(366),
+    anchorDate: z.string().refine(isValidCalendarDateText),
+  }).strict(),
+  z.object({ kind: z.literal('weekly'), weekdays: z.array(z.literal([1, 2, 3, 4, 5, 6, 7])).min(1) }).strict(),
+  z.object({ kind: z.literal('monthly'), dayOfMonth: z.number().int().min(1).max(31) }).strict(),
+  z.object({
+    kind: z.literal('yearly'),
+    month: z.number().int().min(1).max(12),
+    day: z.number().int().min(1).max(31),
+  }).strict().refine(({ month, day }) => isValidYearlyDay(month, day)),
+])
 
 // One time window of a Member's model schedule. Shape rules only —
 // start/end ordering is deliberately NOT checked: a window whose end is at
@@ -113,9 +123,7 @@ const modelScheduleWindowSchema = z.object({
   selection: modelSelectionSchema,
   recurrence: scheduleRecurrenceSchema.optional(),
 }).strict().transform(({ start, end, selection, recurrence }): AgentTeamModelScheduleWindow => ({
-  start,
-  end,
-  selection,
+  start, end, selection,
   ...(recurrence === undefined ? {} : { recurrence }),
 }))
 
@@ -124,14 +132,16 @@ const memberModelScheduleSchema = z.object({
   windows: z.array(modelScheduleWindowSchema).max(MEMBER_MODEL_SCHEDULE_WINDOW_MAX),
 }).strict().transform(({ enabled, windows }): AgentTeamMemberModelSchedule => ({ enabled, windows }))
 
-// The stop schedule rides the same window shape minus the route.
+// One stop-run window of a Member: the same window shape and recurrence as
+// the model schedule's, with no route to carry. The enclosing field below is
+// part of the durable contract — a replay shape that omits it would drop
+// every record that carries a stop schedule at the next domain open.
 const stopScheduleWindowSchema = z.object({
   start: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
   end: z.string().regex(MODEL_SCHEDULE_TIME_PATTERN),
   recurrence: scheduleRecurrenceSchema.optional(),
 }).strict().transform(({ start, end, recurrence }): AgentTeamMemberStopWindow => ({
-  start,
-  end,
+  start, end,
   ...(recurrence === undefined ? {} : { recurrence }),
 }))
 
@@ -180,7 +190,10 @@ const memberSchema = z.object({
   modelFallbacks: z.array(modelSelectionSchema).max(MEMBER_MODEL_FALLBACK_MAX).optional(),
   // Ledgers written before the time-interval schedule existed omit the field.
   modelSchedule: memberModelScheduleSchema.optional(),
-  // Ledgers written before the stop-run schedule existed omit the field.
+  // Durable stop-run intent on the same window shape (with or without a
+  // recurrence). The replay shape once omitted this field, so a restart
+  // dropped every record that carried it — it is part of the durable
+  // contract now, and its absence on old ledgers stays legal.
   stopSchedule: memberStopScheduleSchema.optional(),
   // Host-applied schedule route; written only by team/member-model-scheduled.
   scheduledModel: modelSelectionSchema.optional(),

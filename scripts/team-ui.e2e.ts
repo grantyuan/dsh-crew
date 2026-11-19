@@ -673,7 +673,10 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // The stop-run schedule rides the editor as its own field: an untouched
   // Member renders the enable switch and the add action, a drawn window
   // validates locally, and the save commits the durable intent through the
-  // real Host — the reopen echoes it back.
+  // real Host — the reopen echoes it back. The window's recurrence rides the
+  // same row: the shared dropdown defaults to 每天 (absent on the wire, the
+  // pre-recurrence shape), the weekly kind demands at least one weekday chip,
+  // and the picked days persist and echo like the time bounds do.
   await builderRow.hover()
   await builderRow.getByRole('button', { name: 'builder 的操作' }).click()
   await page.getByRole('menuitem', { name: '编辑 Agent' }).click()
@@ -681,21 +684,26 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await stopEditor.getByRole('button', { name: '添加停止区间' }).waitFor()
   await expect.poll(async () => await editSave.isDisabled()).toBe(true)
   await stopEditor.getByRole('button', { name: '添加停止区间' }).click()
-  await stopEditor.getByLabel('停止区间 #1 开始').fill('9:5')
+  // A fresh row's recurrence trigger reads 每天 before anything is touched.
+  await expect.poll(() => stopEditor.getByRole('button', { name: '停止区间 #1 周期' }).textContent()).toBe('每天')
+  await stopEditor.getByLabel('停止区间 #1 开始').fill('9:00')
   await stopEditor.getByText('每个停止区间需要 HH:MM(UTC+8) 的开始与结束时间;开始与结束不能相同;启用日程至少需要一个完整区间。').waitFor()
   await expect.poll(async () => await editSave.isDisabled()).toBe(true)
   await stopEditor.getByLabel('停止区间 #1 开始').fill('22:00')
   await stopEditor.getByLabel('停止区间 #1 结束').fill('06:00')
   await expect.poll(() => stopEditor.getByText('每个停止区间需要 HH:MM(UTC+8) 的开始与结束时间;开始与结束不能相同;启用日程至少需要一个完整区间。').count()).toBe(0)
-  // A window repeats daily until the Human says otherwise; picking a pattern
-  // reveals only that pattern's parameters, and the interval below rides the
-  // same draft the save commits.
-  const recurrenceTrigger = stopEditor.getByRole('button', { name: '停止区间 #1 周期' })
-  await expect.poll(() => recurrenceTrigger.textContent()).toContain('每天')
-  await recurrenceTrigger.click()
-  await page.getByRole('menuitem', { name: '每隔若干天' }).click()
-  await expect.poll(() => recurrenceTrigger.textContent()).toContain('每隔若干天')
-  await stopEditor.getByLabel('停止区间 #1 周期 间隔天数').fill('3')
+  await stopEditor.getByRole('button', { name: '停止区间 #1 周期' }).click()
+  await page.getByRole('menuitem', { name: '每周' }).click()
+  await expect.poll(() => stopEditor.getByRole('button', { name: '停止区间 #1 周期' }).textContent()).toBe('每周')
+  // An untouched weekly pick still satisfies nothing: the recurrence rule
+  // alert stands until one weekday chip is pressed.
+  await stopEditor.getByText('每个窗口的周期参数需要完整有效:每几天需要 1-366 的间隔天数和真实的起始日;每周至少选择一个星期;每月几号为 1-31;每年为真实的月和日(2 月最多 29 日)。').waitFor()
+  await expect.poll(async () => await editSave.isDisabled()).toBe(true)
+  await stopEditor.getByRole('button', { name: '停止区间 #1 周一' }).click()
+  await stopEditor.getByRole('button', { name: '停止区间 #1 周五' }).click()
+  await expect.poll(() => stopEditor.getByRole('button', { name: '停止区间 #1 周一' }).getAttribute('aria-pressed')).toBe('true')
+  await expect.poll(() => stopEditor.getByText('每个窗口的周期参数需要完整有效:每几天需要 1-366 的间隔天数和真实的起始日;每周至少选择一个星期;每月几号为 1-31;每年为真实的月和日(2 月最多 29 日)。').count()).toBe(0)
+  await expect.poll(async () => await editSave.isDisabled()).toBe(false)
   await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule.png'), fullPage: true })
   // The recurrence line wraps at the narrow breakpoint instead of pushing the
   // dialog past the viewport.
@@ -712,10 +720,43 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const stopReopen = page.getByRole('dialog', { name: '编辑 Agent' })
   await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 开始').inputValue()).toBe('22:00')
   await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 结束').inputValue()).toBe('06:00')
-  await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).textContent()).toContain('每隔若干天')
-  await expect.poll(async () => await stopReopen.getByLabel('停止区间 #1 周期 间隔天数').inputValue()).toBe('3')
+  // The recurrence echoes from the ledger: the trigger names 每周 and the
+  // stored chips render pressed, so the round trip proved the durable intent.
+  await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).textContent()).toBe('每周')
+  await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周一' }).getAttribute('aria-pressed')).toBe('true')
+  await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周五' }).getAttribute('aria-pressed')).toBe('true')
+  await expect.poll(() => stopReopen.getByRole('button', { name: '停止区间 #1 周二' }).getAttribute('aria-pressed')).toBe('false')
+  // The dialog body scrolls internally, so every recurrence capture scrolls the
+  // line into view first — a full-page shot of the untouched scroll state would
+  // only show the dialog header. The keyboard walk ahead of the echo shot is
+  // the focus proof: four Tabs from the start bound land on the pressed chip,
+  // whose ring stays visible over its already-brand resting border.
+  await stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).scrollIntoViewIfNeeded()
+  await stopReopen.getByLabel('停止区间 #1 开始').focus()
+  await page.keyboard.press('Tab')
+  await page.keyboard.press('Tab')
+  await page.keyboard.press('Tab')
+  await page.keyboard.press('Tab')
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('停止区间 #1 周一')
+  await settleAnimations(page)
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-chip-focus.png'), fullPage: true })
+  // The echo capture shows the resting state, not the focus walk's ring.
+  await stopReopen.getByLabel('停止区间 #1 开始').focus()
+  await stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).scrollIntoViewIfNeeded()
+  await settleAnimations(page)
   await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-echo.png'), fullPage: true })
+  // The recurrence line rides the 390 breakpoint too: the dropdown, the chips,
+  // and the time fields wrap inside the viewport without horizontal overflow.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await settleLayout(page)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).waitFor()
+  await stopReopen.getByRole('button', { name: '停止区间 #1 周期' }).scrollIntoViewIfNeeded()
+  await settleAnimations(page)
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-edit-stop-schedule-recurrence-narrow.png'), fullPage: true })
   await stopReopen.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await settleLayout(page)
 
   // The custom role paragraph rides the editor as its own durable dialog: a
   // fresh memberPromptView read fills the textarea, the live UTF-8 counter

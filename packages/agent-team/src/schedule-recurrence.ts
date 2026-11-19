@@ -1,103 +1,169 @@
 /**
- * Schedule-window recurrence arithmetic.
+ * The one recurrence authority for Member schedule windows: calendar-day
+ * matching for the six recurrence kinds, expansion of a matched day's window
+ * into its concrete Team-zone interval, the candidate-day spread the two
+ * schedule monitors expand, and the commit shape rule the ledger enforces.
+ * Both the model schedule (`src/model-schedule.ts`) and the stop schedule
+ * (`src/stop-schedule.ts`) consume this module and must not re-derive any of
+ * its arithmetic.
  *
- * Both time schedules (model routing and stop-run) share this module: a window
- * carries a wall-clock `HH:MM` span plus an optional recurrence, and the
- * window is only active on days its recurrence matches. A matching day
- * expands the span into one concrete interval `[start, end)`; a wrapping span
- * (`end` at or before `start`) ends on the following Team-zone day, so a
- * Friday-night workday window legitimately runs into Saturday morning.
+ * Every date is interpreted in the fixed Team coordination zone (UTC+8) —
+ * the same zone the `HH:MM` window bounds live in — so there is no
+ * daylight-saving component anywhere: a Team-zone calendar day is exactly
+ * 24 hours, and the day/serial conversions below are pure proleptic-Gregorian
+ * integer arithmetic (no `Date` object, whose UTC year mapping would bend for
+ * years 0–99).
  *
- * Everything is judged in the fixed Team coordination zone (UTC+8), the same
- * zone the minute arithmetic has always used. Instants are plain epoch
- * milliseconds, days are whole Team-zone day indexes, and no persistence
- * lives here: the ledger keeps the intent, this module only derives intervals.
+ * A window expands only on days its recurrence matches; the interval is
+ * anchored to the window's start day, so a cross-midnight window that begins
+ * on a matched day runs to the NEXT day's `end` (workdays 22:00–08:00 covers
+ * Saturday morning from Friday night). An `everyDays` recurrence counts day
+ * serials from its anchor date: the anchor day itself is effective, then
+ * every `intervalDays`-th day, never anything before the anchor.
  * @module @grantyuan/dsh-crew/schedule-recurrence
  */
 
-import type { AgentTeamScheduleRecurrence, AgentTeamScheduleWeekday } from './types.ts'
+import type { AgentTeamScheduleRecurrence } from './types.ts'
 import { TEAM_ZONE_OFFSET_MINUTES } from './time-format.ts'
-
-/** Milliseconds in one day. */
-export const DAY_MS = 86_400_000
 
 /** Minutes in one day — the wrap-around modulus of every Team-zone minute computation. */
 export const MINUTES_PER_DAY = 24 * 60
-
-/** The fixed Team-zone offset (UTC+8) in milliseconds. */
 export const TEAM_ZONE_OFFSET_MS = TEAM_ZONE_OFFSET_MINUTES * 60_000
-
-/** Days before/after the current day whose windows can still touch the moment. */
-const CANDIDATE_DAY_SPAN = 2
+export const MS_PER_MINUTE = 60_000
 
 /** Parse one `HH:MM` schedule bound into Team-zone day minutes (0..1439). */
 export function parseScheduleMinute(text: string): number {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(text)
-  if (match === null) throw new Error(`invalid schedule time '${text}'`)
+  if (match === null) throw new Error(`invalid schedule window time '${text}'`)
   return Number(match[1]) * 60 + Number(match[2])
 }
 
-/** One epoch instant rendered as its Team-zone calendar day. */
+/** One Team-zone calendar day with its ISO weekday (1 = Monday … 7 = Sunday). */
 export interface TeamDateParts {
   readonly year: number
-  /** 1..12. */
   readonly month: number
-  /** 1..31. */
   readonly day: number
-  /** ISO weekday, 1 = Monday … 7 = Sunday. */
-  readonly weekday: AgentTeamScheduleWeekday
-  /** Whole days since the Unix epoch in the Team zone — the `everyDays` alignment base. */
-  readonly dayIndex: number
+  readonly weekday: 1 | 2 | 3 | 4 | 5 | 6 | 7
 }
 
-/** One epoch instant rendered as its Team-zone year/month/day/weekday. */
+/** The window shape both schedule families share: minute bounds plus the optional recurrence. */
+export interface ScheduleWindowBounds {
+  readonly start: string
+  readonly end: string
+  readonly recurrence?: AgentTeamScheduleRecurrence
+}
+
+/** One matched day's window resolved to concrete epoch instants (half-open). */
+export interface ScheduleWindowOccurrence {
+  /** The epoch instant the window's `start` minute lands on (inclusive). */
+  readonly startMs: number
+  /** The epoch instant the window's `end` minute lands on (exclusive; the next day for a wrap window). */
+  readonly endMs: number
+}
+
+/** One epoch instant rendered as its Team-zone minute of the day (0..1439). */
+export function teamMinuteOfDay(epochMs: number): number {
+  return Math.floor(((epochMs + TEAM_ZONE_OFFSET_MS) % (MINUTES_PER_DAY * MS_PER_MINUTE)) / MS_PER_MINUTE)
+}
+
+/** One epoch instant rendered as its absolute Team-zone minute (monotonic latch key). */
+export function teamAbsoluteMinute(epochMs: number): number {
+  return Math.floor((epochMs + TEAM_ZONE_OFFSET_MS) / MS_PER_MINUTE)
+}
+
+/** The Team-zone day serial of one epoch instant (whole days since 1970-01-01). */
+export function teamDayNumber(epochMs: number): number {
+  return Math.floor((epochMs + TEAM_ZONE_OFFSET_MS) / (MINUTES_PER_DAY * MS_PER_MINUTE))
+}
+
+/** One epoch instant rendered as its Team-zone calendar day and ISO weekday. */
 export function teamDateParts(epochMs: number): TeamDateParts {
-  const shifted = new Date(epochMs + TEAM_ZONE_OFFSET_MS)
-  const jsWeekday = shifted.getUTCDay()
-  return {
-    year: shifted.getUTCFullYear(),
-    month: shifted.getUTCMonth() + 1,
-    day: shifted.getUTCDate(),
-    weekday: (jsWeekday === 0 ? 7 : jsWeekday) as AgentTeamScheduleWeekday,
-    dayIndex: Math.floor((epochMs + TEAM_ZONE_OFFSET_MS) / DAY_MS),
-  }
+  return datePartsOfDayNumber(teamDayNumber(epochMs))
 }
 
-/** The Team-zone calendar day of one day index. */
-export function teamDatePartsOfDayIndex(dayIndex: number): TeamDateParts {
-  return teamDateParts(dayIndex * DAY_MS - TEAM_ZONE_OFFSET_MS)
+/** The epoch instant one Team-zone day serial at one day minute sits on. */
+function teamMinuteInstant(dayNumber: number, minuteOfDay: number): number {
+  return dayNumber * MINUTES_PER_DAY * MS_PER_MINUTE - TEAM_ZONE_OFFSET_MS + minuteOfDay * MS_PER_MINUTE
 }
 
-/** Days in one calendar month (month 1..12); February follows the leap-year rule. */
-export function daysInMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+// Proleptic-Gregorian day/serial conversion (Howard Hinnant's algorithms,
+// truncating integer division) — exact for every four-digit year, which is
+// what keeps `everyDays` anchors and leap rules honest without a Date object.
+
+function daysFromCivil(year: number, month: number, day: number): number {
+  const shiftedYear = month <= 2 ? year - 1 : year
+  const era = Math.trunc((shiftedYear >= 0 ? shiftedYear : shiftedYear - 399) / 400)
+  const yearOfEra = shiftedYear - era * 400
+  const dayOfYear = Math.trunc((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + day - 1
+  const dayOfEra = yearOfEra * 365 + Math.trunc(yearOfEra / 4) - Math.trunc(yearOfEra / 100) + dayOfYear
+  return era * 146097 + dayOfEra - 719468
 }
 
-/** Whether `year-month-day` names a real calendar date. */
-export function isCalendarDate(year: number, month: number, day: number): boolean {
-  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return false
-  if (month < 1 || month > 12 || day < 1) return false
-  return day <= daysInMonth(year, month)
+function civilFromDays(dayNumber: number): { readonly year: number; readonly month: number; readonly day: number } {
+  const shifted = dayNumber + 719468
+  const era = Math.trunc((shifted >= 0 ? shifted : shifted - 146096) / 146097)
+  const dayOfEra = shifted - era * 146097
+  const yearOfEra = Math.trunc((dayOfEra - Math.trunc(dayOfEra / 1460) + Math.trunc(dayOfEra / 36524) - Math.trunc(dayOfEra / 146096)) / 365)
+  const year = yearOfEra + era * 400
+  const dayOfYear = dayOfEra - (365 * yearOfEra + Math.trunc(yearOfEra / 4) - Math.trunc(yearOfEra / 100))
+  const monthPrefix = Math.trunc((5 * dayOfYear + 2) / 153)
+  const day = dayOfYear - Math.trunc((153 * monthPrefix + 2) / 5) + 1
+  const month = monthPrefix + (monthPrefix < 10 ? 3 : -9)
+  return { year: year + (month <= 2 ? 1 : 0), month, day }
 }
 
-/** Parse a `YYYY-MM-DD` Team-zone date into its day index, or undefined when it is not a real date. */
-export function parseAnchorDate(text: string): number | undefined {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
-  if (match === null) return undefined
-  const year = Number(match[1])
-  const month = Number(match[2])
-  const day = Number(match[3])
-  if (!isCalendarDate(year, month, day)) return undefined
-  return Date.UTC(year, month - 1, day) / DAY_MS
+function datePartsOfDayNumber(dayNumber: number): TeamDateParts {
+  const { year, month, day } = civilFromDays(dayNumber)
+  // 1970-01-01 (serial 0) was a Thursday, ISO weekday 4.
+  const weekday = (((dayNumber + 3) % 7 + 7) % 7 + 1) as TeamDateParts['weekday']
+  return { year, month, day, weekday }
+}
+
+function dayNumberOf(day: TeamDateParts): number {
+  return daysFromCivil(day.year, day.month, day.day)
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+}
+
+/** Days in one month, February capped at 29 — the yearly-pattern rule. */
+function monthLengthCapped(month: number): number {
+  return [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] as number
+}
+
+/** Days in one month of one concrete year — the anchorDate rule. */
+function monthLengthOfYear(year: number, month: number): number {
+  return month === 2 && !isLeapYear(year) ? 28 : monthLengthCapped(month)
 }
 
 /**
- * Whether one window's recurrence is active on the given Team-zone day.
- * Detail rules: `everyDays` is active on the anchor day and every
- * `intervalDays` days after it (never before); `monthly` and `yearly` are
- * inactive in months/years that lack their day (the 31st in a short month,
- * 02-29 in a common year) rather than shifting to a nearby day. An absent
- * recurrence is every day; an unreadable recurrence is never active.
+ * Whether `text` is a real calendar date in `YYYY-MM-DD` shape — the
+ * `everyDays` anchor rule (2026-02-29 is not a date; 2024-02-29 is).
+ */
+export function isValidCalendarDateText(text: string): boolean {
+  const match = /^\d{4}-\d{2}-\d{2}$/.exec(text)
+  if (match === null) return false
+  const year = Number(text.slice(0, 4))
+  const month = Number(text.slice(5, 7))
+  const day = Number(text.slice(8, 10))
+  if (month < 1 || month > 12) return false
+  return Number.isInteger(day) && day >= 1 && day <= monthLengthOfYear(year, month)
+}
+
+/** Whether a yearly month/day pattern names a day some year can carry (February allows 29). */
+export function isValidYearlyDay(month: number, day: number): boolean {
+  return month >= 1 && month <= 12 && Number.isInteger(day) && day >= 1 && day <= monthLengthCapped(month)
+}
+
+function parseCalendarDateText(text: string): number | undefined {
+  if (!isValidCalendarDateText(text)) return undefined
+  return daysFromCivil(Number(text.slice(0, 4)), Number(text.slice(5, 7)), Number(text.slice(8, 10)))
+}
+
+/**
+ * Whether the window is effective on the given Team-zone day. An absent
+ * recurrence matches every day, which is exactly the pre-recurrence behavior.
  */
 export function recurrenceMatchesDay(recurrence: AgentTeamScheduleRecurrence | undefined, day: TeamDateParts): boolean {
   if (recurrence === undefined) return true
@@ -105,12 +171,12 @@ export function recurrenceMatchesDay(recurrence: AgentTeamScheduleRecurrence | u
     case 'daily':
       return true
     case 'workdays':
-      return day.weekday <= 5
+      return day.weekday >= 1 && day.weekday <= 5
     case 'everyDays': {
-      const anchor = parseAnchorDate(recurrence.anchorDate)
-      if (anchor === undefined || !Number.isInteger(recurrence.intervalDays) || recurrence.intervalDays < 1) return false
-      const elapsed = day.dayIndex - anchor
-      return elapsed >= 0 && elapsed % recurrence.intervalDays === 0
+      const anchor = parseCalendarDateText(recurrence.anchorDate)
+      if (anchor === undefined) return false
+      const daysSinceAnchor = dayNumberOf(day) - anchor
+      return daysSinceAnchor >= 0 && daysSinceAnchor % recurrence.intervalDays === 0
     }
     case 'weekly':
       return recurrence.weekdays.includes(day.weekday)
@@ -118,110 +184,135 @@ export function recurrenceMatchesDay(recurrence: AgentTeamScheduleRecurrence | u
       return day.day === recurrence.dayOfMonth
     case 'yearly':
       return day.month === recurrence.month && day.day === recurrence.day
-    default:
-      return false
   }
-}
-
-/** One window expanded to the concrete interval its start day activates. */
-export interface ScheduleWindowOccurrence {
-  readonly startMs: number
-  /** Exclusive end; later than `startMs` because the equal-bounds window is degenerate. */
-  readonly endMs: number
-  /** The Team-zone day the window starts on. */
-  readonly dayIndex: number
+  // Runtime data outside the declared kind union (never produced by the
+  // commit rule or the replay schema) matches nothing.
+  return false
 }
 
 /**
- * Expand one window on one Team-zone day: the interval `[start, end)` when the
- * day matches its recurrence, otherwise nothing. A wrapping span ends on the
- * next day, so its interval crosses midnight.
+ * Expand the window on one Team-zone day into its concrete half-open
+ * interval — empty when the day does not match the window's recurrence, and
+ * empty for the degenerate `start === end` window (rejected at commit, never
+ * covering by the bounds rule).
  */
-export function windowOccurrenceOn(
-  window: { readonly start: string; readonly end: string; readonly recurrence?: AgentTeamScheduleRecurrence },
-  day: TeamDateParts,
-): ScheduleWindowOccurrence | undefined {
-  if (!recurrenceMatchesDay(window.recurrence, day)) return undefined
+export function windowOccurrencesOn(window: ScheduleWindowBounds, day: TeamDateParts): readonly ScheduleWindowOccurrence[] {
+  if (!recurrenceMatchesDay(window.recurrence, day)) return []
   const startMinute = parseScheduleMinute(window.start)
   const endMinute = parseScheduleMinute(window.end)
-  if (startMinute === endMinute) return undefined
-  const dayStartMs = day.dayIndex * DAY_MS - TEAM_ZONE_OFFSET_MS
-  const endMinuteOfInterval = endMinute <= startMinute ? endMinute + MINUTES_PER_DAY : endMinute
-  return {
-    startMs: dayStartMs + startMinute * 60_000,
-    endMs: dayStartMs + endMinuteOfInterval * 60_000,
-    dayIndex: day.dayIndex,
-  }
+  if (startMinute === endMinute) return []
+  const dayNumber = dayNumberOf(day)
+  return [{
+    startMs: teamMinuteInstant(dayNumber, startMinute),
+    // A wrap window (end ≤ start) anchors to its start day and ends on the next day.
+    endMs: teamMinuteInstant(endMinute > startMinute ? dayNumber : dayNumber + 1, endMinute),
+  }]
 }
 
 /**
- * Candidate start days around an instant: two days back through the next day.
- * Yesterday and the day before cover wrapping windows that started then and
- * are still running (or ended minutes ago); tomorrow covers a late-night
- * start whose end sits just past a forward horizon.
+ * The candidate START days one monitor pass expands its windows on, as day
+ * offsets from the pass instant's Team-zone day: two days back still reach a
+ * wrap window whose end fell late the night before (inside the stop
+ * schedule's resume freshness), and one day ahead reaches the post-midnight
+ * start or end of a late-evening window inside a notice horizon. Four days
+ * times the six-window cap times two edges bounds one pass's date work.
  */
-export function scheduleCandidateDays(nowMs: number): readonly TeamDateParts[] {
-  const today = teamDateParts(nowMs)
-  const days: TeamDateParts[] = []
-  for (let offset = -CANDIDATE_DAY_SPAN; offset <= 1; offset += 1) {
-    days.push(offset === 0 ? today : teamDatePartsOfDayIndex(today.dayIndex + offset))
-  }
-  return days
-}
+const OCCURRENCE_CANDIDATE_DAY_OFFSETS = [-2, -1, 0, 1] as const
 
-/** Every occurrence of one window among the candidate days around an instant. */
-export function windowOccurrencesAround(
-  window: { readonly start: string; readonly end: string; readonly recurrence?: AgentTeamScheduleRecurrence },
-  nowMs: number,
-): readonly ScheduleWindowOccurrence[] {
+/** Every occurrence of the window that a pass at `epochMs` can still see: start days N-2 … N+1. */
+export function windowOccurrencesAround(window: ScheduleWindowBounds, epochMs: number): readonly ScheduleWindowOccurrence[] {
+  const today = teamDayNumber(epochMs)
   const occurrences: ScheduleWindowOccurrence[] = []
-  for (const day of scheduleCandidateDays(nowMs)) {
-    const occurrence = windowOccurrenceOn(window, day)
-    if (occurrence !== undefined) occurrences.push(occurrence)
+  for (const offset of OCCURRENCE_CANDIDATE_DAY_OFFSETS) {
+    occurrences.push(...windowOccurrencesOn(window, datePartsOfDayNumber(today + offset)))
   }
   return occurrences
 }
 
-/** Whether one window's expanded interval covers the given instant. */
-export function windowCoversInstant(
-  window: { readonly start: string; readonly end: string; readonly recurrence?: AgentTeamScheduleRecurrence },
-  nowMs: number,
-): boolean {
-  return windowOccurrencesAround(window, nowMs).some(occurrence => occurrence.startMs <= nowMs && nowMs < occurrence.endMs)
+/** Whether the window itself covers the instant — any candidate-day occurrence contains it. */
+export function windowCoversAt(window: ScheduleWindowBounds, epochMs: number): boolean {
+  return windowOccurrencesAround(window, epochMs).some(occurrence => epochMs >= occurrence.startMs && epochMs < occurrence.endMs)
 }
 
 const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const
 
-/** Deep-freeze one recurrence value (the weekly day list included); absent stays absent. */
-export function freezeScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence): AgentTeamScheduleRecurrence
-export function freezeScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined): AgentTeamScheduleRecurrence | undefined
-export function freezeScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined): AgentTeamScheduleRecurrence | undefined {
-  if (recurrence === undefined) return undefined
-  if (recurrence.kind === 'weekly') return Object.freeze({ kind: 'weekly', weekdays: Object.freeze([...recurrence.weekdays]) })
-  return Object.freeze({ ...recurrence })
-}
-
 /**
- * Human-readable recurrence phrase for notices ("on workdays", "every 3
- * days"). Absent and `daily` both read as "every day", matching the stored
- * absent-means-daily rule.
+ * The recurrence phrase the notice texts carry, e.g. `on workdays` or
+ * `every 3 days`. A plain daily window phrases as nothing, so notices for
+ * pre-recurrence schedules render byte-identically to before.
  */
 export function describeRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined): string {
-  if (recurrence === undefined) return 'every day'
+  if (recurrence === undefined) return ''
   switch (recurrence.kind) {
     case 'daily':
-      return 'every day'
+      return ''
     case 'workdays':
       return 'on workdays'
     case 'everyDays':
-      return `every ${recurrence.intervalDays} ${recurrence.intervalDays === 1 ? 'day' : 'days'} from ${recurrence.anchorDate}`
-    case 'weekly':
-      return `on ${recurrence.weekdays.map(day => WEEKDAY_NAMES[day - 1]).join(', ')}`
+      return recurrence.intervalDays === 1 ? 'every day' : `every ${recurrence.intervalDays} days`
+    case 'weekly': {
+      const days = [...recurrence.weekdays].sort((a, b) => a - b).map(weekday => WEEKDAY_NAMES[weekday - 1])
+      return `on ${days.slice(0, -1).join(', ')}${days.length > 1 ? ' and ' : ''}${days.at(-1)}`
+    }
     case 'monthly':
-      return `on day ${recurrence.dayOfMonth} of every month`
-    case 'yearly':
-      return `every year on ${String(recurrence.month).padStart(2, '0')}-${String(recurrence.day).padStart(2, '0')}`
-    default:
-      return 'every day'
+      return `on day ${recurrence.dayOfMonth} of each month`
+    case 'yearly': {
+      const pad = (value: number): string => String(value).padStart(2, '0')
+      return `each year on ${pad(recurrence.month)}-${pad(recurrence.day)}`
+    }
   }
+  // Runtime data outside the declared kind union (never produced by the
+  // commit rule or the replay schema) phrases as nothing.
+  return ''
+}
+
+/**
+ * The recurrence shape rule both schedule commit paths enforce. Pure shape:
+ * parameters must be integers in their declared ranges and dates must be
+ * real calendar shapes (the yearly February cap allows 29; a concrete anchor
+ * date must exist in its own year). What a shape MEANS on a non-leap-year
+ * February 29th — silence, no window — is intent, never an error. The family
+ * prefixes the rejection (`member model schedule recurrence …`) so a Human
+ * editing both schedules in one request can tell the two apart, like the
+ * window bounds errors do.
+ */
+export function assertScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined, family: 'model schedule' | 'stop schedule'): void {
+  if (recurrence === undefined) return
+  const label = `member ${family} recurrence`
+  switch (recurrence.kind) {
+    case 'daily':
+    case 'workdays':
+      return
+    case 'everyDays':
+      if (!Number.isInteger(recurrence.intervalDays) || recurrence.intervalDays < 1 || recurrence.intervalDays > 366) {
+        throw new Error(`${label} intervalDays must be an integer from 1 to 366, an interval spanning at most one leap year`)
+      }
+      if (!isValidCalendarDateText(recurrence.anchorDate)) {
+        throw new Error(`${label} anchorDate must be a YYYY-MM-DD calendar date`)
+      }
+      return
+    case 'weekly':
+      if (recurrence.weekdays.length === 0) throw new Error(`${label} weekdays must list at least one weekday`)
+      if (recurrence.weekdays.some(weekday => !Number.isInteger(weekday) || weekday < 1 || weekday > 7)) {
+        throw new Error(`${label} weekdays must be ISO weekdays 1 (Monday) through 7 (Sunday)`)
+      }
+      if (new Set(recurrence.weekdays).size !== recurrence.weekdays.length) {
+        throw new Error(`${label} weekdays must not repeat a weekday`)
+      }
+      return
+    case 'monthly':
+      if (!Number.isInteger(recurrence.dayOfMonth) || recurrence.dayOfMonth < 1 || recurrence.dayOfMonth > 31) {
+        throw new Error(`${label} dayOfMonth must be an integer from 1 to 31`)
+      }
+      return
+    case 'yearly':
+      if (!Number.isInteger(recurrence.month) || recurrence.month < 1 || recurrence.month > 12) {
+        throw new Error(`${label} yearly month must be an integer from 1 to 12`)
+      }
+      if (!isValidYearlyDay(recurrence.month, recurrence.day)) {
+        throw new Error(`${label} yearly day must exist in the month (February allows 29)`)
+      }
+      return
+  }
+  throw new Error(`${label} kind must be one of daily, workdays, everyDays, weekly, monthly, yearly`)
 }

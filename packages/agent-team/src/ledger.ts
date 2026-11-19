@@ -196,8 +196,8 @@ import type {
 } from './types.ts'
 import { AGENT_TEAM_DEFAULT_WORK_STATUS, AGENT_TEAM_SELF_STATUSES } from './types/entities.ts'
 import { MEMBER_CONTEXT_WINDOW_FLOOR, MEMBER_MODEL_FALLBACK_MAX, MEMBER_MODEL_SCHEDULE_WINDOW_MAX, MEMBER_STOP_SCHEDULE_WINDOW_MAX, MODEL_SCHEDULE_TIME_PATTERN } from './spec.ts'
+import { assertScheduleRecurrence } from './schedule-recurrence.ts'
 import { formatTeamTimestamp } from './time-format.ts'
-import { freezeScheduleRecurrence, isCalendarDate, parseAnchorDate } from './schedule-recurrence.ts'
 import { resolveBodyMentions, scanBodyHandles } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
 
@@ -916,6 +916,28 @@ function freezePromptProfile(prompt: AgentTeamMemberPromptProfile | undefined): 
       ...(prompt.autoExecutePrune === undefined ? {} : { autoExecutePrune: prompt.autoExecutePrune }),
     }),
   }
+}
+
+/** Deep-freeze one window recurrence; the weekday list freezes with it. */
+function freezeScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence): AgentTeamScheduleRecurrence {
+  switch (recurrence.kind) {
+    case 'daily':
+      return Object.freeze({ kind: 'daily' })
+    case 'workdays':
+      return Object.freeze({ kind: 'workdays' })
+    case 'everyDays':
+      return Object.freeze({ kind: 'everyDays', intervalDays: recurrence.intervalDays, anchorDate: recurrence.anchorDate })
+    case 'weekly':
+      return Object.freeze({ kind: 'weekly', weekdays: Object.freeze([...recurrence.weekdays]) })
+    case 'monthly':
+      return Object.freeze({ kind: 'monthly', dayOfMonth: recurrence.dayOfMonth })
+    case 'yearly':
+      return Object.freeze({ kind: 'yearly', month: recurrence.month, day: recurrence.day })
+  }
+  // The commit gate rejects anything outside the declared kinds before a
+  // freeze can run; a fall-through here would store a parameterless
+  // recurrence instead of failing loudly.
+  throw new Error('cannot freeze a recurrence whose kind is not one of the declared six')
 }
 
 /** Deep-freeze a Member model schedule overlay; absent stays absent. */
@@ -7143,11 +7165,12 @@ export class AgentTeamLedger {
 
   /**
    * Schedule commit rule: `HH:MM` window bounds in the Team zone, a bounded
-   * ordered window list, and a non-degenerate window — `start` equals `end`
+   * ordered window list, a non-degenerate window — `start` equals `end`
    * would be both always-covering and never-covering depending on reading,
-   * so the Human must express an all-day window as two half-open windows.
-   * Route strings follow the same pure-intent rule as `model` and fallbacks:
-   * non-blank names only, catalog existence is asserted at the Remote edge
+   * so the Human must express an all-day window as two half-open windows —
+   * and a valid recurrence shape when the window carries one. Route strings
+   * follow the same pure-intent rule as `model` and fallbacks: non-blank
+   * names only, catalog existence is asserted at the Remote edge
    * (`assertModelRoute`) and re-derived at activation, never persisted.
    */
   private assertModelSchedule(schedule: AgentTeamUpdateMemberRequest['modelSchedule']): void {
@@ -7160,14 +7183,15 @@ export class AgentTeamLedger {
         throw new Error('member model schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member model schedule window start must not equal its end')
-      this.assertScheduleRecurrence(window.recurrence, 'member model schedule')
+      assertScheduleRecurrence(window.recurrence, 'model schedule')
       this.assertModelSelection(window.selection)
     }
   }
 
   /**
-   * Stop schedule commit rule: the same window shape and bounds as the model
-   * schedule, with no route to assert — a stop window is a plain time span.
+   * Stop schedule commit rule: the same window shape, bounds, and recurrence
+   * shape as the model schedule, with no route to assert — a stop window is
+   * a plain time span.
    */
   private assertStopSchedule(schedule: AgentTeamUpdateMemberRequest['stopSchedule']): void {
     if (schedule === undefined) return
@@ -7179,58 +7203,7 @@ export class AgentTeamLedger {
         throw new Error('member stop schedule window bounds must be HH:MM times')
       }
       if (window.start === window.end) throw new Error('a member stop schedule window start must not equal its end')
-      this.assertScheduleRecurrence(window.recurrence, 'member stop schedule')
-    }
-  }
-
-  /**
-   * Recurrence commit rule: each kind carries only the parameters its
-   * calendar rule needs, and every parameter must describe a day that can
-   * actually occur — a real `YYYY-MM-DD` anchor, distinct ISO weekdays, a
-   * monthly day in 1..31 (short months simply skip it), and a yearly
-   * month/day that exists in some year (02-29 is allowed; 02-30 is not).
-   * Absent stays valid and means every day.
-   */
-  private assertScheduleRecurrence(recurrence: AgentTeamScheduleRecurrence | undefined, surface: string): void {
-    if (recurrence === undefined) return
-    switch (recurrence.kind) {
-      case 'daily':
-      case 'workdays':
-        return
-      case 'everyDays':
-        if (!Number.isInteger(recurrence.intervalDays) || recurrence.intervalDays < 1 || recurrence.intervalDays > 366) {
-          throw new Error(`${surface} recurrence intervalDays must be an integer from 1 to 366`)
-        }
-        if (parseAnchorDate(recurrence.anchorDate) === undefined) {
-          throw new Error(`${surface} recurrence anchorDate must be a real YYYY-MM-DD date`)
-        }
-        return
-      case 'weekly': {
-        if (recurrence.weekdays.length === 0) throw new Error(`${surface} recurrence must name at least one weekday`)
-        const seen = new Set<number>()
-        for (const weekday of recurrence.weekdays) {
-          if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) {
-            throw new Error(`${surface} recurrence weekdays must be ISO weekdays from 1 to 7`)
-          }
-          if (seen.has(weekday)) throw new Error(`${surface} recurrence weekdays must be distinct`)
-          seen.add(weekday)
-        }
-        return
-      }
-      case 'monthly':
-        if (!Number.isInteger(recurrence.dayOfMonth) || recurrence.dayOfMonth < 1 || recurrence.dayOfMonth > 31) {
-          throw new Error(`${surface} recurrence dayOfMonth must be an integer from 1 to 31`)
-        }
-        return
-      case 'yearly':
-        // A leap year is the permissive probe: 02-29 must be expressible,
-        // every other month/day pair must be a date some year has.
-        if (!isCalendarDate(2000, recurrence.month, recurrence.day)) {
-          throw new Error(`${surface} recurrence must name a real month and day`)
-        }
-        return
-      default:
-        throw new Error(`${surface} recurrence kind '${(recurrence as { kind?: unknown }).kind as string}' is not supported`)
+      assertScheduleRecurrence(window.recurrence, 'stop schedule')
     }
   }
 

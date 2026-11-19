@@ -44,7 +44,7 @@ npx @deepseek-ai/dsh@0.2.2-rc.2 web
 先停止它，再把 Team bundle 安装到 `web` profile：
 
 ```sh
-dsh plugin --profile web add @grantyuan/dsh-crew@0.2.0
+dsh plugin --profile web add @grantyuan/dsh-crew@0.2.2
 ```
 
 这里刻意写明确切版本：pnpm 会跳过发布不满 24 小时的版本，不带版本号的 `@latest` 在发布当天会装到上一版。在新名字正式发布到 npm 之前，请按下方「从本地 checkout 安装」使用本地安装。

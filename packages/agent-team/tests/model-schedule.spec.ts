@@ -5,13 +5,13 @@ import {
   resolveScheduleRoute,
   sameScheduleRoute,
   scheduleRouteKey,
-  teamMinuteOfDay,
+  scheduleWindowCovers,
   upcomingRouteChanges,
   MODEL_SCHEDULE_NOTICE_AHEAD_MS,
   type ModelScheduleBoundary,
 } from '../src/model-schedule.ts'
-import { parseScheduleMinute, windowCoversInstant } from '../src/schedule-recurrence.ts'
-import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamModelSelection, AgentTeamScheduleRecurrence } from '../src/types.ts'
+import { parseScheduleMinute, teamMinuteOfDay } from '../src/schedule-recurrence.ts'
+import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberModelSchedule, AgentTeamModelScheduleWindow, AgentTeamModelSelection } from '../src/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 
@@ -21,11 +21,8 @@ const qwen = (): AgentTeamModelSelection => ({ provider: 'qwen', model: 'qwen3.8
 
 // Team zone is UTC+8: 2026-11-03T10:00:00Z is 18:00 Team time, minute 1080.
 const AT_18_00_TEAM = Date.UTC(2026, 10, 3, 10, 0, 0)
-// 2026-11-03 00:00 Team time — the base every minute-of-day assertion hangs off.
-const TEAM_DAY_START = Date.UTC(2026, 10, 2, 16, 0, 0)
-const atTeamMinute = (minute: number): number => TEAM_DAY_START + minute * 60_000
 
-const window = (start: string, end: string, selection: AgentTeamModelSelection, recurrence?: AgentTeamScheduleRecurrence) => ({
+const window = (start: string, end: string, selection: AgentTeamModelSelection, recurrence?: AgentTeamModelScheduleWindow['recurrence']) => ({
   start,
   end,
   selection,
@@ -63,26 +60,26 @@ describe('model schedule time arithmetic (Team zone UTC+8)', () => {
 
   it('covers a half-open window: start inclusive, end exclusive', () => {
     const w = window('09:00', '18:00', deepseek())
-    expect(windowCoversInstant(w, atTeamMinute(9 * 60))).toBe(true)
-    expect(windowCoversInstant(w, atTeamMinute(18 * 60 - 1))).toBe(true)
-    expect(windowCoversInstant(w, atTeamMinute(18 * 60))).toBe(false)
-    expect(windowCoversInstant(w, atTeamMinute(8 * 60))).toBe(false)
+    expect(scheduleWindowCovers(w, 9 * 60)).toBe(true)
+    expect(scheduleWindowCovers(w, 18 * 60 - 1)).toBe(true)
+    expect(scheduleWindowCovers(w, 18 * 60)).toBe(false)
+    expect(scheduleWindowCovers(w, 8 * 60)).toBe(false)
   })
 
   it('wraps a window whose end is at or before its start past midnight', () => {
     const w = window('22:00', '06:00', deepseek())
-    expect(windowCoversInstant(w, atTeamMinute(23 * 60))).toBe(true)
-    expect(windowCoversInstant(w, atTeamMinute(3 * 60))).toBe(true)
-    expect(windowCoversInstant(w, atTeamMinute(6 * 60))).toBe(false)
-    expect(windowCoversInstant(w, atTeamMinute(12 * 60))).toBe(false)
+    expect(scheduleWindowCovers(w, 23 * 60)).toBe(true)
+    expect(scheduleWindowCovers(w, 3 * 60)).toBe(true)
+    expect(scheduleWindowCovers(w, 6 * 60)).toBe(false)
+    expect(scheduleWindowCovers(w, 12 * 60)).toBe(false)
   })
 
   it('resolves the FIRST covering window and never an override when disabled', () => {
     const schedule = scheduleOf(true, window('09:00', '12:00', deepseek()), window('09:30', '18:00', qwen()))
-    expect(resolveScheduleRoute(schedule, atTeamMinute(10 * 60))).toEqual(deepseek())
-    expect(resolveScheduleRoute(schedule, atTeamMinute(13 * 60))).toEqual(qwen())
-    expect(resolveScheduleRoute(schedule, atTeamMinute(8 * 60))).toBeUndefined()
-    expect(resolveScheduleRoute(scheduleOf(false, window('00:00', '23:59', deepseek())), atTeamMinute(12 * 60))).toBeUndefined()
+    expect(resolveScheduleRoute(schedule, 10 * 60)).toEqual(deepseek())
+    expect(resolveScheduleRoute(schedule, 13 * 60)).toEqual(qwen())
+    expect(resolveScheduleRoute(schedule, 8 * 60)).toBeUndefined()
+    expect(resolveScheduleRoute(scheduleOf(false, window('00:00', '23:59', deepseek())), 12 * 60)).toBeUndefined()
   })
 })
 
@@ -128,12 +125,12 @@ describe('upcomingRouteChanges', () => {
   })
 
   it('skips boundaries on days the window recurrence does not match, and names the recurrence', () => {
-    const workday = scheduleOf(true, window('09:00', '18:00', deepseek(), { kind: 'workdays' }))
+    const workday = scheduleOf(true, { start: '09:00', end: '18:00', selection: deepseek(), recurrence: { kind: 'workdays' } })
     const friday = Date.parse('2026-11-06T17:55:00+08:00')
     const saturday = Date.parse('2026-11-07T17:55:00+08:00')
     const changes = upcomingRouteChanges(workday, friday)
     expect(changes).toHaveLength(1)
-    expect(changes[0]?.recurrence).toEqual({ kind: 'workdays' })
+    expect(changes[0]?.recurrenceText).toBe('on workdays')
     expect(upcomingRouteChanges(workday, saturday)).toHaveLength(0)
   })
 })
@@ -280,9 +277,8 @@ describe('model schedule route identity', () => {
     expect(text).toContain('qwen/qwen3.8-flash')
     expect(text).toContain('2026-11-03T18:00:00+08:00')
     expect(text).toContain('context reset')
-    expect(text).toContain('(every day)')
-    const workday = modelScheduleSwitchNoticeText({ memberHandle: 'worker', whenText: '2026-11-03T18:00:00+08:00', incoming: qwen(), recurrence: { kind: 'workdays' } })
-    expect(workday).toContain('(on workdays)')
+    const workday = modelScheduleSwitchNoticeText({ memberHandle: 'worker', whenText: '2026-11-03T18:00:00+08:00', incoming: qwen(), recurrenceText: 'on workdays' })
+    expect(workday).toContain('schedule on workdays switches')
     const fallback = modelScheduleSwitchNoticeText({ memberHandle: 'worker', whenText: '2026-11-03T23:00:00+08:00', incoming: undefined })
     expect(fallback).toContain('pinned route')
   })

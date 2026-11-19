@@ -360,72 +360,66 @@
   justify-self: start;
 }
 
-/* One window entry: the time/route row plus its recurrence line. The
-   recurrence line only appears under every window, never as a separate
-   field, so a pattern reads as part of the window it belongs to. */
-.scheduleEntry {
-  display: grid;
-  gap: 4px;
-}
-.recurrenceRow {
-  align-items: center;
+/* One schedule row's recurrence line: the kind dropdown plus the parameters
+   that kind demands, spanning the whole row under its first line and wrapping
+   as a unit so the 390px dialog reads it in order (dropdown, then parameters). */
+.scheduleRecurrence {
+  align-items: end;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-}
-.recurrenceLabel {
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
-  line-height: 18px;
+  gap: 6px 8px;
+  grid-column: 1 / -1;
 }
 .recurrenceTrigger {
-  min-width: 104px;
-  min-height: 28px;
-  padding: 2px 8px;
+  flex: none;
+  min-width: 96px;
 }
-.recurrenceParam {
-  align-items: center;
-  color: var(--dsw-alias-label-secondary);
-  display: inline-flex;
-  font-size: 12px;
+.recurrenceWeekdays {
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
-  line-height: 18px;
 }
-.recurrenceInput {
-  width: 48px;
-}
-.recurrenceInputDate {
-  width: 104px;
-}
-.weekdayRow {
-  display: inline-flex;
-  gap: 2px;
-}
-.weekdayChip {
-  background: transparent;
+.recurrenceChip {
+  align-items: center;
+  background: var(--dsw-alias-bg-layer-1);
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: var(--dsw-radius-sm, 6px);
+  box-sizing: border-box;
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
+  display: inline-flex;
   font-size: 12px;
-  line-height: 16px;
-  padding: 2px 6px;
+  justify-content: center;
+  line-height: 18px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0 8px;
 }
-.weekdayChip[aria-pressed='true'] {
-  background: var(--dsw-alias-brand-primary);
-  border-color: var(--dsw-alias-brand-primary);
-  color: #fff;
+.recurrenceChip:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
 }
-.weekdayChip:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-.weekdayChip:focus-visible {
+.recurrenceChip:focus-visible {
   border-color: var(--dsw-alias-brand-primary);
   outline: none;
 }
-.recurrenceInvalid {
-  color: var(--dsw-alias-state-error-primary);
-  font-size: 12px;
-  line-height: 18px;
+.recurrenceChip:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.recurrenceChipOn,
+.recurrenceChipOn:hover {
+  background: var(--dsw-alias-interactive-bg-selected);
+  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-brand-primary);
+}
+/* A pressed chip's resting border is already brand, so border-color cannot
+   signal focus; the ring carries it instead. */
+.recurrenceChipOn:focus-visible {
+  box-shadow: 0 0 0 2px var(--dsw-alias-brand-primary);
+  outline: none;
+}
+.recurrenceChipOn:disabled {
+  cursor: default;
+  opacity: 0.5;
 }

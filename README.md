@@ -44,7 +44,7 @@ Install it globally if you want the `dsh` command for the steps below: `npm i -g
 Stop it, then install the Team bundle into the `web` profile:
 
 ```sh
-dsh plugin --profile web add @grantyuan/dsh-crew@0.2.0
+dsh plugin --profile web add @grantyuan/dsh-crew@0.2.2
 ```
 
 The version is pinned deliberately: pnpm skips releases published less than 24 hours ago, so an unpinned `@latest` install resolves to the previous release on release day. Until this package is published under its new name, install it from a local checkout (see below).
